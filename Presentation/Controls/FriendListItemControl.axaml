@@ -1,0 +1,36 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Chat_App.Presentation.Controls.FriendListItemControl">
+    
+    
+    <Grid ColumnDefinitions="Auto,*,Auto" Margin="4" >
+        <!-- 头像和在线状态 -->
+        <Ellipse Width="40" Height="40">
+            <Ellipse.Fill>
+                <ImageBrush Source=""/>
+            </Ellipse.Fill>
+            <Ellipse.Styles>
+                <Style Selector="Ellipse">
+                    <Setter Property="Stroke" Value="LightGray"/>
+                    <Setter Property="StrokeThickness" Value="1"/>
+                </Style>
+            </Ellipse.Styles>
+        </Ellipse>
+        <Canvas Grid.Column="0" Width="16" Height="16" 
+                VerticalAlignment="Bottom"
+                HorizontalAlignment="Left"
+                Margin="28 0 0 0">
+            <Ellipse Width="12" Height="12" Fill="Chartreuse"/>
+        </Canvas>
+
+        <!-- 基本信息 -->
+        <StackPanel Grid.Column="1" Margin="12 0">
+            <TextBlock Text="用户123" FontSize="14"/>
+            <TextBlock Text="测试12233232" 
+                       Foreground="Gray"
+                       TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
+
+    </Grid>
+    
+</UserControl>

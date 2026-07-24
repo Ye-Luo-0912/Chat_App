@@ -1,0 +1,49 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Controls.FriendsItemControl"
+             d:DesignWidth="200"
+             d:DesignHeight="60">
+    
+    <Border Name="HighlightBorder" CornerRadius="4">
+        <Grid Height="60" ColumnDefinitions="Auto,*" Margin="5">
+            <Image Source="" Width="40" Height="40" Margin="5">
+                <Image.Styles>
+                    <Style Selector="Image">
+                        <Setter Property="Opacity" Value="0.8"/>
+                        <Style.Animations>
+                            <Animation Duration="0:0:0.2">
+                                <KeyFrame Cue="0%">
+                                    <Setter Property="Opacity" Value="0.8"/>
+                                </KeyFrame>
+                                <KeyFrame Cue="100%">
+                                    <Setter Property="Opacity" Value="1"/>
+                                </KeyFrame>
+                            </Animation>
+                        </Style.Animations>
+                    </Style>
+                </Image.Styles>
+            </Image>
+            
+            <!-- 昵称与状态 -->
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                <TextBlock Text="测试" 
+                           FontWeight="Bold"
+                           Foreground="#212121"/>
+                <TextBlock Text="测试" 
+                           Foreground="#757575"
+                           FontSize="12"/>
+            </StackPanel>
+            
+            <Ellipse Grid.Column="0" Width="8" 
+                     Height="8"
+                     Fill="Chartreuse"
+                     VerticalAlignment="Bottom"
+                     HorizontalAlignment="Left"
+                     Margin="38 0 0 0"/>
+            
+        </Grid>
+    </Border>
+</UserControl>

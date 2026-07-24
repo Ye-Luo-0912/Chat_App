@@ -1,0 +1,63 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:models="clr-namespace:Infrastructure.Models;assembly=Infrastructure"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Controls.FriendsItemControl"
+             x:DataType="models:LocalFriend"
+             d:DesignWidth="220"
+             d:DesignHeight="60">
+
+    <Border Name="HighlightBorder" CornerRadius="8" Padding="4 2">
+        <Grid Height="56" ColumnDefinitions="Auto,*,Auto">
+            <Border Width="40" Height="40" CornerRadius="20" Background="#DBEAFE"
+                    VerticalAlignment="Center" Margin="4 0 10 0">
+                <Panel>
+                    <TextBlock Text="{Binding Initial}"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               FontWeight="SemiBold"
+                               Foreground="#1D4ED8"/>
+                    <Ellipse Width="10" Height="10"
+                             HorizontalAlignment="Right"
+                             VerticalAlignment="Bottom"
+                             Margin="0 0 1 1"
+                             Stroke="White"
+                             StrokeThickness="1.5"
+                             Fill="#22C55E"
+                             IsVisible="{Binding IsOnline}"/>
+                    <Ellipse Width="10" Height="10"
+                             HorizontalAlignment="Right"
+                             VerticalAlignment="Bottom"
+                             Margin="0 0 1 1"
+                             Stroke="White"
+                             StrokeThickness="1.5"
+                             Fill="#D1D5DB"
+                             IsVisible="{Binding IsOffline}"/>
+                </Panel>
+            </Border>
+
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                <TextBlock Text="{Binding Title}"
+                           FontWeight="SemiBold"
+                           FontSize="14"
+                           Foreground="#111827"
+                           TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding Subtitle}"
+                           Foreground="#6B7280"
+                           FontSize="12"
+                           TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="2"
+                        Orientation="Horizontal"
+                        Spacing="4"
+                        VerticalAlignment="Top"
+                        Margin="4 8 4 0">
+                <TextBlock Text="{Binding PinGlyph}" FontSize="12"/>
+                <TextBlock Text="{Binding MuteGlyph}" FontSize="12"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

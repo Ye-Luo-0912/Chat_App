@@ -1,0 +1,86 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Shell"
+             xmlns:sessions="clr-namespace:Core.Contracts.Sessions;assembly=Core"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Views.Shell.SettingsView"
+             x:DataType="vm:SettingsViewModel"
+             Background="#F8FAFC">
+
+    <DockPanel Margin="24">
+        <StackPanel DockPanel.Dock="Top" Spacing="8" Margin="0 0 0 16">
+            <TextBlock Text="设置"
+                       FontSize="22"
+                       FontWeight="Bold"
+                       Foreground="#0F172A"/>
+            <TextBlock Text="{Binding CurrentUserDisplay}"
+                       FontSize="13"
+                       Foreground="#64748B"/>
+            <TextBlock Text="{Binding StatusText}"
+                       FontSize="12"
+                       Foreground="#94A3B8"/>
+        </StackPanel>
+
+        <StackPanel DockPanel.Dock="Bottom"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    Margin="0 16 0 0"
+                    HorizontalAlignment="Right">
+            <Button Content="刷新"
+                    Command="{Binding RefreshCommand}"
+                    Padding="14 8"
+                    CornerRadius="8"/>
+            <Button Content="下线其他设备"
+                    Command="{Binding RevokeOthersCommand}"
+                    Padding="14 8"
+                    CornerRadius="8"
+                    Background="#FEE2E2"
+                    Foreground="#991B1B"/>
+        </StackPanel>
+
+        <Border Background="White"
+                CornerRadius="12"
+                Padding="12"
+                BorderBrush="#E2E8F0"
+                BorderThickness="1">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top"
+                           Text="登录设备"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Margin="4 4 4 12"
+                           Foreground="#1E293B"/>
+                <ListBox ItemsSource="{Binding Devices}"
+                         BorderThickness="0"
+                         Background="Transparent">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="sessions:SessionDeviceDto">
+                            <Grid ColumnDefinitions="*,Auto" Margin="4 8">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{Binding Title}"
+                                               FontWeight="SemiBold"
+                                               Foreground="#0F172A"/>
+                                    <TextBlock Text="{Binding Subtitle}"
+                                               FontSize="12"
+                                               Foreground="#64748B"
+                                               TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        Content="下线"
+                                        VerticalAlignment="Center"
+                                        Margin="12 0 0 0"
+                                        Padding="10 6"
+                                        CornerRadius="8"
+                                        Command="{Binding $parent[ListBox].((vm:SettingsViewModel)DataContext).RevokeDeviceCommand}"
+                                        CommandParameter="{Binding}"
+                                        IsVisible="{Binding !IsCurrent}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+    </DockPanel>
+</UserControl>

@@ -1,0 +1,648 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Friends"
+             xmlns:models="clr-namespace:Infrastructure.Models;assembly=Infrastructure"
+             mc:Ignorable="d"
+             d:DesignWidth="860"
+             d:DesignHeight="600"
+             x:Class="Chat_App.Presentation.Views.Friends.FriendsView"
+             x:DataType="vm:FriendsViewModel">
+
+    <UserControl.Styles>
+
+        <!-- ── Tab 按钮 ─────────────────────────────────────── -->
+        <Style Selector="Button.tabBtn">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="18 10"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Foreground" Value="#B08090"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="CornerRadius" Value="8"/>
+        </Style>
+        <Style Selector="Button.tabBtn:pointerover">
+            <Setter Property="Background" Value="#FFF0F4"/>
+            <Setter Property="Foreground" Value="#C9527A"/>
+        </Style>
+        <Style Selector="Button.tabBtn.active">
+            <Setter Property="Background" Value="#FDDDE6"/>
+            <Setter Property="Foreground" Value="#C9527A"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <!-- ── 子切换按钮（收到/发出) ─────────────────────── -->
+        <Style Selector="Button.subTabBtn">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0 0 0 2"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Padding" Value="14 8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Foreground" Value="#B08090"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="CornerRadius" Value="0"/>
+        </Style>
+        <Style Selector="Button.subTabBtn:pointerover">
+            <Setter Property="Foreground" Value="#C9527A"/>
+        </Style>
+        <Style Selector="Button.subTabBtn.active">
+            <Setter Property="BorderBrush" Value="#E05580"/>
+            <Setter Property="Foreground" Value="#C9527A"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <!-- ── 操作按钮（同意/拒绝/解除) ─────────────────── -->
+        <Style Selector="Button.actionPrimary">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="16 7"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Background">
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                    <GradientStop Color="#F06495" Offset="0"/>
+                    <GradientStop Color="#E05580" Offset="1"/>
+                </LinearGradientBrush>
+            </Setter>
+        </Style>
+        <Style Selector="Button.actionSecondary">
+            <Setter Property="Background" Value="#FFF1F2"/>
+            <Setter Property="BorderBrush" Value="#FFE4E6"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#C9527A"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="16 7"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style Selector="Button.actionSecondary:pointerover">
+            <Setter Property="Background" Value="#FFE4E6"/>
+        </Style>
+
+        <!-- ── 卡片 ─────────────────────────────────────────── -->
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="BoxShadow" Value="0 2 12 #10000000"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="0 0 0 10"/>
+        </Style>
+        <Style Selector="Border.card:pointerover">
+            <Setter Property="BoxShadow" Value="0 4 16 #1AC0667A"/>
+        </Style>
+
+    </UserControl.Styles>
+
+    <!-- ═══════════════════════════════════════════════════ -->
+    <!-- 主根布局：左侧导航 + 右侧内容                        -->
+    <!-- ═══════════════════════════════════════════════════ -->
+    <Grid ColumnDefinitions="220,*" Background="#FFF8FB">
+
+        <!-- ══ 左侧：粉色渐变导航栏 ══════════════════════════ -->
+        <Border Grid.Column="0">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="#FDDDE6" Offset="0"/>
+                    <GradientStop Color="#FFF0F6" Offset="1"/>
+                </LinearGradientBrush>
+            </Border.Background>
+
+            <DockPanel>
+                <!-- 顶部标题 -->
+                <Border DockPanel.Dock="Top" Padding="20 22 20 16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="通讯录"
+                                   FontSize="20"
+                                   FontWeight="Bold"
+                                   Foreground="#5C2B3E"/>
+                        <TextBlock Text="管理你的好友与关系"
+                                   FontSize="11"
+                                   Foreground="#B08090"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 分隔线 -->
+                <Border DockPanel.Dock="Top" Height="1" Background="#FFD6E3" Margin="16 0"/>
+
+                <!-- 导航菜单 -->
+                <StackPanel DockPanel.Dock="Top" Spacing="4" Margin="12 16 12 0">
+
+                    <!-- 好友列表 -->
+                    <Button Classes="tabBtn"
+                            Classes.active="{Binding IsFriendsTab}"
+                            Command="{Binding SwitchToFriendsCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <PathIcon Data="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"
+                                      Width="18" Height="18" Foreground="#C9527A"/>
+                            <TextBlock Text="我的好友" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- 好友申请 -->
+                    <Button Classes="tabBtn"
+                            Classes.active="{Binding IsRequestsTab}"
+                            Command="{Binding SwitchToRequestsCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <PathIcon Data="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+                                      Width="18" Height="18" Foreground="#C9527A"/>
+                            <TextBlock Text="好友申请" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- 黑名单 -->
+                    <Button Classes="tabBtn"
+                            Classes.active="{Binding IsBlockedTab}"
+                            Command="{Binding SwitchToBlockedCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <PathIcon Data="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+                                      Width="18" Height="18" Foreground="#C9527A"/>
+                            <TextBlock Text="黑名单" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                </StackPanel>
+
+                <!-- 底部：添加好友按钮 -->
+                <Border DockPanel.Dock="Bottom" Margin="12 0 12 20">
+                    <Button Classes="actionPrimary"
+                            Command="{Binding ShowAddFriendPanelCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <PathIcon Data="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"
+                                      Width="16" Height="16" Foreground="White"/>
+                            <TextBlock Text="添加好友"/>
+                        </StackPanel>
+                    </Button>
+                </Border>
+
+            </DockPanel>
+        </Border>
+
+        <!-- 左右分隔线 -->
+        <Border Grid.Column="0" HorizontalAlignment="Right" Width="1" Background="#FFD6E3"/>
+
+        <!-- ══ 右侧：内容区 ════════════════════════════════════ -->
+        <Grid Grid.Column="1">
+
+            <!-- ─── 页签 1：好友列表 ─────────────────────────── -->
+            <Grid IsVisible="{Binding IsFriendsTab}"
+                  RowDefinitions="Auto,*,Auto"
+                  Margin="24 24 24 16">
+
+                <!-- 搜索栏 + 说明 -->
+                <StackPanel Grid.Row="0" Spacing="10" Margin="0 0 0 16">
+                    <TextBlock Text="我的好友"
+                               FontSize="18"
+                               FontWeight="Bold"
+                               Foreground="#5C2B3E"/>
+                    <TextBox Text="{Binding SearchText}"
+                             PlaceholderText="搜索好友（姓名、备注）"
+                             Height="40"
+                             FontSize="14"
+                             CornerRadius="20"
+                             BorderBrush="#FFE4E6"
+                             BorderThickness="1"
+                             Background="#FFF8FB"
+                             Foreground="#881337"
+                             SelectionBrush="#FDA4AF"
+                             CaretBrush="#E11D48"
+                             Padding="14 0"/>
+                </StackPanel>
+
+                <!-- 好友列表 -->
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+
+                    <ItemsControl ItemsSource="{Binding FilteredFriends}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="models:LocalFriend">
+                                <Border Classes="card">
+                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                        <!-- 头像 -->
+                                        <Border Grid.Column="0"
+                                                Width="46" Height="46"
+                                                CornerRadius="23"
+                                                BoxShadow="0 2 8 #20C06080"
+                                                Margin="0 0 14 0">
+                                            <Border.Background>
+                                                <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                                    <GradientStop Color="#F9A8C9" Offset="0"/>
+                                                    <GradientStop Color="#F472B6" Offset="1"/>
+                                                </LinearGradientBrush>
+                                            </Border.Background>
+                                            <TextBlock Text="{Binding Initial}"
+                                                       FontSize="18"
+                                                       FontWeight="Bold"
+                                                       Foreground="White"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+
+                                        <!-- 姓名 + 备注 -->
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                            <TextBlock Text="{Binding FriendName}"
+                                                       FontSize="15"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="#3B1A2B"/>
+                                            <TextBlock Text="{Binding Note, FallbackValue='暂无备注'}"
+                                                       FontSize="12"
+                                                       Foreground="#B08090"/>
+                                        </StackPanel>
+
+                                        <!-- 操作按钮 -->
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                            <Button Classes="actionPrimary"
+                                                    Content="发消息"
+                                                    Command="{Binding $parent[UserControl].((vm:FriendsViewModel)DataContext).SendMessageCommand}"
+                                                    FontSize="12"
+                                                    Padding="12 6"/>
+                                            <Button Classes="actionSecondary"
+                                                    Content="删除"
+                                                    Command="{Binding $parent[UserControl].((vm:FriendsViewModel)DataContext).DeleteFriendCommand}"
+                                                    CommandParameter="{Binding}"
+                                                    FontSize="12"
+                                                    Padding="12 6"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <!-- 空状态 -->
+                <StackPanel Grid.Row="1"
+                            IsVisible="{Binding !FilteredFriends.Count}"
+                            VerticalAlignment="Center"
+                            HorizontalAlignment="Center"
+                            Spacing="12"
+                            Opacity="0.45">
+                    <PathIcon Data="{StaticResource FriendsIcon}"
+                              Width="56" Height="56"
+                              Foreground="#D4899F"/>
+                    <TextBlock Text="还没有好友，去添加一个吧 ♡"
+                               FontSize="15"
+                               Foreground="#C08098"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+
+            </Grid>
+
+            <!-- ─── 页签 2：好友申请 ─────────────────────────── -->
+            <Grid IsVisible="{Binding IsRequestsTab}"
+                  RowDefinitions="Auto,Auto,*"
+                  Margin="24 24 24 16">
+
+                <TextBlock Grid.Row="0"
+                           Text="好友申请"
+                           FontSize="18"
+                           FontWeight="Bold"
+                           Foreground="#5C2B3E"
+                           Margin="0 0 0 12"/>
+
+                <!-- 收到 / 发出 子切换 -->
+                <Border Grid.Row="1"
+                        Background="White"
+                        CornerRadius="10"
+                        Margin="0 0 0 14"
+                        Padding="4">
+                    <StackPanel Orientation="Horizontal" Spacing="0">
+                        <Button Classes="subTabBtn"
+                                Classes.active="{Binding ShowIncoming}"
+                                Content="收到的申请"
+                                Command="{Binding ShowIncomingCommand}"/>
+                        <Border Width="1" Background="#FFE4E6" Margin="4 6"/>
+                        <Button Classes="subTabBtn"
+                                Classes.active="{Binding ShowOutgoing}"
+                                Content="发出的申请"
+                                Command="{Binding ShowOutgoingCommand}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 收到的申请列表 -->
+                <ScrollViewer Grid.Row="2"
+                              IsVisible="{Binding ShowIncoming}"
+                              VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <ItemsControl ItemsSource="{Binding IncomingRequests}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:LocalFriendRequest">
+                                    <Border Classes="card">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <!-- 头像 -->
+                                            <Border Grid.Column="0"
+                                                    Width="46" Height="46"
+                                                    CornerRadius="23"
+                                                    BoxShadow="0 2 8 #20C06080"
+                                                    Margin="0 0 14 0">
+                                                <Border.Background>
+                                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                                        <GradientStop Color="#FDDDE6" Offset="0"/>
+                                                        <GradientStop Color="#F9A8C9" Offset="1"/>
+                                                    </LinearGradientBrush>
+                                                </Border.Background>
+                                                <TextBlock Text="{Binding RequesterInitial}"
+                                                           FontSize="18"
+                                                           FontWeight="Bold"
+                                                           Foreground="#C9527A"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+
+                                            <!-- 名字 + 留言 -->
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                                <TextBlock Text="{Binding RequesterName}"
+                                                           FontSize="15"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="#3B1A2B"/>
+                                                <TextBlock Text="{Binding Message, FallbackValue='（无附加消息）'}"
+                                                           FontSize="12"
+                                                           Foreground="#B08090"
+                                                           TextWrapping="NoWrap"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxWidth="240"/>
+                                            </StackPanel>
+
+                                            <!-- 接受 / 拒绝 -->
+                                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                                <Button Classes="actionPrimary"
+                                                        Content="同意"
+                                                        Command="{Binding $parent[UserControl].((vm:FriendsViewModel)DataContext).AcceptRequestCommand}"
+                                                        CommandParameter="{Binding}"
+                                                        FontSize="12"
+                                                        Padding="14 6"/>
+                                                <Button Classes="actionSecondary"
+                                                        Content="拒绝"
+                                                        Command="{Binding $parent[UserControl].((vm:FriendsViewModel)DataContext).DeclineRequestCommand}"
+                                                        CommandParameter="{Binding}"
+                                                        FontSize="12"
+                                                        Padding="14 6"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- 空状态（收到） -->
+                        <StackPanel IsVisible="{Binding !IncomingRequests.Count}"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Center"
+                                    Spacing="10"
+                                    Opacity="0.4"
+                                    Margin="0 60 0 0">
+                            <PathIcon Data="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm-1-7v2h2v-2h-2zm0-8v6h2V7h-2z"
+                                      Width="48" Height="48" Foreground="#D4899F"/>
+                            <TextBlock Text="暂无收到的请求"
+                                       FontSize="14"
+                                       Foreground="#C08098"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- 发出的申请列表 -->
+                <ScrollViewer Grid.Row="2"
+                              IsVisible="{Binding ShowOutgoing}"
+                              VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <ItemsControl ItemsSource="{Binding OutgoingRequests}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:LocalFriendRequest">
+                                    <Border Classes="card">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <Border Grid.Column="0"
+                                                    Width="46" Height="46"
+                                                    CornerRadius="23"
+                                                    BoxShadow="0 2 8 #20C06080"
+                                                    Margin="0 0 14 0">
+                                                <Border.Background>
+                                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                                        <GradientStop Color="#FDDDE6" Offset="0"/>
+                                                        <GradientStop Color="#F9A8C9" Offset="1"/>
+                                                    </LinearGradientBrush>
+                                                </Border.Background>
+                                                <TextBlock Text="{Binding TargetInitial}"
+                                                           FontSize="18"
+                                                           FontWeight="Bold"
+                                                           Foreground="#C9527A"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                                <TextBlock Text="{Binding TargetUserName}"
+                                                           FontSize="15"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="#3B1A2B"/>
+                                                <TextBlock Text="{Binding Message, FallbackValue='（无附加消息）'}"
+                                                           FontSize="12"
+                                                           Foreground="#B08090"/>
+                                            </StackPanel>
+
+                                            <!-- 等待状态标签 -->
+                                            <Border Grid.Column="2"
+                                                    Background="#FFF1F2"
+                                                    BorderBrush="#FFE4E6"
+                                                    BorderThickness="1"
+                                                    CornerRadius="20"
+                                                    Padding="12 5"
+                                                    VerticalAlignment="Center">
+                                                <TextBlock Text="等待回应"
+                                                           FontSize="12"
+                                                           Foreground="#C9527A"/>
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- 空状态（发出） -->
+                        <StackPanel IsVisible="{Binding !OutgoingRequests.Count}"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Center"
+                                    Spacing="10"
+                                    Opacity="0.4"
+                                    Margin="0 60 0 0">
+                            <PathIcon Data="M22 12A10 10 0 1 1 12 2a10 10 0 0 1 10 10zm-2 0a8 8 0 1 0-8 8 8 8 0 0 0 8-8zM13 7v4.586l2.707 2.707-1.414 1.414L11 12.414V7z"
+                                      Width="48" Height="48" Foreground="#D4899F"/>
+                            <TextBlock Text="暂无发出的请求"
+                                       FontSize="14"
+                                       Foreground="#C08098"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+            </Grid>
+
+            <!-- ─── 页签 3：黑名单 ───────────────────────────── -->
+            <Grid IsVisible="{Binding IsBlockedTab}"
+                  RowDefinitions="Auto,*"
+                  Margin="24 24 24 16">
+
+                <StackPanel Grid.Row="0" Spacing="4" Margin="0 0 0 16">
+                    <TextBlock Text="黑名单"
+                               FontSize="18"
+                               FontWeight="Bold"
+                               Foreground="#5C2B3E"/>
+                    <TextBlock Text="黑名单内的用户无法向你发送消息或好友申请"
+                               FontSize="12"
+                               Foreground="#B08090"/>
+                </StackPanel>
+
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <ItemsControl ItemsSource="{Binding BlockedUsers}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:LocalBlockedUser">
+                                    <Border Classes="card">
+                                        <Grid ColumnDefinitions="Auto,*,Auto">
+                                            <!-- 灰色头像 -->
+                                            <Border Grid.Column="0"
+                                                    Width="46" Height="46"
+                                                    CornerRadius="23"
+                                                    Background="#E5E7EB"
+                                                    Margin="0 0 14 0">
+                                                <TextBlock Text="{Binding Initial}"
+                                                           FontSize="18"
+                                                           FontWeight="Bold"
+                                                           Foreground="#9CA3AF"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"/>
+                                            </Border>
+
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                                                <TextBlock Text="{Binding BlockedUserName}"
+                                                           FontSize="15"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="#6B7280"/>
+                                                <TextBlock Text="{Binding BlockedAt, StringFormat='拉黑于 {0:MM/dd HH:mm}'}"
+                                                           FontSize="12"
+                                                           Foreground="#9CA3AF"/>
+                                            </StackPanel>
+
+                                            <Button Grid.Column="2"
+                                                    Classes="actionSecondary"
+                                                    Content="解除拉黑"
+                                                    Command="{Binding $parent[UserControl].((vm:FriendsViewModel)DataContext).UnblockCommand}"
+                                                    CommandParameter="{Binding}"
+                                                    FontSize="12"
+                                                    Padding="14 6"
+                                                    VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- 空状态 -->
+                        <StackPanel IsVisible="{Binding !BlockedUsers.Count}"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Center"
+                                    Spacing="10"
+                                    Opacity="0.4"
+                                    Margin="0 60 0 0">
+                            <PathIcon Data="M12 1a11 11 0 1 0 11 11A11 11 0 0 0 12 1zm0 20a9 9 0 0 1-6.37-2.63L19.37 5.63A9 9 0 0 1 12 21zM5.63 18.37 18.37 5.63A9 9 0 0 0 5.63 18.37z"
+                                      Width="48" Height="48" Foreground="#D4899F"/>
+                            <TextBlock Text="黑名单为空"
+                                       FontSize="14"
+                                       Foreground="#C08098"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+
+            </Grid>
+
+            <!-- ═══ 添加好友面板（遮罩层）═══════════════════════ -->
+            <Panel IsVisible="{Binding IsAddFriendPanelOpen}">
+                <!-- 半透明遮罩 -->
+                <Border Background="#80000000"
+                        PointerPressed="OnOverlayPressed"/>
+
+                <!-- 居中弹窗 -->
+                <Border HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Width="340"
+                        CornerRadius="16"
+                        Background="#FFFBFE"
+                        BoxShadow="0 10 40 #30C0667A"
+                        Padding="32 28"
+                        ClipToBounds="True">
+                    <StackPanel Spacing="18">
+                        <!-- 弹窗标题 -->
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="添加好友"
+                                       FontSize="18"
+                                       FontWeight="Bold"
+                                       Foreground="#5C2B3E"
+                                       HorizontalAlignment="Center"/>
+                            <TextBlock Text="输入对方 ID 发送好友申请"
+                                       FontSize="12"
+                                       Foreground="#B08090"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- 用户 ID 输入 -->
+                        <TextBox Text="{Binding AddFriendId}"
+                                 PlaceholderText="用户 ID"
+                                 Height="44"
+                                 FontSize="14"
+                                 CornerRadius="8"
+                                 BorderBrush="#FFE4E6"
+                                 BorderThickness="1"
+                                 Background="#FFF1F2"
+                                 Foreground="#881337"
+                                 SelectionBrush="#FDA4AF"
+                                 CaretBrush="#E11D48"/>
+
+                        <!-- 附加消息 -->
+                        <TextBox Text="{Binding AddFriendMessage}"
+                                 PlaceholderText="附加消息（可选）"
+                                 Height="72"
+                                 FontSize="14"
+                                 CornerRadius="8"
+                                 BorderBrush="#FFE4E6"
+                                 BorderThickness="1"
+                                 Background="#FFF1F2"
+                                 Foreground="#881337"
+                                 SelectionBrush="#FDA4AF"
+                                 CaretBrush="#E11D48"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"/>
+
+                        <!-- 按钮行 -->
+                        <Grid ColumnDefinitions="*,12,*">
+                            <Button Grid.Column="0"
+                                    Classes="actionSecondary"
+                                    Content="取消"
+                                    Command="{Binding CloseAddFriendPanelCommand}"
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Center"
+                                    Padding="0 11"/>
+                            <Button Grid.Column="2"
+                                    Classes="actionPrimary"
+                                    Content="发送申请"
+                                    Command="{Binding SendAddFriendCommand}"
+                                    HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Center"
+                                    Padding="0 11"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </Panel>
+
+        </Grid>
+    </Grid>
+</UserControl>

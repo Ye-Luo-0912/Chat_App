@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <Folder Include="tools\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Compile Remove="Interfaces\IChatSessionClient .cs" />
+      <Compile Remove="Interfaces\ICurrentUserState .cs" />
+    </ItemGroup>
+
+    <!-- UI/ViewModels should reference Core directly -->
+
+</Project>

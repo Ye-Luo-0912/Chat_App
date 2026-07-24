@@ -1,0 +1,113 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Shell"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Views.Shell.HomeView"
+             x:DataType="vm:HomeViewModel">
+
+    <Grid ColumnDefinitions="64,*" Background="#F0F2F5">
+
+        <!-- ===== 左侧导航栏 ===== -->
+        <Border Grid.Column="0" Background="#1E293B">
+            <Grid RowDefinitions="*,Auto">
+                <!-- 主要导航按钮 -->
+                <StackPanel Grid.Row="0" Spacing="4" Margin="0 12 0 0">
+
+                    <!-- 通讯录 -->
+                    <RadioButton GroupName="NavGroup"
+                                 Command="{Binding NavigateToContactsCommand}"
+                                 IsChecked="{Binding IsContactsSelected}"
+                                 Classes="navBtn"
+                                 ToolTip.Tip="好友界面"
+                                 ToolTip.Placement="Right">
+                        <PathIcon Width="24" Height="24"
+                                  Data="{StaticResource ContactsIcon}"
+                                  Foreground="#94A3B8"/>
+                    </RadioButton>
+
+                    <!-- 聊天 -->
+                    <RadioButton GroupName="NavGroup"
+                              Command="{Binding NavigateToFriendsCommand}"
+                              IsChecked="{Binding IsFriendsSelected}"
+                              Classes="navBtn"
+                              ToolTip.Tip="聊天"
+                              ToolTip.Placement="Right">
+                        <PathIcon Width="24" Height="24"
+                                  Data="{StaticResource FriendsIcon}"
+                                  Foreground="#94A3B8"/>
+                    </RadioButton>
+
+                </StackPanel>
+
+                <!-- 底部设置按钮 -->
+                <Button Grid.Row="1"
+                        Margin="0 0 0 16"
+                        Classes="navBtn"
+                        ToolTip.Tip="设置"
+                        ToolTip.Placement="Right">
+                    <Button.Flyout>
+                        <MenuFlyout Placement="RightEdgeAlignedBottom">
+                            <MenuItem Header="个人信息" Command="{Binding NavigateToProfileCommand}" />
+                            <MenuItem Header="系统设置" Command="{Binding NavigateToSettingsCommand}" />
+                            <MenuItem Header="检查更新" />
+                            <Separator />
+                            <MenuItem Header="退出登录" Command="{Binding LogoutCommand}" />
+                        </MenuFlyout>
+                    </Button.Flyout>
+                    <PathIcon Width="24" Height="24"
+                              Data="{StaticResource SettingsIcon}"
+                              Foreground="#94A3B8"/>
+                </Button>
+            </Grid>
+        </Border>
+
+        <!-- ===== 主内容区域 ===== -->
+        <TransitioningContentControl Grid.Column="1"
+                        Content="{Binding CurrentPage}"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch">
+
+        </TransitioningContentControl>
+    </Grid>
+
+    <UserControl.Styles>
+        <!-- 导航按钮基础样式 -->
+        <Style Selector="RadioButton.navBtn, Button.navBtn">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Margin" Value="6 2"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Width" Value="48"/>
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border Background="{TemplateBinding Background}"
+                            CornerRadius="8"
+                            Width="48" Height="48">
+                        <ContentPresenter
+                            Name="PART_ContentPresenter"
+                            Content="{TemplateBinding Content}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+        </Style>
+
+        <!-- 悬停状态 -->
+        <Style Selector="RadioButton.navBtn:pointerover, Button.navBtn:pointerover">
+            <Setter Property="Background" Value="#334155"/>
+        </Style>
+
+        <!-- 选中状态 -->
+        <Style Selector="RadioButton.navBtn:checked">
+            <Setter Property="Background" Value="#3B82F6"/>
+        </Style>
+        <Style Selector="RadioButton.navBtn:checked PathIcon">
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+    </UserControl.Styles>
+</UserControl>

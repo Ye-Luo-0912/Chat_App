@@ -1,0 +1,279 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Chat"
+             xmlns:models="clr-namespace:Chat_App.Models"
+             xmlns:dto="clr-namespace:Core.Models.DTO;assembly=Core"
+             xmlns:conv="clr-namespace:Chat_App.Presentation.Converters"
+             mc:Ignorable="d"
+             d:DesignWidth="600"
+             d:DesignHeight="500"
+             x:Class="Chat_App.Presentation.Views.Chat.MessageView"
+             x:Name="Root"
+             x:DataType="vm:MessageViewModel"
+             Background="White">
+
+    <UserControl.Resources>
+        <conv:BoolToAlignmentConverter x:Key="BoolToAlignment"/>
+        <conv:BoolToColumnConverter x:Key="BoolToColumn"/>
+        <conv:BoolToBrushConverter x:Key="BoolToBrush"
+                                   TrueBrush="#3B82F6"
+                                   FalseBrush="#E5E7EB"/>
+    </UserControl.Resources>
+
+    <Grid RowDefinitions="Auto,*,Auto">
+        <Border Grid.Row="0"
+                Background="#F8FAFC"
+                BorderBrush="#E5E7EB"
+                BorderThickness="0 0 0 1"
+                Padding="16 12">
+            <StackPanel Spacing="2">
+                <TextBlock Text="{Binding PeerTitle}"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Foreground="#111827"/>
+                <TextBlock Text="{Binding PeerStatusText}"
+                           FontSize="12"
+                           Foreground="#6B7280"/>
+                <TextBlock Text="{Binding TypingStatusText}"
+                           FontSize="12"
+                           Foreground="#3B82F6"
+                           IsVisible="{Binding IsPeerTyping}"/>
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="16">
+            <ItemsControl ItemsSource="{Binding Messages}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="models:Message">
+                        <Grid HorizontalAlignment="{Binding IsSentByMe, Converter={StaticResource BoolToAlignment}}"
+                              ColumnDefinitions="*,Auto"
+                              Margin="0 4">
+                            <StackPanel Grid.Column="{Binding IsSentByMe, Converter={StaticResource BoolToColumn}}"
+                                      Margin="5"
+                                      HorizontalAlignment="{Binding IsSentByMe, Converter={StaticResource BoolToAlignment}}">
+                                <Border Background="{Binding IsSentByMe, Converter={StaticResource BoolToBrush}}"
+                                        CornerRadius="16"
+                                        Padding="14 10"
+                                        MaxWidth="360"
+                                        BoxShadow="0 1 4 #10000000">
+                                    <Border.ContextFlyout>
+                                        <MenuFlyout>
+                                            <MenuItem Header="回复"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).ReplyToMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="转发"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).ForwardMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="编辑"
+                                                      IsVisible="{Binding IsSentByMe}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).BeginEditMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="撤回"
+                                                      IsVisible="{Binding IsSentByMe}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).RecallMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                        </MenuFlyout>
+                                    </Border.ContextFlyout>
+                                    <StackPanel Spacing="6">
+                                        <Border Background="#F1F5F9"
+                                                CornerRadius="8"
+                                                Padding="8 6"
+                                                IsVisible="{Binding HasReply}">
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Text="回复"
+                                                           FontSize="11"
+                                                           Foreground="#64748B"/>
+                                                <TextBlock Text="{Binding ReplyDisplayText}"
+                                                           FontSize="12"
+                                                           Foreground="#334155"
+                                                           TextWrapping="Wrap"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxLines="2"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Background="#EEF2FF"
+                                                CornerRadius="8"
+                                                Padding="8 6"
+                                                IsVisible="{Binding HasForward}">
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Text="转发"
+                                                           FontSize="11"
+                                                           Foreground="#6366F1"/>
+                                                <TextBlock Text="{Binding ForwardDisplayText}"
+                                                           FontSize="12"
+                                                           Foreground="#334155"
+                                                           TextWrapping="Wrap"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxLines="2"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <TextBlock Text="{Binding DisplayContent}"
+                                                   FontSize="14"
+                                                   TextWrapping="Wrap"
+                                                   Foreground="#1A1A2E"
+                                                   IsVisible="{Binding DisplayContent, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                        <ItemsControl ItemsSource="{Binding Attachments}"
+                                                      IsVisible="{Binding HasAttachments}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="dto:AttachmentRefDto">
+                                                    <Button Classes="attachment-link"
+                                                            HorizontalAlignment="Left"
+                                                            Padding="0"
+                                                            Background="Transparent"
+                                                            BorderThickness="0"
+                                                            Cursor="Hand"
+                                                            Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
+                                                            CommandParameter="{Binding}">
+                                                        <TextBlock Text="{Binding DisplayName}"
+                                                                   FontSize="13"
+                                                                   TextDecorations="Underline"
+                                                                   Foreground="#0F172A"
+                                                                   TextWrapping="Wrap"/>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <TextBlock Text="已编辑"
+                                                   FontSize="10"
+                                                   Foreground="#94A3B8"
+                                                   IsVisible="{Binding IsEdited}"
+                                                   HorizontalAlignment="Right"/>
+                                        <TextBlock Text="{Binding Timestamp, StringFormat='HH:mm'}"
+                                                   FontSize="10"
+                                                   Foreground="#999"
+                                                   HorizontalAlignment="Right"
+                                                   Margin="0 2 0 0"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <Border Grid.Row="2"
+                Background="White"
+                BorderBrush="#E5E7EB"
+                BorderThickness="0 1 0 0"
+                Padding="16 12">
+            <StackPanel Spacing="8">
+                <Grid ColumnDefinitions="*,Auto"
+                      IsVisible="{Binding HasReplyDraft}">
+                    <StackPanel Grid.Column="0" Spacing="2">
+                        <TextBlock Text="正在回复"
+                                   FontSize="11"
+                                   Foreground="#64748B"/>
+                        <TextBlock Text="{Binding ReplyDraftPreview}"
+                                   FontSize="12"
+                                   Foreground="#334155"
+                                   TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Content="取消"
+                            Command="{Binding ClearReplyDraftCommand}"
+                            Padding="10 4"
+                            FontSize="12"
+                            Background="Transparent"
+                            Foreground="#B91C1C"/>
+                </Grid>
+
+                <Grid ColumnDefinitions="*,Auto"
+                      IsVisible="{Binding HasEditDraft}">
+                    <StackPanel Grid.Column="0" Spacing="2">
+                        <TextBlock Text="正在编辑"
+                                   FontSize="11"
+                                   Foreground="#64748B"/>
+                        <TextBlock Text="{Binding EditDraftPreview}"
+                                   FontSize="12"
+                                   Foreground="#334155"
+                                   TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Content="取消"
+                            Command="{Binding ClearEditDraftCommand}"
+                            Padding="10 4"
+                            FontSize="12"
+                            Background="Transparent"
+                            Foreground="#B91C1C"/>
+                </Grid>
+
+                <Grid ColumnDefinitions="*,Auto"
+                      IsVisible="{Binding HasPendingAttachment}">
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding PendingAttachmentName, StringFormat='待发送附件: {0}'}"
+                               FontSize="12"
+                               Foreground="#475569"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"/>
+                    <Button Grid.Column="1"
+                            Content="移除"
+                            Command="{Binding ClearPendingAttachmentCommand}"
+                            Padding="10 4"
+                            FontSize="12"
+                            Background="Transparent"
+                            Foreground="#B91C1C"/>
+                </Grid>
+
+                <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                    <Button Grid.Column="0"
+                            Content="附件"
+                            Command="{Binding AttachFileCommand}"
+                            Margin="0 0 8 0"
+                            Padding="12 10"
+                            MinWidth="56"
+                            CornerRadius="12"
+                            Background="#F3F4F6"
+                            Foreground="#111827"
+                            VerticalAlignment="Bottom"/>
+
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBox Text="{Binding NewMessage, Mode=TwoWay}"
+                                 PlaceholderText="输入消息..."
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 VerticalAlignment="Center"
+                                 FontSize="14"
+                                 AcceptsReturn="True"
+                                 MaxHeight="100">
+                            <TextBox.KeyBindings>
+                                <KeyBinding Command="{Binding SendMessageCommand}"
+                                            Gesture="Ctrl+Enter"/>
+                            </TextBox.KeyBindings>
+                        </TextBox>
+                        <ProgressBar Maximum="100"
+                                     Value="{Binding UploadProgress}"
+                                     Height="4"
+                                     Margin="0 4 0 0"
+                                     IsVisible="{Binding IsUploading}"/>
+                    </StackPanel>
+
+                    <Button Grid.Column="2"
+                            Content="取消"
+                            Command="{Binding CancelUploadCommand}"
+                            Margin="8 0 0 0"
+                            Padding="12 10"
+                            IsVisible="{Binding IsUploading}"
+                            CornerRadius="12"
+                            Background="#FEE2E2"
+                            Foreground="#991B1B"
+                            VerticalAlignment="Bottom"/>
+
+                    <Button Grid.Column="3"
+                            Content="{Binding SendButtonText}"
+                            Command="{Binding SendMessageCommand}"
+                            Margin="10 0 0 0"
+                            Padding="20 10"
+                            MinWidth="72"
+                            CornerRadius="12"
+                            Background="#3B82F6"
+                            Foreground="White"
+                            FontWeight="SemiBold"
+                            VerticalAlignment="Bottom"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

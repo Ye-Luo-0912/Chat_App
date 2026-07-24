@@ -1,0 +1,252 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Auth"
+             mc:Ignorable="d" d:DesignWidth="400" d:DesignHeight="560"
+             x:Class="Chat_App.Presentation.Views.Auth.RegisterView"
+             x:DataType="vm:RegisterViewModel"
+             Background="Transparent">
+
+    <Border CornerRadius="16"
+            Background="#FFFBFE"
+            BoxShadow="0 8 40 #22C0667A"
+            Margin="18"
+            ClipToBounds="True">
+        <Grid RowDefinitions="Auto,*,Auto">
+
+            <!-- ===== 头部渐变 + 图标 ===== -->
+            <Panel Grid.Row="0" Height="168">
+                <Panel.Background>
+                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                        <GradientStop Color="#FDDDE6" Offset="0" />
+                        <GradientStop Color="#FDEEF5" Offset="0.6" />
+                        <GradientStop Color="#FFF8FB" Offset="1" />
+                    </LinearGradientBrush>
+                </Panel.Background>
+
+                <!-- 应用标题 -->
+                <TextBlock Text="青言"
+                           FontSize="20"
+                           FontWeight="Bold"
+                           Foreground="#C9527A"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Top"
+                           Margin="0,22,0,0"
+                           Opacity="0.85"/>
+
+                <!-- 头像圆圈 -->
+                <Border Width="82" Height="82"
+                        CornerRadius="41"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,-41"
+                        HorizontalAlignment="Center"
+                        BoxShadow="0 4 14 #35C06080">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                            <GradientStop Color="#F9A8C9" Offset="0"/>
+                            <GradientStop Color="#F472B6" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <!-- 注册用户图标 (person-add) -->
+                    <PathIcon Data="M15,14C12.33,14 7,15.33 7,18V20H23V18C23,15.33 17.67,14 15,14M1,10V12H9V10M15,12A4,4 0 0,0 19,8A4,4 0 0,0 15,4A4,4 0 0,0 11,8A4,4 0 0,0 15,12Z"
+                              Width="46" Height="46"
+                              Foreground="White"/>
+                </Border>
+            </Panel>
+
+            <!-- ===== 表单内容（双步切换） ===== -->
+            <Grid Grid.Row="1">
+
+                <!-- 第一步：邮箱 + 验证码 -->
+                <StackPanel Spacing="18"
+                            Margin="36,66,36,8"
+                            IsVisible="{Binding IsStepOne}">
+
+                    <StackPanel Spacing="2" HorizontalAlignment="Center">
+                        <TextBlock Text="创建新账号"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"
+                                   Foreground="#5C2B3E"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="请验证您的邮箱地址"
+                                   Foreground="#B08090"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+
+                    <TextBox Text="{Binding Email}"
+                             PlaceholderText="邮箱地址"
+                             Height="46"
+                             FontSize="15"
+                             CornerRadius="8"
+                             BorderBrush="#FFE4E6"
+                             BorderThickness="1"
+                             Background="#FFF1F2"
+                             Foreground="#881337"
+                             SelectionBrush="#FDA4AF"
+                             CaretBrush="#E11D48"/>
+
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0"
+                                 Text="{Binding VerificationCode}"
+                                 PlaceholderText="6位验证码"
+                                 MaxLength="6"
+                                 Height="46"
+                                 FontSize="15"
+                                 CornerRadius="8"
+                                 BorderBrush="#FFE4E6"
+                                 BorderThickness="1"
+                                 Background="#FFF1F2"
+                                 Foreground="#881337"
+                                 SelectionBrush="#FDA4AF"
+                                 CaretBrush="#E11D48"
+                                 Margin="0,0,10,0"/>
+
+                        <Button Grid.Column="1"
+                                Content="{Binding GetCodeButtonText}"
+                                Command="{Binding GetCodeCommand}"
+                                IsEnabled="{Binding IsGetCodeButtonEnabled}"
+                                Width="110"
+                                Height="46"
+                                FontSize="13"
+                                FontWeight="SemiBold"
+                                Foreground="#C9527A"
+                                Background="#FDEEF5"
+                                BorderBrush="#F9A8C9"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Cursor="Hand"/>
+                    </Grid>
+
+                    <TextBlock Text="{Binding ErrorMessage}"
+                               Foreground="#D05073"
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               HorizontalAlignment="Center"
+                               IsVisible="{Binding ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                </StackPanel>
+
+                <!-- 第二步：密码设置 -->
+                <StackPanel Spacing="18"
+                            Margin="36,66,36,8"
+                            IsVisible="{Binding IsStepTwo}">
+
+                    <StackPanel Spacing="2" HorizontalAlignment="Center">
+                        <TextBlock Text="设置密码"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"
+                                   Foreground="#5C2B3E"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="{Binding Email}"
+                                   Foreground="#B08090"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+
+                    <TextBox Text="{Binding Password}"
+                             PlaceholderText="请输入密码"
+                             PasswordChar="●"
+                             Height="46"
+                             FontSize="15"
+                             CornerRadius="8"
+                             BorderBrush="#FFE4E6"
+                             BorderThickness="1"
+                             Background="#FFF1F2"
+                             Foreground="#881337"
+                             SelectionBrush="#FDA4AF"
+                             CaretBrush="#E11D48"/>
+
+                    <TextBox Text="{Binding ConfirmPassword}"
+                             PlaceholderText="请再次输入密码"
+                             PasswordChar="●"
+                             Height="46"
+                             FontSize="15"
+                             CornerRadius="8"
+                             BorderBrush="#FFE4E6"
+                             BorderThickness="1"
+                             Background="#FFF1F2"
+                             Foreground="#881337"
+                             SelectionBrush="#FDA4AF"
+                             CaretBrush="#E11D48"/>
+
+                    <TextBlock Text="{Binding ErrorMessage}"
+                               Foreground="#D05073"
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               HorizontalAlignment="Center"
+                               IsVisible="{Binding ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- ===== 底部按钮 ===== -->
+            <StackPanel Grid.Row="2" Spacing="14" Margin="36,4,36,32">
+
+                <!-- 第一步按钮 -->
+                <Button Content="下一步"
+                        Command="{Binding NextStepCommand}"
+                        IsVisible="{Binding IsStepOne}"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Center"
+                        Foreground="White"
+                        FontSize="15"
+                        FontWeight="SemiBold"
+                        Padding="0 13"
+                        CornerRadius="10"
+                        Cursor="Hand">
+                    <Button.Background>
+                        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                            <GradientStop Color="#F06495" Offset="0"/>
+                            <GradientStop Color="#E05580" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Button.Background>
+                </Button>
+
+                <!-- 第二步按钮 -->
+                <Button Content="完成注册"
+                        Command="{Binding RegisterCommand}"
+                        IsVisible="{Binding IsStepTwo}"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Center"
+                        Foreground="White"
+                        FontSize="15"
+                        FontWeight="SemiBold"
+                        Padding="0 13"
+                        CornerRadius="10"
+                        Cursor="Hand">
+                    <Button.Background>
+                        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                            <GradientStop Color="#F06495" Offset="0"/>
+                            <GradientStop Color="#E05580" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Button.Background>
+                </Button>
+
+                <!-- 辅助链接 -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="18">
+                    <Button Content="返回上一步"
+                            Command="{Binding BackToStepOneCommand}"
+                            IsVisible="{Binding IsStepTwo}"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Foreground="#C06080"
+                            FontSize="13"
+                            Opacity="0.8"
+                            Cursor="Hand"/>
+
+                    <Button Content="已有账号？返回登录"
+                            Command="{Binding GoToLoginCommand}"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="0"
+                            Foreground="#C06080"
+                            FontSize="13"
+                            Opacity="0.8"
+                            Cursor="Hand"/>
+                </StackPanel>
+            </StackPanel>
+
+        </Grid>
+    </Border>
+</UserControl>

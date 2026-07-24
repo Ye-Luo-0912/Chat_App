@@ -1,0 +1,66 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Chat_App.Presentation.ViewModels.Shell"
+        xmlns:svc="using:Chat_App.Services"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DesignWidth="900"
+        d:DesignHeight="600"
+        x:Class="Chat_App.Presentation.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="Chat App"
+        WindowStartupLocation="CenterScreen"
+        Background="#F0F2F5"
+        TransparencyLevelHint="None">
+
+    <Panel>
+        <!-- 主页面内容：由 ViewLocator DataTemplate 将 ViewModel 映射到对应 View -->
+        <ContentControl Content="{Binding CurrentPage}"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch" />
+
+        <!-- Toast 通知覆盖层 (右下角) -->
+        <ItemsControl ItemsSource="{x:Static svc:NotificationService.Toasts}"
+                      VerticalAlignment="Bottom"
+                      HorizontalAlignment="Right"
+                      Margin="0 0 16 16"
+                      MaxWidth="360">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="svc:ToastItem">
+                    <Border Background="{Binding Background}"
+                            CornerRadius="8"
+                            Padding="14 10"
+                            Margin="0 6 0 0"
+                            BoxShadow="0 4 12 #40000000"
+                            MinWidth="280">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <!-- 图标 -->
+                            <TextBlock Grid.Column="0"
+                                       Text="{Binding Icon}"
+                                       Foreground="White"
+                                       FontSize="18"
+                                       VerticalAlignment="Center"
+                                       Margin="0 0 10 0"/>
+                            <!-- 文字内容 -->
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Text="{Binding Title}"
+                                           Foreground="White"
+                                           FontWeight="SemiBold"
+                                           FontSize="13"/>
+                                <TextBlock Text="{Binding Message}"
+                                           Foreground="#E0FFFFFF"
+                                           TextWrapping="Wrap"
+                                           FontSize="12"
+                                           MaxWidth="280"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </Panel>
+</Window>

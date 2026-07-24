@@ -2,14 +2,34 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="Chat_App.App"
              xmlns:local="using:Chat_App"
+             xmlns:material="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
              RequestedThemeVariant="Default">
-             <!-- "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options. -->
 
     <Application.DataTemplates>
         <local:ViewLocator/>
     </Application.DataTemplates>
-  
+
     <Application.Styles>
         <FluentTheme />
+        <Style Selector="material|MaterialIcon">
+            <Setter Property="Foreground" Value="{DynamicResource IconColor}"/>
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="24"/>
+        </Style>
+
     </Application.Styles>
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceInclude Source="/Assets/Icons.axaml"/>
+                <ResourceInclude Source="/Assets/Theme.axaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <!-- 自定义颜色资源 -->
+            <SolidColorBrush x:Key="IconColor" Color="#2196F3"/>
+            <SolidColorBrush x:Key="IconHoverColor" Color="#1565C0"/>
+        </ResourceDictionary>
+
+    </Application.Resources>
+
 </Application>

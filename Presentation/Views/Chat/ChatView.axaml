@@ -1,0 +1,151 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Chat"
+             xmlns:controls="clr-namespace:Chat_App.Presentation.Controls"
+             xmlns:models="clr-namespace:Infrastructure.Models;assembly=Infrastructure"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Views.Chat.ChatView"
+             x:Name="Root"
+             x:DataType="vm:ChatViewModel">
+
+    <!-- 聊天主布局：左侧好友列表 + 右侧消息区域 -->
+    <Grid ColumnDefinitions="240,*" Background="#F0F2F5">
+
+        <!-- ===== 左侧：好友列表面板 ===== -->
+        <Border Grid.Column="0"
+                Background="White"
+                CornerRadius="0"
+                Padding="0">
+            <DockPanel>
+                <!-- 顶部：标题和搜索栏 -->
+                <StackPanel DockPanel.Dock="Top" Background="#F9FAFB" Spacing="8">
+                    <!-- 标题栏 -->
+                    <Border Background="#3B82F6" Padding="16 12">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="聊天"
+                                       FontSize="18"
+                                       FontWeight="Bold"
+                                       Foreground="White"
+                                       VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1"
+                                        Orientation="Horizontal"
+                                        Spacing="6"
+                                        VerticalAlignment="Center">
+                                <Ellipse Width="8" Height="8"
+                                         Fill="{Binding ConnectionIndicatorBrush}"
+                                         VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding ConnectionStatusText}"
+                                           FontSize="12"
+                                           Foreground="#E0E7FF"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 搜索框 -->
+                    <TextBox Margin="12 4 12 8"
+                             PlaceholderText="搜索本地好友..."
+                             Text="{Binding SearchText, Mode=TwoWay}"
+                             FontSize="13"
+                             Padding="8 6"
+                             CornerRadius="6"
+                             BorderBrush="#E5E7EB"
+                             Background="#F3F4F6">
+                         <TextBox.InnerLeftContent>
+                             <TextBlock Text="🔍" Margin="8 0 4 0" VerticalAlignment="Center" Foreground="#9CA3AF" FontSize="12"/>
+                         </TextBox.InnerLeftContent>
+                    </TextBox>
+
+                    <!-- 转发选目标横幅 -->
+                    <Border Margin="12 0 12 8"
+                            Background="#EEF2FF"
+                            CornerRadius="8"
+                            Padding="10 8"
+                            IsVisible="{Binding IsSelectingForwardTarget}">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{Binding ForwardHintText}"
+                                       FontSize="13"
+                                       Foreground="#4338CA"
+                                       VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                            <Button Grid.Column="1"
+                                    Content="取消"
+                                    Command="{Binding CancelForwardCommand}"
+                                    Padding="10 4"
+                                    FontSize="12"
+                                    Background="Transparent"
+                                    Foreground="#B91C1C"
+                                    VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <!-- 消息列表 (使用 FilteredFriends 绑定) -->
+                <ListBox x:Name="FriendList"
+                         ItemsSource="{Binding FilteredFriends}"
+                         SelectedItem="{Binding SelectedFriend, Mode=TwoWay}"
+                         Background="White"
+                         Padding="4"
+                         BorderThickness="0">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="models:LocalFriend">
+                            <controls:FriendsItemControl Margin="0 1">
+                                <controls:FriendsItemControl.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="置顶"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).PinFriendCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <MenuItem Header="取消置顶"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnpinFriendCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <Separator/>
+                                        <MenuItem Header="消息免打扰"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).MuteFriendCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <MenuItem Header="关闭免打扰"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnmuteFriendCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                    </ContextMenu>
+                                </controls:FriendsItemControl.ContextMenu>
+                            </controls:FriendsItemControl>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <!-- 左右分隔线 -->
+        <Border Grid.Column="0"
+                HorizontalAlignment="Right"
+                Width="1"
+                Background="#E5E7EB"/>
+
+        <!-- ===== 右侧：消息区域 ===== -->
+        <Panel Grid.Column="1">
+            <!-- 未选中好友时的空状态提示 -->
+            <StackPanel VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Spacing="12"
+                        Opacity="0.5"
+                        IsVisible="{Binding CurrentMessage, Converter={x:Static ObjectConverters.IsNull}}">
+                <TextBlock Text="💬"
+                           FontSize="48"
+                           HorizontalAlignment="Center"/>
+                <TextBlock Text="选择左侧好友开始聊天"
+                           FontSize="16"
+                           Foreground="#888"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- 消息视图 -->
+            <ContentControl Content="{Binding CurrentMessage}"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch"
+                            IsVisible="{Binding CurrentMessage, Converter={x:Static ObjectConverters.IsNotNull}}"/>
+        </Panel>
+    </Grid>
+</UserControl>
