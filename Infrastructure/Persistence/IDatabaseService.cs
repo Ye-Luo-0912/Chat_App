@@ -10,7 +10,7 @@ namespace Chat_App.Infrastructure.Persistence;
 public interface IDatabaseService
 {
     // 好友相关
-    Task<List<LocalFriend>> GetFriendsAsync();
+    Task<List<LocalFriend>> GetFriendsAsync(long ownerUserId);
     Task AddFriendAsync(List<LocalFriend> friend);
     Task<LocalFriend?> GetFriendByIdAsync(long id);
     Task UpdateFriendAsync(LocalFriend updatedFriend);

@@ -15,16 +15,21 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     {
         modelBuilder.Entity<LocalUser>()
             .HasKey(x => x.UserId);
-        
+
         modelBuilder.Entity<AuthToken>()
             .HasKey(x => x.Id);
-        
+
         modelBuilder.Entity<LocalFriend>()
             .HasKey(x => x.Id);
 
+        // 账户隔离：同一账户内好友唯一，防止跨账户数据污染与重复写入（P0-5）。
+        modelBuilder.Entity<LocalFriend>()
+            .HasIndex(x => new { x.OwnerUserId, x.FriendId })
+            .IsUnique();
+
         modelBuilder.Entity<ServerEndpoint>()
             .HasIndex(s => new { s.ServerIpAddress, s.ServerPort });
-        
+
         base.OnModelCreating(modelBuilder);
     }
 }

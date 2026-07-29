@@ -28,7 +28,9 @@ public sealed class ChatFriendLoader : IChatFriendLoader
 
     public async Task<IReadOnlyList<LocalFriend>> LoadAsync(CancellationToken ct = default)
     {
-        var localFriends = await _databaseService.GetFriendsAsync();
+        // 按当前账户过滤本地好友，避免跨账户数据污染（P0-5）。
+        var ownerUserId = _currentUserContext.RequireUserId();
+        var localFriends = await _databaseService.GetFriendsAsync(ownerUserId);
         if (localFriends.Count > 0)
         {
             Log.Information("已从本地加载 {Count} 个好友", localFriends.Count);
@@ -36,7 +38,6 @@ public sealed class ChatFriendLoader : IChatFriendLoader
         }
 
         Log.Information("本地无好友数据，从服务器拉取");
-        var ownerUserId = _currentUserContext.RequireUserId();
         var remoteFriends = new List<LocalFriend>();
 
         await foreach (var friendDto in _friendshipService.GetAllFriendsAsync(ct).WithCancellation(ct))

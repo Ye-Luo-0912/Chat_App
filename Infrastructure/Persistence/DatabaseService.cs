@@ -7,54 +7,67 @@ using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Chat_App.Infrastructure.Persistence;
 
-public class DatabaseService(ClientDbContext context) : IDatabaseService
+/// <summary>
+/// 本地数据库访问服务。
+/// 通过 <see cref="IDbContextFactory{ClientDbContext}"/> 为每个操作创建独立的、短生命周期的 DbContext，
+/// 避免单个非线程安全 DbContext 被多线程共享（P0-4）。
+/// </summary>
+public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) : IDatabaseService
 {
-    private readonly ClientDbContext _context = context;
+    private static readonly CancellationToken None = CancellationToken.None;
 
-    public async Task<List<LocalFriend>> GetFriendsAsync()
+    public async Task<List<LocalFriend>> GetFriendsAsync(long ownerUserId)
     {
-        return await _context.Friends
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Friends
             .AsNoTracking()
+            .Where(f => f.OwnerUserId == ownerUserId)
             .Select(f => new LocalFriend
             {
+                OwnerUserId = f.OwnerUserId,
                 FriendId = f.FriendId,
                 FriendName = f.FriendName,
                 Status = f.Status,
                 AvatarUrl = f.AvatarUrl,
                 LastSynced = f.LastSynced
-            }).ToListAsync();
+            }).ToListAsync(None);
     }
 
     public async Task AddFriendAsync(List<LocalFriend> friend)
     {
-        await _context.Friends.AddRangeAsync(friend);
-        await _context.SaveChangesAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Friends.AddRangeAsync(friend, None);
+        await db.SaveChangesAsync(None);
     }
 
     public async Task<LocalFriend?> GetFriendByIdAsync(long id)
     {
-        return await _context.Friends.AsNoTracking().FirstOrDefaultAsync(f => f.Id == id);
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Friends.AsNoTracking().FirstOrDefaultAsync(f => f.Id == id, None);
     }
 
     public async Task UpdateFriendAsync(LocalFriend updatedFriend)
     {
-        var friend = await _context.Friends.FirstOrDefaultAsync(f => f.Id == updatedFriend.Id);
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var friend = await db.Friends.FirstOrDefaultAsync(f => f.Id == updatedFriend.Id, None);
         if (friend != null)
         {
-            _context.Friends.Update(friend);
-            await _context.SaveChangesAsync();
+            db.Friends.Update(friend);
+            await db.SaveChangesAsync(None);
         }
     }
 
     public async Task DeleteFriendAsync(long id)
     {
-        await _context.Friends
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Friends
             .Where(f => f.Id == id)
-            .ExecuteDeleteAsync();
+            .ExecuteDeleteAsync(None);
     }
 
     // ---- 用户信息 ----
@@ -64,7 +77,8 @@ public class DatabaseService(ClientDbContext context) : IDatabaseService
     /// </summary>
     public async Task SaveUserAsync(LocalUser user)
     {
-        var existing = await _context.Users.FirstOrDefaultAsync(u => u.UserId == user.UserId);
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.Users.FirstOrDefaultAsync(u => u.UserId == user.UserId, None);
         if (existing is not null)
         {
             existing.Username         = user.Username;
@@ -79,21 +93,23 @@ public class DatabaseService(ClientDbContext context) : IDatabaseService
         }
         else
         {
-            await _context.Users.AddAsync(user);
+            await db.Users.AddAsync(user, None);
         }
-        await _context.SaveChangesAsync();
+        await db.SaveChangesAsync(None);
     }
 
     public async Task<LocalUser?> GetUserAsync(long userId)
     {
-        return await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.UserId == userId);
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.UserId == userId, None);
     }
 
     // ---- Token ----
 
     public async Task SaveTokenAsync(AuthToken token)
     {
-        var oldToken = await _context.Tokens.FirstOrDefaultAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var oldToken = await db.Tokens.FirstOrDefaultAsync(None);
         if (oldToken is not null)
         {
             oldToken.UserId = token.UserId;
@@ -104,54 +120,59 @@ public class DatabaseService(ClientDbContext context) : IDatabaseService
         }
         else
         {
-            await _context.Tokens.AddAsync(token);
+            await db.Tokens.AddAsync(token, None);
         }
-        await _context.SaveChangesAsync();
+        await db.SaveChangesAsync(None);
     }
 
     public async Task<Token?> GetAccessTokenAsync()
     {
-        return await _context.Tokens
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Tokens
             .AsNoTracking()
             .Select(t => new Token
             {
                 TokenExpires = t.AccessTokenExpires,
                 TokenValue = t.AccessToken
             })
-            .FirstOrDefaultAsync();
+            .FirstOrDefaultAsync(None);
     }
 
     public async Task<int> UpdateTokenAsync(AuthToken token)
     {
-        return await _context.Tokens
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Tokens
             .Where(f => f.UserId == token.UserId)
             .ExecuteUpdateAsync(t
                 => t.SetProperty(authToken => authToken.AccessToken, token.AccessToken)
                     .SetProperty(authToken => authToken.RefreshToken, token.RefreshToken)
                     .SetProperty(authToken => authToken.AccessTokenExpires, token.AccessTokenExpires)
-                    .SetProperty(authToken => authToken.RefreshTokenExpires, token.RefreshTokenExpires));
+                    .SetProperty(authToken => authToken.RefreshTokenExpires, token.RefreshTokenExpires), None);
     }
 
     public async Task<AuthToken?> GetTokenAsync()
     {
-        return await _context.Tokens.AsNoTracking().FirstOrDefaultAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Tokens.AsNoTracking().FirstOrDefaultAsync(None);
     }
 
     public async Task DeleteTokenAsync()
     {
-        await _context.Tokens.ExecuteDeleteAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Tokens.ExecuteDeleteAsync(None);
     }
 
-    // ---- サーバー情報 ----
+    // ---- 服务器信息 ----
 
     /// <summary>
     /// 保存服务器信息：若已存在相同地址+端口的记录则更新，否则新增，避免重复。
     /// </summary>
     public async Task SaveServerInfoAsync(ServerEndpoint serverInfo)
     {
-        var existing = await _context.Servers
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.Servers
             .FirstOrDefaultAsync(s => s.ServerIpAddress == serverInfo.ServerIpAddress
-                                   && s.ServerPort == serverInfo.ServerPort);
+                                   && s.ServerPort == serverInfo.ServerPort, None);
         if (existing is not null)
         {
             existing.ServerName = serverInfo.ServerName;
@@ -161,18 +182,20 @@ public class DatabaseService(ClientDbContext context) : IDatabaseService
         else
         {
             serverInfo.LastConnected = DateTime.UtcNow;
-            await _context.Servers.AddAsync(serverInfo);
+            await db.Servers.AddAsync(serverInfo, None);
         }
-        await _context.SaveChangesAsync();
+        await db.SaveChangesAsync(None);
     }
 
     public async Task<ServerEndpoint?> GetServerInfoAsync()
     {
-        return await _context.Servers.AsNoTracking().FirstOrDefaultAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Servers.AsNoTracking().FirstOrDefaultAsync(None);
     }
 
     public async Task DeleteServerInfoAsync()
     {
-        await _context.Servers.ExecuteDeleteAsync();
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Servers.ExecuteDeleteAsync(None);
     }
 }

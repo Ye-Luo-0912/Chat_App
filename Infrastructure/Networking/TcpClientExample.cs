@@ -1,68 +1,71 @@
 using System.Buffers;
 using System.ComponentModel;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using Core.Interfaces;
 using Core.Models;
 
 namespace Infrastructure.Networking;
 
-
 /// <summary>
 /// TCP 客户端实现，提供连接、发送和接收数据的功能，并通过事件通知外部数据接收和连接状态的改变。
 /// </summary>
-public class TcpClientExample: ITcpClient, IDisposable
+public class TcpClientExample : ITcpClient, IDisposable
 {
-    //使用 Socket 类来实现 TCP 客户端功能，提供更底层的网络通信控制，适用于需要高性能和自定义网络协议的场景。
     private Socket? _tcpClient;
-
-    //使用 CancellationTokenSource 来管理接收数据的取消操作，确保在断开连接或对象销毁时能够正确地停止接收任务，避免资源泄漏和未处理的异步操作。
     private CancellationTokenSource? _receiveCts;
+    private CancellationTokenSource? _sendCts;
+    private Task? _receiveTask;
+    private Task? _sendTask;
 
-    //使用一个布尔字段来跟踪连接状态，确保在发送数据和接收数据时能够正确地判断当前的连接状态，避免在未连接的情况下进行网络操作。
     private bool _isConnected;
-
-    //提供一个公共属性 IsConnected 来暴露当前的连接状态，供外部调用者检查是否已连接到服务器。
     public bool IsConnected => _isConnected;
 
-    //使用一个布尔字段来跟踪对象是否已被销毁，确保在 Dispose 方法中正确地释放资源，并避免在对象已销毁的情况下进行操作。
     private bool _disposed;
 
-    //连接状态改变事件，传递一个字符串参数来描述当前的连接状态，如 "Connected"、"Disconnected" 或具体的错误信息。
     public event EventHandler<string>? ConnectionStatusChanged;
-
-    //实现 INotifyPropertyChanged 接口，提供属性改变通知机制，确保在属性值发生变化时能够正确地通知外部订阅者，以便界面或其他组件能够及时更新。
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    //使用 ArrayPool<byte> 来管理接收缓冲区，避免频繁分配和释放大块内存，提高性能和减少垃圾回收压力。
     private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
-    //接收缓冲区的租用和归还由 ReceiveDataAsync 方法负责，确保在接收数据时能够高效地使用内存资源。
-    private byte[]? _receiveBuffer;
 
-    //使用一个同步对象来保护对共享资源（如 TCP 客户端实例和连接状态）的访问，确保线程安全，避免竞争条件和数据不一致。
     private readonly Lock _syncRoot = new();
 
-/*    //捕获当前的 SynchronizationContext，以便在接收数据时能够正确地将事件调度回 UI 线程，避免跨线程操作引发的异常。
-    private readonly SynchronizationContext? _uiContext = SynchronizationContext.Current;*/
+    // 连接代际：每次 ConnectAsync 递增。接收循环只有在自己所属代际等于当前代际时，
+    // 才允许修改全局连接状态（如触发 Disconnect），避免旧循环误关新连接（P0-3）。
+    private int _connectionGeneration;
+
+    // 有界单写发送队列：所有 SendAsync 调用方只负责入队，一个独占发送循环完整发送每一帧，
+    // 消除多请求并发导致的 TCP 帧边界交错（P0-2）。队列容量形成背压。
+    private readonly Channel<OutboundFrame> _sendChannel =
+        Channel.CreateBounded<OutboundFrame>(new BoundedChannelOptions(256)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
     public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
 
 
     /// <summary>
-    /// 连接到服务器并开始接收数据
+    /// 连接到服务器并启动收发循环。
     /// </summary>
-    /// <param name="endpoint"></param>
-    /// <param name="token"></param>
-    /// <returns></returns>
     public async Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default)
     {
         // 重连前清理半开连接，避免双 Socket（不发状态事件，避免误触发重连）。
         Disconnect();
 
-        Socket? clientSocket;
+        Socket clientSocket;
+        CancellationTokenSource receiveCts;
+        CancellationTokenSource sendCts;
+        int generation;
         lock (_syncRoot)
         {
             clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            generation = ++_connectionGeneration;
             _tcpClient = clientSocket;
-            _receiveCts = new CancellationTokenSource();
+            receiveCts = _receiveCts = new CancellationTokenSource();
+            sendCts = _sendCts = new CancellationTokenSource();
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -71,10 +74,16 @@ public class TcpClientExample: ITcpClient, IDisposable
         try
         {
             await clientSocket.ConnectAsync(endpoint.ServerIpAddress, endpoint.ServerPort, cts.Token);
-            _isConnected = true;
+            lock (_syncRoot)
+            {
+                _isConnected = true;
+            }
             OnPropertyChanged(nameof(IsConnected));
             ConnectionStatusChanged?.Invoke(this, "Connected");
-            _ = ReceiveDataAsync(_receiveCts.Token);
+
+            // 收发循环各自捕获本次连接的代际与 CTS，任务保存以便 Dispose 时等待（不再 fire-and-forget）。
+            _receiveTask = ReceiveDataAsync(receiveCts.Token, generation, clientSocket);
+            _sendTask = SendLoopAsync(sendCts.Token);
         }
         catch (Exception)
         {
@@ -83,160 +92,226 @@ public class TcpClientExample: ITcpClient, IDisposable
                 if (ReferenceEquals(_tcpClient, clientSocket))
                 {
                     _tcpClient = null;
-                    _receiveCts?.Cancel();
-                    _receiveCts?.Dispose();
                     _receiveCts = null;
+                    _sendCts = null;
                 }
             }
-
+            receiveCts.Cancel();
+            receiveCts.Dispose();
+            sendCts.Cancel();
+            sendCts.Dispose();
             clientSocket.Dispose();
             throw;
         }
     }
 
-
     /// <summary>
-    /// 发送数据到服务器，确保在连接状态下发送，并处理可能的异常情况，如连接断开等。
+    /// 发送数据：复制到独立内存后入队，由独占发送循环完整发送。
+    /// 队列已满时 WriteAsync 会等待，形成背压（P0-2）。
     /// </summary>
-    /// <param name="data"></param>
-    /// <param name="token"></param>
-    /// <returns></returns>
-    /// <exception cref="InvalidOperationException"></exception>
-    public async Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token)
+    public async Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token = default)
     {
-        //确保线程安全地访问连接状态和 TCP 客户端实例
-        Socket socket;
-        lock(_syncRoot)
+        lock (_syncRoot)
         {
-            //如果未连接或 TCP 客户端实例为 null，则抛出异常，提示调用者当前无法发送数据
-            if (!IsConnected || _tcpClient == null)
+            if (!_isConnected || _tcpClient is null)
                 throw new InvalidOperationException("Not connected to server");
-            socket = _tcpClient;
         }
+
+        // 入队前复制数据到独立内存：调用方持有的 buffer 可能在入队后被重用/释放。
+        var owned = data.ToArray();
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var frame = new OutboundFrame(owned, tcs);
 
         try
         {
-            //使用循环确保发送所有数据，处理可能的部分发送情况
-            var tolalSent = 0;
-            while (tolalSent < data.Length)
-            {
-                //使用 Socket 的 SendAsync 方法发送数据，处理可能的异常情况，如连接断开等
-                var sent = await socket.SendAsync(data[tolalSent..], SocketFlags.None, token);
-                if (sent <= 0)
-                {
-                    //如果发送了0字节，说明连接可能已断开，调用 Disconnect 方法进行清理，并抛出异常以通知调用者
-                    Disconnect("Connection lost during send");
-                    throw new SocketException((int)SocketError.ConnectionReset);
-                }
-
-                //累加已发送的字节数，继续发送剩余的数据
-                tolalSent += sent;
-            }
+            await _sendChannel.Writer.WriteAsync(frame, token).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        catch (ChannelClosedException ex)
         {
-            //如果发生 SocketException 或 ObjectDisposedException，说明连接可能已断开或资源已被释放，调用 Disconnect 方法进行清理，并重新抛出异常以通知调用者
-            Disconnect();
-            throw;
+            throw new InvalidOperationException("连接已关闭，无法发送", ex);
         }
+
+        // 等待独占发送循环完成本帧，传播其异常。
+        await tcs.Task.ConfigureAwait(false);
     }
 
-
     /// <summary>
-    /// 接收数据的异步方法，持续监听服务器发送的数据，并通过事件通知外部订阅者。
-    /// 确保在接收过程中正确处理取消操作和异常情况，避免资源泄漏和未处理的异步操作。
+    /// 独占发送循环：从队列逐帧完整发送，保证帧边界原子性（P0-2）。
     /// </summary>
-    /// <param name="token"></param>
-    /// <returns></returns>
-    public async Task ReceiveDataAsync(CancellationToken token)
+    private async Task SendLoopAsync(CancellationToken token)
     {
-        //租用一个缓冲区来接收数据，确保在接收完成后能够正确地归还缓冲区，避免内存泄漏和过度分配。
-        _receiveBuffer = _bufferPool.Rent(4096);
         try
         {
-            while (!token.IsCancellationRequested)
+            await foreach (var frame in _sendChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
             {
-                
-                Socket socket;
-
-                //确保线程安全地访问 TCP 客户端实例，避免在接收数据时发生竞争条件和数据不一致。
-                lock (_syncRoot)
+                try
                 {
-                    //如果 TCP 客户端实例为 null，说明连接已断开，直接返回，避免继续尝试接收数据。
-                    if (_tcpClient is null)
-                        return;
+                    Socket? socket;
+                    lock (_syncRoot)
+                    {
+                        socket = _tcpClient;
+                    }
+                    if (socket is null)
+                    {
+                        frame.Tcs.TrySetException(new InvalidOperationException("连接已关闭"));
+                        continue;
+                    }
 
-                    socket = _tcpClient;
+                    var data = frame.Data;
+                    var totalSent = 0;
+                    while (totalSent < data.Length)
+                    {
+                        var sent = await socket.SendAsync(data[totalSent..], SocketFlags.None, token).ConfigureAwait(false);
+                        if (sent <= 0)
+                            throw new SocketException((int)SocketError.ConnectionReset);
+                        totalSent += sent;
+                    }
+                    frame.Tcs.TrySetResult(true);
                 }
-
-                //使用 Socket 的 ReceiveAsync 方法接收数据，处理可能的异常情况，如连接断开等
-                var bytesRead = await socket.ReceiveAsync(_receiveBuffer, SocketFlags.None, token);
-                if (bytesRead == 0)
+                catch (Exception ex)
                 {
-                    Disconnect("Graceful disconnect");
-                    break;
+                    frame.Tcs.TrySetException(ex);
+                    DrainSendChannel(ex);
+                    Disconnect("Connection lost during send");
+                    return;
                 }
-
-                //将接收到的数据转换为 ReadOnlyMemory<byte>，以便通过事件传递给外部订阅者，避免不必要的内存复制，提高性能。
-                var receivedMemory = _receiveBuffer.AsMemory(0, bytesRead);
-
-                //触发数据接收事件，通知外部订阅者有新的数据可用
-                OnDataChunkReceived?.Invoke(this , receivedMemory);
             }
         }
         catch (OperationCanceledException)
         {
-
+            // Disconnect 取消，正常退出。
         }
         catch (Exception ex)
         {
-            Disconnect($"Receive error: {ex.Message}");
-        }
-        finally
-        {
-            if (_receiveBuffer is not null)
-            {
-                _bufferPool.Return(_receiveBuffer);
-                _receiveBuffer = null;
-            }
+            DrainSendChannel(ex);
+            Disconnect($"Send loop error: {ex.Message}");
         }
     }
 
+    /// <summary>
+    /// 排空发送队列，将所有待发帧标记为失败。
+    /// </summary>
+    private void DrainSendChannel(Exception ex)
+    {
+        while (_sendChannel.Reader.TryRead(out var frame))
+        {
+            frame.Tcs.TrySetException(ex);
+        }
+    }
 
     /// <summary>
-    /// 断开与服务器的连接，确保资源得到正确释放，并通知外部连接状态的改变。
-    /// 提供可选的断开原因参数，以便调用者了解断开的具体原因。
+    /// 接收数据循环（接口兼容入口）。实际由 ConnectAsync 启动带代际的重载。
     /// </summary>
-    /// <param name="reason"></param>
-    public void Disconnect(string? reason = null)
+    public Task ReceiveDataAsync(CancellationToken token)
     {
-        var shouldNotify = false;
+        int generation;
+        Socket? socket;
         lock (_syncRoot)
         {
-            if (!_isConnected && _tcpClient is null)
-                return;
+            generation = _connectionGeneration;
+            socket = _tcpClient;
+        }
+        if (socket is null) return Task.CompletedTask;
+        return ReceiveDataAsync(token, generation, socket);
+    }
 
-            shouldNotify = _isConnected || !string.IsNullOrEmpty(reason);
-            _isConnected = false;
-            _receiveCts?.Cancel();
-            try
+    /// <summary>
+    /// 接收数据循环。buffer 为局部变量，避免重连时新旧循环归还竞态（P0-3）。
+    /// 只有当前代际的循环才允许触发 Disconnect，避免误关新连接。
+    /// </summary>
+    private async Task ReceiveDataAsync(CancellationToken token, int generation, Socket socket)
+    {
+        var buffer = _bufferPool.Rent(4096);
+        try
+        {
+            while (!token.IsCancellationRequested)
             {
-                _tcpClient?.Shutdown(SocketShutdown.Both);
-            }
-            catch (SocketException)
-            {
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            finally
-            {
-                _tcpClient?.Dispose();
-                _tcpClient = null;
-                _receiveCts?.Dispose();
-                _receiveCts = null;
+                int bytesRead;
+                try
+                {
+                    bytesRead = await socket.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                if (bytesRead == 0)
+                {
+                    if (IsCurrentGeneration(generation))
+                        Disconnect("Graceful disconnect");
+                    break;
+                }
+
+                var receivedMemory = buffer.AsMemory(0, bytesRead);
+                OnDataChunkReceived?.Invoke(this, receivedMemory);
             }
         }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (IsCurrentGeneration(generation))
+                Disconnect($"Receive error: {ex.Message}");
+        }
+        finally
+        {
+            _bufferPool.Return(buffer);
+        }
+    }
+
+    /// <summary>判断调用方所属的连接代际是否仍是当前代际。</summary>
+    private bool IsCurrentGeneration(int generation)
+    {
+        return Volatile.Read(ref _connectionGeneration) == generation;
+    }
+
+    /// <summary>
+    /// 断开与服务器的连接，取消收发循环并排空发送队列。
+    /// </summary>
+    public void Disconnect(string? reason = null)
+    {
+        bool shouldNotify;
+        CancellationTokenSource? receiveCts;
+        CancellationTokenSource? sendCts;
+        lock (_syncRoot)
+        {
+            receiveCts = _receiveCts;
+            _receiveCts = null;
+            sendCts = _sendCts;
+            _sendCts = null;
+
+            if (!_isConnected && _tcpClient is null)
+            {
+                shouldNotify = false;
+            }
+            else
+            {
+                shouldNotify = _isConnected || !string.IsNullOrEmpty(reason);
+                _isConnected = false;
+                try
+                {
+                    _tcpClient?.Shutdown(SocketShutdown.Both);
+                }
+                catch (SocketException) { }
+                catch (ObjectDisposedException) { }
+                finally
+                {
+                    _tcpClient?.Dispose();
+                    _tcpClient = null;
+                }
+            }
+        }
+
+        // 在锁外取消，避免锁内长时间阻塞。
+        try { receiveCts?.Cancel(); } catch { }
+        try { sendCts?.Cancel(); } catch { }
+        receiveCts?.Dispose();
+        sendCts?.Dispose();
+
+        // 排空发送队列，通知所有等待的 SendAsync 失败。
+        DrainSendChannel(new InvalidOperationException("连接已断开"));
 
         OnPropertyChanged(nameof(IsConnected));
 
@@ -244,47 +319,44 @@ public class TcpClientExample: ITcpClient, IDisposable
             ConnectionStatusChanged?.Invoke(this, reason);
     }
 
-
-    /// <summary>
-    /// 触发属性改变事件，确保在属性值发生变化时能够正确地通知外部订阅者，以便界面或其他组件能够及时更新。
-    /// </summary>
-    /// <param name="propertyName"></param>
     protected virtual void OnPropertyChanged(string propertyName)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 
-    /// <summary>
-    /// 实现 IDisposable 接口，确保在对象生命周期结束时正确释放资源，避免内存泄漏和未释放的网络连接。
-    /// </summary>
-    /// <param name="disposing"></param>
     protected virtual void Dispose(bool disposing)
     {
         if (_disposed) return;
-        
+
         if (disposing)
         {
-            _receiveCts?.Dispose();
-            _tcpClient?.Dispose();
+            Disconnect();
+            _sendChannel.Writer.TryComplete();
+            // 等待收发循环退出（带短超时，避免 Dispose 长时间阻塞）。
+            try { _sendTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            try { _receiveTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         }
         _disposed = true;
     }
 
-
-    /// <summary>
-    /// 实现 IDisposable 接口，确保在对象生命周期结束时正确释放资源，避免内存泄漏和未释放的网络连接。
-    /// </summary>
     public void Dispose()
     {
         lock (_syncRoot)
         {
             if (_disposed) return;
-            _disposed = true;
-            _receiveCts?.Dispose();
-            _tcpClient?.Dispose();
-            GC.SuppressFinalize(this);
         }
+        Dispose(true);
+        GC.SuppressFinalize(this);
     }
-    
-    ~TcpClientExample() => Dispose();
+
+    private readonly struct OutboundFrame
+    {
+        public OutboundFrame(ReadOnlyMemory<byte> data, TaskCompletionSource<bool> tcs)
+        {
+            Data = data;
+            Tcs = tcs;
+        }
+        public ReadOnlyMemory<byte> Data { get; }
+        public TaskCompletionSource<bool> Tcs { get; }
+    }
 }

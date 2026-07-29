@@ -238,6 +238,9 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
         await _tokenInfo.ClearLocalSessionAsync(ct).ConfigureAwait(true);
 
+        // 重置聊天会话状态，避免下一账户复用上一账户的好友列表与初始化标志（P0-5）。
+        _chatViewModel.Reset();
+
         CurrentPage = _friendsViewModel;
         UpdateSelectionStates(SelectedItem.Contacts);
 

@@ -136,9 +136,9 @@ public partial class App : Application
     public override void OnFrameworkInitializationCompleted()
     {
         // 确保数据库表已创建，并应用所有待执行的迁移
-        using (var scope = Services.CreateScope())
+        var dbFactory = Services.GetRequiredService<IDbContextFactory<ClientDbContext>>();
+        using (var db = dbFactory.CreateDbContext())
         {
-            var db = scope.ServiceProvider.GetRequiredService<ClientDbContext>();
 
             // 使用 sqlite_master 可靠地检测是否存在迁移历史表。
             // EnsureCreated() 创建的旧库没有 __EFMigrationsHistory，
@@ -211,7 +211,9 @@ public partial class App : Application
         }
 
         
-        services.AddDbContext<ClientDbContext>(op =>
+        // 使用池化工厂：每个仓储操作通过 CreateDbContextAsync 获取独立短生命周期 DbContext，
+        // 避免 scoped DbContext 被 singleton 服务捕获共享（P0-4）。
+        services.AddPooledDbContextFactory<ClientDbContext>(op =>
         {
             op.UseSqlite(connectionString);
         });

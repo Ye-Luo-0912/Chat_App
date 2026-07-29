@@ -499,6 +499,27 @@ public class ChatViewModel : ViewModelBase, IDisposable
         UnmuteFriendCommand.RaiseCanExecuteChanged();
     }
 
+    /// <summary>
+    /// 退出登录时重置会话状态：清空好友列表、消息视图与初始化标志，
+    /// 避免下一账户复用上一账户的内存视图（P0-5）。
+    /// </summary>
+    public void Reset()
+    {
+        _isInitialized = false;
+        OnPropertyChanged(nameof(IsInitialized));
+
+        ClearForwardSelection();
+        SearchText = string.Empty;
+        _watchedPresenceUserIds = [];
+
+        Friends.Clear();
+        FilteredFriends.Clear();
+        _friendListState.ApplyFilter();
+
+        _messageViewModel.Clear();
+        SelectedFriend = null;
+        CurrentMessage = null;
+    }
     public void Dispose()
     {
         if (_disposed)

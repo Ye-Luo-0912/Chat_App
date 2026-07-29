@@ -68,7 +68,8 @@ public class FriendsPageService : IFriendsPageService
         {
             Log.Error(ex, "加载好友列表失败");
             // 尝试从本地数据库加载
-            var local = await _db.GetFriendsAsync().ConfigureAwait(false);
+            var owner = _currentUser.TryGetUserId(out var oid) ? oid : 0L;
+            var local = await _db.GetFriendsAsync(owner).ConfigureAwait(false);
             _friendsCache = local;
             return local.AsReadOnly();
         }
