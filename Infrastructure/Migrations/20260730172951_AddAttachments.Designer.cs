@@ -3,6 +3,7 @@ using System;
 using Infrastructure.Models.Context;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Infrastructure.Migrations
 {
     [DbContext(typeof(ClientDbContext))]
-    partial class ClientDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260730172951_AddAttachments")]
+    partial class AddAttachments
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.5");
@@ -166,10 +169,6 @@ namespace Infrastructure.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("LocalUploadingPath")
-                        .HasMaxLength(512)
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("MessageId")
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
@@ -179,9 +178,6 @@ namespace Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<long>("OwnerUserId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("RetryCount")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("Sha256")

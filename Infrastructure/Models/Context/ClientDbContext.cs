@@ -18,6 +18,9 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     public DbSet<LocalSyncCursor> SyncCursors { get; set; }
     public DbSet<LocalConversationReadState> ConversationReadStates { get; set; }
 
+    // ---- 阶段 3 附件元数据 ----
+    public DbSet<LocalAttachment> Attachments => Set<LocalAttachment>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<LocalUser>()
@@ -76,6 +79,30 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         modelBuilder.Entity<LocalConversationReadState>()
             .HasIndex(x => new { x.OwnerUserId, x.ConversationId })
             .IsUnique();
+
+        // ---- 附件元数据（阶段 3）----
+        var entity = modelBuilder.Entity<LocalAttachment>();
+        entity.HasKey(e => e.Id);
+        entity.Property(e => e.OwnerUserId).IsRequired();
+        entity.Property(e => e.AttachmentId).HasMaxLength(128);
+        entity.Property(e => e.ClientAttachmentId).HasMaxLength(128);
+        entity.Property(e => e.MessageId).HasMaxLength(64);
+        entity.Property(e => e.ConversationId).HasMaxLength(128);
+        entity.Property(e => e.FileName).HasMaxLength(512);
+        entity.Property(e => e.ContentType).HasMaxLength(256).IsRequired();
+        entity.Property(e => e.Sha256).HasMaxLength(64);
+        entity.Property(e => e.DownloadPath).HasMaxLength(512);
+        entity.Property(e => e.ObjectKey).HasMaxLength(512);
+        entity.Property(e => e.ThumbnailPath).HasMaxLength(512);
+        entity.Property(e => e.LocalCachePath).HasMaxLength(512);
+        entity.Property(e => e.LocalThumbnailPath).HasMaxLength(512);
+        entity.Property(e => e.LocalUploadingPath).HasMaxLength(512);
+        entity.Property(e => e.RetryCount);
+        entity.Property(e => e.FailureReason).HasMaxLength(1024);
+        entity.HasIndex(e => new { e.OwnerUserId, e.AttachmentId }).IsUnique().HasDatabaseName("ix_attachments_owner_attid");
+        entity.HasIndex(e => new { e.OwnerUserId, e.ClientAttachmentId }).HasDatabaseName("ix_attachments_owner_clientattid");
+        entity.HasIndex(e => new { e.OwnerUserId, e.MessageId }).HasDatabaseName("ix_attachments_owner_msgid");
+        entity.HasIndex(e => new { e.OwnerUserId, e.Sha256 }).HasDatabaseName("ix_attachments_owner_sha256");
 
         base.OnModelCreating(modelBuilder);
     }

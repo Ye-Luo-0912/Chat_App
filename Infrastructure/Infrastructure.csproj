@@ -42,6 +42,7 @@
       <Compile Include="..\Core\Interfaces\IMessageStore.cs" />
       <Compile Include="..\Core\Services\MessageStore.cs" />
       <Compile Include="..\Core\Services\ChatMessageCoordinator.cs" />
+      <Compile Include="..\Core\Services\AttachmentRecoveryService.cs" />
     </ItemGroup>
 
 </Project>

@@ -66,4 +66,17 @@ public interface IDatabaseService
 
     /// <summary>批量标记会话内消息为已读（ReceivedAtMs <= beforeReceivedAtMs 的消息）。</summary>
     Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs);
+
+    // ---- 附件元数据（阶段 3）----
+    Task<List<LocalAttachment>> GetAttachmentsByMessageIdAsync(long ownerUserId, string messageId);
+    Task<LocalAttachment?> GetAttachmentByAttachmentIdAsync(long ownerUserId, string attachmentId);
+    Task<LocalAttachment?> GetAttachmentByClientAttachmentIdAsync(long ownerUserId, string clientAttachmentId);
+    Task<LocalAttachment?> GetAttachmentBySha256Async(long ownerUserId, string sha256);
+    Task UpsertAttachmentAsync(LocalAttachment attachment);
+    Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null);
+
+    /// <summary>更新附件的本地上传路径和重试次数。传 null 表示不修改对应字段（localUploadingPath 传空字符串可清空）。</summary>
+    Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null);
+    Task DeleteAttachmentAsync(long ownerUserId, string attachmentId);
+    Task<List<LocalAttachment>> GetUploadingAttachmentsAsync(long ownerUserId);
 }

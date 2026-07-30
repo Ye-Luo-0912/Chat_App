@@ -35,6 +35,7 @@ public interface IAttachmentClientService
         string? clientAttachmentId = null,
         IProgress<AttachmentUploadProgress>? progress = null,
         int maxAttempts = 3,
+        string? sha256 = null,
         CancellationToken ct = default);
 
     Task AbandonAsync(string attachmentId, CancellationToken ct = default);

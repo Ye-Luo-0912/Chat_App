@@ -80,6 +80,32 @@ public sealed class MessageStore : IMessageStore
 
         await _db.UpsertMessageAsync(message);
 
+        // 阶段 3：同时持久化附件元数据到 LocalAttachment 表
+        if (dto.Attachments is { Count: > 0 })
+        {
+            foreach (var att in dto.Attachments)
+            {
+                if (string.IsNullOrWhiteSpace(att.AttachmentId))
+                    continue;
+                var localAtt = new LocalAttachment
+                {
+                    OwnerUserId = owner,
+                    AttachmentId = att.AttachmentId,
+                    MessageId = message.MessageId,
+                    ConversationId = conversationId,
+                    FileName = att.FileName,
+                    ContentType = att.ContentType,
+                    SizeBytes = att.SizeBytes,
+                    DownloadPath = att.DownloadApiHint,
+                    ThumbnailPath = att.ThumbnailApiHint,
+                    Status = (byte)(att.Status == 1 ? 1 : 0),
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                await _db.UpsertAttachmentAsync(localAtt);
+            }
+        }
+
         var isNewConversation = await UpdateConversationSummaryAsync(
             owner, conversationId, message.MessageId, content, receivedAtMs, dto.SenderUserId);
 

@@ -20,6 +20,8 @@ using Serilog;
 using System;
 using System.IO;
 using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -93,7 +95,9 @@ public partial class App : Application
             .AddSingleton<ICurrentUserContext>(sp => sp.GetRequiredService<ICurrentUserState>())
             .AddSingleton<IEventBus, InMemoryEventBus>()
             .AddSingleton<IMessageStore, MessageStore>()
-            .AddSingleton<ChatMessageCoordinator>();
+            .AddSingleton<ChatMessageCoordinator>()
+            .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
+            .AddSingleton<AttachmentRecoveryService>();
 
 
         services.AddHttpClient<IAuthClientService, AuthClientService>("AuthClient", (sp, client) =>
@@ -185,6 +189,20 @@ public partial class App : Application
 
         // 实例化协调器，开始订阅网络事件进行持久化
         Services.GetRequiredService<Core.Services.ChatMessageCoordinator>();
+
+        // Recover failed attachment uploads (fire-and-forget, delayed for auth)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(3000, CancellationToken.None);
+                await Services.GetRequiredService<AttachmentRecoveryService>().RecoverFailedUploadsAsync();
+            }
+            catch
+            {
+                // Ignore recovery failures
+            }
+        });
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

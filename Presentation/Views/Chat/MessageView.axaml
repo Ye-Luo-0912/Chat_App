@@ -20,6 +20,7 @@
         <conv:BoolToBrushConverter x:Key="BoolToBrush"
                                    TrueBrush="#3B82F6"
                                    FalseBrush="#E5E7EB"/>
+        <conv:LongToBoolConverter x:Key="LongToBool"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -136,20 +137,30 @@
                                                       IsVisible="{Binding HasAttachments}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate DataType="dto:AttachmentRefDto">
-                                                    <Button Classes="attachment-link"
-                                                            HorizontalAlignment="Left"
-                                                            Padding="0"
-                                                            Background="Transparent"
-                                                            BorderThickness="0"
-                                                            Cursor="Hand"
-                                                            Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
-                                                            CommandParameter="{Binding}">
-                                                        <TextBlock Text="{Binding DisplayName}"
+                                                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2">
+                                                        <TextBlock Text="📎"
                                                                    FontSize="13"
-                                                                   TextDecorations="Underline"
-                                                                   Foreground="#0F172A"
-                                                                   TextWrapping="Wrap"/>
-                                                    </Button>
+                                                                   VerticalAlignment="Center"/>
+                                                        <Button Classes="attachment-link"
+                                                                HorizontalAlignment="Left"
+                                                                Padding="0"
+                                                                Background="Transparent"
+                                                                BorderThickness="0"
+                                                                Cursor="Hand"
+                                                                Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
+                                                                CommandParameter="{Binding}">
+                                                            <TextBlock Text="{Binding DisplayName}"
+                                                                       FontSize="13"
+                                                                       TextDecorations="Underline"
+                                                                       Foreground="#0F172A"
+                                                                       TextWrapping="Wrap"/>
+                                                        </Button>
+                                                        <TextBlock Text="{Binding SizeBytes, StringFormat='{}{0:N0} B'}"
+                                                                   FontSize="11"
+                                                                   Foreground="Gray"
+                                                                   VerticalAlignment="Center"
+                                                                   IsVisible="{Binding SizeBytes, Converter={StaticResource LongToBool}}"/>
+                                                    </StackPanel>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
@@ -218,22 +229,31 @@
                             Foreground="#B91C1C"/>
                 </Grid>
 
-                <Grid ColumnDefinitions="*,Auto"
-                      IsVisible="{Binding HasPendingAttachment}">
-                    <TextBlock Grid.Column="0"
-                               Text="{Binding PendingAttachmentName, StringFormat='待发送附件: {0}'}"
-                               FontSize="12"
-                               Foreground="#475569"
-                               VerticalAlignment="Center"
-                               TextTrimming="CharacterEllipsis"/>
-                    <Button Grid.Column="1"
-                            Content="移除"
-                            Command="{Binding ClearPendingAttachmentCommand}"
-                            Padding="10 4"
-                            FontSize="12"
-                            Background="Transparent"
-                            Foreground="#B91C1C"/>
-                </Grid>
+                <ItemsControl ItemsSource="{Binding PendingAttachments}"
+                              IsVisible="{Binding HasPendingAttachment}"
+                              Margin="0,4">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:PendingAttachment">
+                            <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2">
+                                <TextBlock Text="📎"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding FileName}"
+                                           FontSize="12"
+                                           Foreground="#475569"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <Button Content="✕"
+                                        Command="{Binding #Root.((vm:MessageViewModel)DataContext).ClearPendingAttachmentCommand}"
+                                        CommandParameter="{Binding}"
+                                        Padding="6,2"
+                                        FontSize="12"
+                                        Background="Transparent"
+                                        Foreground="#B91C1C"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
 
                 <Grid ColumnDefinitions="Auto,*,Auto,Auto">
                     <Button Grid.Column="0"

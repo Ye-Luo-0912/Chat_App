@@ -119,6 +119,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
         string? clientAttachmentId = null,
         IProgress<AttachmentUploadProgress>? progress = null,
         int maxAttempts = 3,
+        string? sha256 = null,
         CancellationToken ct = default)
     {
         if (contentLength <= 0)
@@ -142,10 +143,25 @@ public sealed class AttachmentApiService : IAttachmentClientService
                             ContentType = contentType,
                             ContentLength = contentLength,
                             OriginalName = originalName,
-                            ClientAttachmentId = clientAttachmentId
+                            ClientAttachmentId = clientAttachmentId,
+                            Sha256 = sha256
                         },
                         ct)
                     .ConfigureAwait(false);
+
+                // 秒传命中：服务端已有同 hash 文件，跳过上传直接返回
+                if (ticket.Deduplicated)
+                {
+                    return new AttachmentUploadResult
+                    {
+                        AttachmentId = ticket.AttachmentId,
+                        DownloadPath = ticket.DownloadPath,
+                        ObjectKey = ticket.ObjectKey,
+                        ContentType = contentType,
+                        SizeBytes = contentLength,
+                        OriginalName = originalName
+                    };
+                }
 
                 await UploadAsync(ticket, content, contentType, contentLength, progress, ct)
                     .ConfigureAwait(false);

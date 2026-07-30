@@ -35,6 +35,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IEventBus _eventBus;
     private readonly IDatabaseService _dbService;
     private readonly ICurrentUserContext _currentUserContext;
+    private readonly IAttachmentStorageService _storage;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
     private LocalFriend? CurrFriend { get; set; }
@@ -111,23 +112,17 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private string? _pendingAttachmentId;
-    private string? _pendingAttachmentName;
+    // 多附件草稿（阶段 3-5）
+    private readonly List<PendingAttachment> _pendingAttachments = new();
 
-    public string? PendingAttachmentName
-    {
-        get => _pendingAttachmentName;
-        private set
-        {
-            if (SetProperty(ref _pendingAttachmentName, value))
-            {
-                OnPropertyChanged(nameof(HasPendingAttachment));
-                ClearPendingAttachmentCommand.RaiseCanExecuteChanged();
-            }
-        }
-    }
+    public IReadOnlyList<PendingAttachment> PendingAttachments => _pendingAttachments;
 
-    public bool HasPendingAttachment => !string.IsNullOrWhiteSpace(_pendingAttachmentId);
+    public bool HasPendingAttachment => _pendingAttachments.Count > 0;
+
+    public string PendingAttachmentSummary =>
+        _pendingAttachments.Count == 0
+            ? string.Empty
+            : string.Join(", ", _pendingAttachments.Select(a => a.FileName ?? a.AttachmentId));
 
     private string? _replyToMessageId;
     private long? _replyToSenderUserId;
@@ -166,7 +161,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand SendMessageCommand { get; }
     public AsyncRelayCommand AttachFileCommand { get; }
     public AsyncRelayCommand CancelUploadCommand { get; }
-    public AsyncRelayCommand ClearPendingAttachmentCommand { get; }
+    public AsyncRelayCommand<PendingAttachment?> ClearPendingAttachmentCommand { get; }
     public AsyncRelayCommand ClearReplyDraftCommand { get; }
     public AsyncRelayCommand ClearEditDraftCommand { get; }
     public RelayCommand ReplyToMessageCommand { get; }
@@ -191,11 +186,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IMessageStore messageStore,
         IEventBus eventBus,
         IDatabaseService dbService,
-        ICurrentUserContext currentUserContext)
+        ICurrentUserContext currentUserContext,
+        IAttachmentStorageService storage)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
         _attachments = attachmentClientService;
+        _storage = storage;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -227,24 +224,38 @@ public class MessageViewModel : ViewModelBase, IDisposable
             },
             () => IsUploading);
 
-        ClearPendingAttachmentCommand = new AsyncRelayCommand(
-            async ct =>
+        ClearPendingAttachmentCommand = new AsyncRelayCommand<PendingAttachment?>(
+            async (att, ct) =>
             {
-                if (!string.IsNullOrWhiteSpace(_pendingAttachmentId))
+                if (att is not null)
                 {
                     try
                     {
-                        await _attachments.AbandonAsync(_pendingAttachmentId, ct).ConfigureAwait(true);
+                        await _attachments.AbandonAsync(att.AttachmentId, ct).ConfigureAwait(true);
                     }
                     catch (Exception ex)
                     {
                         Log.Debug(ex, "清除待发送附件时 abandon 失败");
                     }
+                    ClearPendingAttachment(att);
                 }
-
-                ClearPendingAttachment();
+                else
+                {
+                    foreach (var item in _pendingAttachments)
+                    {
+                        try
+                        {
+                            await _attachments.AbandonAsync(item.AttachmentId, ct).ConfigureAwait(true);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Debug(ex, "清除待发送附件时 abandon 失败");
+                        }
+                    }
+                    ClearPendingAttachment();
+                }
             },
-            () => HasPendingAttachment && !IsUploading);
+            _ => HasPendingAttachment && !IsUploading);
 
         ClearReplyDraftCommand = new AsyncRelayCommand(
             _ =>
@@ -795,8 +806,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         var text = NewMessage?.Trim();
         var hasText = !string.IsNullOrWhiteSpace(text);
-        var hasAttachment = !string.IsNullOrWhiteSpace(_pendingAttachmentId);
-        if (!hasText && !hasAttachment) return;
+        var hasAttachments = _pendingAttachments.Count > 0;
+        if (!hasText && !hasAttachments) return;
 
         if (!_chatSession.IsConnected || !_chatSession.IsAuthenticated)
         {
@@ -839,9 +850,21 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        IReadOnlyList<string>? attachmentIds = hasAttachment
-            ? [_pendingAttachmentId!]
-            : null;
+        IReadOnlyList<string>? attachmentIds = null;
+        IReadOnlyList<AttachmentRefDto>? attachments = null;
+        if (hasAttachments)
+        {
+            attachmentIds = _pendingAttachments.Select(a => a.AttachmentId).ToList();
+            attachments = _pendingAttachments.Select(a => new AttachmentRefDto
+            {
+                AttachmentId = a.AttachmentId,
+                FileName = a.FileName,
+                ContentType = a.ContentType,
+                SizeBytes = a.SizeBytes,
+                Status = 1,
+                DownloadApiHint = a.AttachmentId
+            }).ToList();
+        }
 
         var replyMessageId = _replyToMessageId;
         var replySenderId = _replyToSenderUserId;
@@ -852,22 +875,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var nowUtc = DateTime.UtcNow;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        var attachmentIdsJson = hasAttachment
+        var attachmentIdsJson = hasAttachments
             ? JsonSerializer.Serialize(attachmentIds)
             : null;
-
-        var attachments = hasAttachment
-            ? new AttachmentRefDto[]
-            {
-                new()
-                {
-                    AttachmentId = _pendingAttachmentId!,
-                    FileName = _pendingAttachmentName,
-                    ContentType = "application/octet-stream",
-                    Status = 1,
-                    DownloadApiHint = _pendingAttachmentId
-                }
-            }
+        var attachmentsJson = hasAttachments
+            ? JsonSerializer.Serialize(attachments)
             : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
@@ -932,7 +944,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ReceiverUserId = CurrFriend.FriendId,
             Content = text ?? string.Empty,
             ReceivedAtMs = nowMs,
-            AttachmentsJson = attachmentIdsJson,
+            AttachmentsJson = attachmentsJson,
             ReplyToMessageId = replyMessageId,
             ReplyToSenderUserId = replySenderId,
             ReplyToPreview = replyPreview,
@@ -1051,43 +1063,168 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (CurrFriend is null) return;
         if (PickAttachmentAsync is null)
         {
-            _notificationService.ShowError("当前界面未接入文件选择器。");
+            _notificationService.ShowError("No file picker available.");
             return;
         }
 
         var picked = await PickAttachmentAsync(ct).ConfigureAwait(true);
         if (picked is null) return;
 
+        const long MaxAttachmentSize = 100 * 1024 * 1024;
+        if (picked.ContentLength > MaxAttachmentSize)
+        {
+            _notificationService.ShowError($"File too large (max {MaxAttachmentSize / 1024 / 1024}MB).");
+            return;
+        }
+        var availableSpace = _storage.GetAvailableDiskSpace();
+        if (availableSpace.HasValue && availableSpace.Value < picked.ContentLength * 2)
+        {
+            _notificationService.ShowError("Insufficient disk space.");
+            return;
+        }
+
         IsUploading = true;
         UploadProgress = 0;
+        string? clientAttachmentId = null;
+        string? uploadingRelativePath = null;
         try
         {
-            await using var stream = picked.OpenRead();
+            string? sha256 = null;
+            try
+            {
+                await using (var hashStream = picked.OpenRead())
+                {
+                    var hashProgress = new Progress<long>(_ => { });
+                    sha256 = await FileHasher.ComputeSha256Async(hashStream, hashProgress, ct).ConfigureAwait(true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Hash computation failed, continuing without dedup");
+                sha256 = null;
+            }
+            if (sha256 is not null)
+            {
+                try
+                {
+                    var existing = await _dbService.GetAttachmentBySha256Async(_currentUserContext.RequireUserId(), sha256).ConfigureAwait(true);
+                    if (existing is not null && !string.IsNullOrWhiteSpace(existing.AttachmentId))
+                    {
+                        AddPendingAttachment(new PendingAttachment
+                        {
+                            AttachmentId = existing.AttachmentId,
+                            FileName = existing.FileName ?? picked.FileName,
+                            ContentType = existing.ContentType,
+                            SizeBytes = existing.SizeBytes
+                        });
+                        UploadProgress = 100;
+                        _notificationService.ShowSuccess($"Attachment ready: {existing.FileName ?? picked.FileName}");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Local dedup query failed");
+                }
+            }
+
+            clientAttachmentId = Guid.NewGuid().ToString("N");
+            try
+            {
+                await using (var sourceStream = picked.OpenRead())
+                {
+                    uploadingRelativePath = await _storage.WriteToUploadingAsync(sourceStream, picked.FileName, ct).ConfigureAwait(true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to write local temp file");
+                _notificationService.ShowError("Failed to save attachment temp file.");
+                return;
+            }
+            var owner = _currentUserContext.RequireUserId();
+            try
+            {
+                await _dbService.UpsertAttachmentAsync(new LocalAttachment
+                {
+                    OwnerUserId = owner,
+                    ClientAttachmentId = clientAttachmentId,
+                    FileName = picked.FileName,
+                    ContentType = picked.ContentType,
+                    SizeBytes = picked.ContentLength,
+                    Sha256 = sha256,
+                    Status = 0,
+                    LocalUploadingPath = uploadingRelativePath,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                }).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to persist uploading attachment metadata");
+            }
+
             var progress = new Progress<AttachmentUploadProgress>(p =>
             {
                 Dispatcher.UIThread.Post(() => UploadProgress = p.Percent);
             });
 
-            var result = await _attachments.UploadAndConfirmAsync(
-                    stream,
-                    picked.ContentType,
-                    picked.ContentLength,
-                    picked.FileName,
-                    clientAttachmentId: Guid.NewGuid().ToString("N"),
-                    progress,
-                    maxAttempts: 3,
-                    ct)
-                .ConfigureAwait(true);
-
-            _pendingAttachmentId = result.AttachmentId;
-            PendingAttachmentName = result.OriginalName ?? picked.FileName;
+            AttachmentUploadResult result;
+            await using (var uploadStream = _storage.OpenUploadingRead(uploadingRelativePath))
+            {
+                result = await _attachments.UploadAndConfirmAsync(
+                        uploadStream, picked.ContentType, picked.ContentLength, picked.FileName,
+                        clientAttachmentId: clientAttachmentId, progress, maxAttempts: 3, sha256, ct)
+                    .ConfigureAwait(true);
+            }
+            AddPendingAttachment(new PendingAttachment
+            {
+                AttachmentId = result.AttachmentId,
+                FileName = result.OriginalName ?? picked.FileName,
+                ContentType = result.ContentType,
+                SizeBytes = result.SizeBytes
+            });
             UploadProgress = 100;
-            _notificationService.ShowSuccess($"附件已就绪: {PendingAttachmentName}");
+            _notificationService.ShowSuccess($"Attachment ready: {result.OriginalName ?? picked.FileName}");
+
+            try
+            {
+                await _dbService.UpsertAttachmentAsync(new LocalAttachment
+                {
+                    OwnerUserId = owner,
+                    AttachmentId = result.AttachmentId,
+                    ClientAttachmentId = clientAttachmentId,
+                    FileName = result.OriginalName,
+                    ContentType = result.ContentType,
+                    SizeBytes = result.SizeBytes,
+                    Sha256 = sha256,
+                    DownloadPath = result.DownloadPath,
+                    ObjectKey = result.ObjectKey,
+                    Status = 1,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                }).ConfigureAwait(true);
+                await _dbService.UpdateAttachmentUploadPathAsync(owner, clientAttachmentId, localUploadingPath: null).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to update attachment metadata to Available");
+            }
+
+            _storage.DeleteUploadingFile(uploadingRelativePath);
+            uploadingRelativePath = null;
         }
         catch (OperationCanceledException)
         {
+            await MarkAttachmentFailedAsync(clientAttachmentId, uploadingRelativePath, "Cancelled").ConfigureAwait(true);
             ClearPendingAttachment();
-            _notificationService.ShowError("已取消附件上传");
+            _notificationService.ShowError("Attachment upload cancelled.");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Attachment upload failed ClientAttachmentId={ClientAttachmentId}", clientAttachmentId);
+            await MarkAttachmentFailedAsync(clientAttachmentId, uploadingRelativePath, "Upload failed").ConfigureAwait(true);
+            _notificationService.ShowError($"Attachment upload failed: {ex.Message}");
         }
         finally
         {
@@ -1095,6 +1232,18 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    private async Task MarkAttachmentFailedAsync(string? clientAttachmentId, string? uploadingRelativePath, string reason)
+    {
+        if (string.IsNullOrEmpty(clientAttachmentId)) return;
+        try
+        {
+            await _dbService.UpdateAttachmentStatusAsync(_currentUserContext.RequireUserId(), null, clientAttachmentId, 2, null, reason).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to mark attachment as Failed ClientAttachmentId={ClientAttachmentId}", clientAttachmentId);
+        }
+    }
     private async Task DownloadAttachmentAsync(AttachmentRefDto? attachment, CancellationToken ct)
     {
         if (attachment is null || string.IsNullOrWhiteSpace(attachment.AttachmentId))
@@ -1106,32 +1255,153 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        var hint = string.IsNullOrWhiteSpace(attachment.DownloadApiHint)
-            ? attachment.AttachmentId
-            : attachment.DownloadApiHint;
+        var fileName = !string.IsNullOrWhiteSpace(attachment.FileName)
+            ? attachment.FileName
+            : $"{attachment.AttachmentId}.bin";
 
-        var downloaded = await _attachments.DownloadAsync(hint, ct: ct)
-            .ConfigureAwait(true);
-        await using var content = downloaded.Content;
+        // 1. 查本地缓存（阶段 3-4）
+        string? cachedPath = null;
+        try
+        {
+            cachedPath = _storage.GetDownloadCachePath(attachment.AttachmentId, fileName);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "查询下载缓存失败");
+        }
 
-        var fileName = attachment.FileName
-            ?? downloaded.FileName
-            ?? $"{attachment.AttachmentId}.bin";
-        var contentType = string.IsNullOrWhiteSpace(attachment.ContentType)
-            ? downloaded.ContentType
-            : attachment.ContentType;
+        Stream? content = null;
+        try
+        {
+            if (cachedPath is null)
+            {
+                // 缓存未命中，从服务端下载并写入磁盘缓存
+                var hint = !string.IsNullOrWhiteSpace(attachment.DownloadApiHint)
+                    ? attachment.DownloadApiHint!
+                    : attachment.AttachmentId;
 
-        var saved = await SaveDownloadedAttachmentAsync(fileName, content, contentType, ct)
-            .ConfigureAwait(true);
-        if (saved)
-            _notificationService.ShowSuccess($"已保存: {fileName}");
+                Stream? downloaded = null;
+                try
+                {
+                    var result = await _attachments.DownloadAsync(hint, ct: ct).ConfigureAwait(true);
+                    downloaded = result.Content;
+
+                    try
+                    {
+                        cachedPath = await _storage.WriteToDownloadsAsync(
+                            attachment.AttachmentId, fileName, downloaded, ct).ConfigureAwait(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "写入下载缓存失败");
+                    }
+                }
+                finally
+                {
+                    downloaded?.Dispose();
+                }
+
+                // 下载缓存成功后更新 LocalAttachment.LocalCachePath（阶段 3-4）
+                if (cachedPath is not null)
+                {
+                    await TryUpdateAttachmentCachePathAsync(attachment.AttachmentId, cachedPath).ConfigureAwait(true);
+                }
+            }
+            else
+            {
+                Log.Information("下载缓存命中 AttachmentId={AttachmentId}", attachment.AttachmentId);
+            }
+
+            // 弹保存对话框：优先从缓存文件读取
+            if (cachedPath is not null)
+                content = File.OpenRead(cachedPath);
+
+            if (content is null)
+            {
+                _notificationService.ShowError("下载附件失败：无法获取内容。");
+                return;
+            }
+
+            var contentType = !string.IsNullOrWhiteSpace(attachment.ContentType)
+                ? attachment.ContentType
+                : GuessContentTypeFromName(fileName);
+
+            var saved = await SaveDownloadedAttachmentAsync(fileName, content, contentType, ct)
+                .ConfigureAwait(true);
+            if (saved)
+                _notificationService.ShowSuccess($"已保存: {fileName}");
+        }
+        catch (OperationCanceledException)
+        {
+            // 用户取消
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "下载附件失败");
+            _notificationService.ShowError("下载附件失败: " + ex.Message);
+        }
+        finally
+        {
+            content?.Dispose();
+        }
     }
 
-    private void ClearPendingAttachment()
+    private async Task TryUpdateAttachmentCachePathAsync(string attachmentId, string cachedPath)
     {
-        _pendingAttachmentId = null;
-        PendingAttachmentName = null;
-        UploadProgress = 0;
+        try
+        {
+            var owner = _currentUserContext.RequireUserId();
+            var existing = await _dbService.GetAttachmentByAttachmentIdAsync(owner, attachmentId).ConfigureAwait(true);
+            if (existing is not null && string.IsNullOrEmpty(existing.LocalCachePath))
+            {
+                existing.LocalCachePath = Path.GetFileName(cachedPath);
+                existing.UpdatedAt = DateTime.UtcNow;
+                await _dbService.UpsertAttachmentAsync(existing).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "更新附件缓存路径失败");
+        }
+    }
+
+    private static string GuessContentTypeFromName(string fileName)
+    {
+        var ext = Path.GetExtension(fileName).ToLowerInvariant();
+        return ext switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".pdf" => "application/pdf",
+            ".txt" => "text/plain",
+            _ => "application/octet-stream"
+        };
+    }
+
+    private void ClearPendingAttachment(PendingAttachment? attachment = null)
+    {
+        if (attachment is not null)
+            _pendingAttachments.Remove(attachment);
+        else
+        {
+            _pendingAttachments.Clear();
+            UploadProgress = 0;
+        }
+        OnPropertyChanged(nameof(PendingAttachments));
+        OnPropertyChanged(nameof(HasPendingAttachment));
+        OnPropertyChanged(nameof(PendingAttachmentSummary));
+        ClearPendingAttachmentCommand.RaiseCanExecuteChanged();
+    }
+
+    private void AddPendingAttachment(PendingAttachment attachment)
+    {
+        _pendingAttachments.Add(attachment);
+        OnPropertyChanged(nameof(PendingAttachments));
+        OnPropertyChanged(nameof(HasPendingAttachment));
+        OnPropertyChanged(nameof(PendingAttachmentSummary));
+        ClearPendingAttachmentCommand.RaiseCanExecuteChanged();
     }
 
     private void ClearReplyDraft()
@@ -1364,4 +1634,13 @@ public sealed class PickedAttachmentFile
     public required string ContentType { get; init; }
     public required long ContentLength { get; init; }
     public required Func<Stream> OpenRead { get; init; }
+}
+
+/// <summary>待发送附件草稿项（阶段 3-5 多附件草稿）。</summary>
+public sealed class PendingAttachment
+{
+    public string AttachmentId { get; init; } = string.Empty;
+    public string? FileName { get; init; }
+    public string ContentType { get; init; } = "application/octet-stream";
+    public long SizeBytes { get; init; }
 }

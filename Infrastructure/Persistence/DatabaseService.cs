@@ -549,4 +549,158 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             .SetProperty(m => m.ReadAtMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
             .SetProperty(m => m.UpdatedAt, DateTime.UtcNow), None);
     }
+
+    // ---- 附件元数据（阶段 3）----
+
+    public async Task<List<LocalAttachment>> GetAttachmentsByMessageIdAsync(long ownerUserId, string messageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Attachments
+            .AsNoTracking()
+            .Where(a => a.OwnerUserId == ownerUserId && a.MessageId == messageId)
+            .ToListAsync(None);
+    }
+
+    public async Task<LocalAttachment?> GetAttachmentByAttachmentIdAsync(long ownerUserId, string attachmentId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Attachments
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.OwnerUserId == ownerUserId && a.AttachmentId == attachmentId, None);
+    }
+
+    public async Task<LocalAttachment?> GetAttachmentByClientAttachmentIdAsync(long ownerUserId, string clientAttachmentId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Attachments
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.OwnerUserId == ownerUserId && a.ClientAttachmentId == clientAttachmentId, None);
+    }
+
+    public async Task<LocalAttachment?> GetAttachmentBySha256Async(long ownerUserId, string sha256)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        // Status == Available(1) 优先
+        return await db.Attachments
+            .AsNoTracking()
+            .Where(a => a.OwnerUserId == ownerUserId && a.Sha256 == sha256)
+            .OrderByDescending(a => a.Status == 1 ? 1 : 0)
+            .FirstOrDefaultAsync(None);
+    }
+    public async Task UpsertAttachmentAsync(LocalAttachment attachment)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        LocalAttachment? existing = null;
+        if (!string.IsNullOrEmpty(attachment.AttachmentId))
+        {
+            existing = await db.Attachments
+                .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
+                                      && a.AttachmentId == attachment.AttachmentId, None);
+        }
+        if (existing is null && !string.IsNullOrEmpty(attachment.ClientAttachmentId))
+        {
+            existing = await db.Attachments
+                .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
+                                      && a.ClientAttachmentId == attachment.ClientAttachmentId, None);
+        }        if (existing is not null)
+        {
+            existing.AttachmentId       = attachment.AttachmentId ?? existing.AttachmentId;
+            existing.ClientAttachmentId = attachment.ClientAttachmentId ?? existing.ClientAttachmentId;
+            existing.MessageId          = attachment.MessageId ?? existing.MessageId;
+            existing.ConversationId     = attachment.ConversationId ?? existing.ConversationId;
+            existing.FileName           = attachment.FileName ?? existing.FileName;
+            existing.ContentType        = attachment.ContentType;
+            existing.SizeBytes          = attachment.SizeBytes;
+            existing.Sha256             = attachment.Sha256 ?? existing.Sha256;
+            existing.DownloadPath       = attachment.DownloadPath ?? existing.DownloadPath;
+            existing.ObjectKey          = attachment.ObjectKey ?? existing.ObjectKey;
+            existing.ThumbnailPath      = attachment.ThumbnailPath ?? existing.ThumbnailPath;
+            existing.LocalCachePath     = attachment.LocalCachePath ?? existing.LocalCachePath;
+            existing.LocalThumbnailPath = attachment.LocalThumbnailPath ?? existing.LocalThumbnailPath;
+            existing.LocalUploadingPath = attachment.LocalUploadingPath ?? existing.LocalUploadingPath;
+            existing.RetryCount         = attachment.RetryCount;
+            existing.Status             = attachment.Status;
+            existing.FailureReason      = attachment.FailureReason ?? existing.FailureReason;
+            existing.UpdatedAt          = DateTime.UtcNow;
+        }
+        else
+        {
+            await db.Attachments.AddAsync(attachment, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
+    public async Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.Attachments.Where(a => a.OwnerUserId == ownerUserId);
+        if (!string.IsNullOrEmpty(attachmentId))
+        {
+            query = query.Where(a => a.AttachmentId == attachmentId);
+        }
+        else if (!string.IsNullOrEmpty(clientAttachmentId))
+        {
+            query = query.Where(a => a.ClientAttachmentId == clientAttachmentId);
+        }
+        else
+        {
+            return;
+        }
+        if (!string.IsNullOrEmpty(downloadPath))
+        {
+            await query.ExecuteUpdateAsync(a
+                => a.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.DownloadPath, downloadPath)
+                    .SetProperty(x => x.FailureReason, failureReason)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        }
+        else
+        {
+            await query.ExecuteUpdateAsync(a
+                => a.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.FailureReason, failureReason)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        }
+    }
+
+    /// <summary>更新附件本地上传路径与重试次数。localUploadingPath 传 null 清空该字段；retryCount 传 null 不修改。</summary>
+    public async Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null)
+    {
+        if (string.IsNullOrEmpty(clientAttachmentId))
+            return;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.Attachments.Where(a => a.OwnerUserId == ownerUserId
+                                            && a.ClientAttachmentId == clientAttachmentId);
+        if (retryCount.HasValue)
+        {
+            await query.ExecuteUpdateAsync(a
+                => a.SetProperty(x => x.LocalUploadingPath, localUploadingPath)
+                    .SetProperty(x => x.RetryCount, retryCount.Value)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        }
+        else
+        {
+            await query.ExecuteUpdateAsync(a
+                => a.SetProperty(x => x.LocalUploadingPath, localUploadingPath)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        }
+    }
+
+    public async Task DeleteAttachmentAsync(long ownerUserId, string attachmentId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Attachments
+            .Where(a => a.OwnerUserId == ownerUserId && a.AttachmentId == attachmentId)
+            .ExecuteDeleteAsync(None);
+    }
+
+    public async Task<List<LocalAttachment>> GetUploadingAttachmentsAsync(long ownerUserId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        // Status: 0=Uploading；按 CreatedAt 升序。
+        return await db.Attachments
+            .AsNoTracking()
+            .Where(a => a.OwnerUserId == ownerUserId && a.Status == 0)
+            .OrderBy(a => a.CreatedAt)
+            .ToListAsync(None);
+    }
 }

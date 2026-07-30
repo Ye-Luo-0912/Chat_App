@@ -6,6 +6,9 @@ public sealed class AttachmentPresignRequestDto
     public long ContentLength { get; set; }
     public string? OriginalName { get; set; }
     public string? ClientAttachmentId { get; set; }
+
+    /// <summary>文件 SHA256 哈希（十六进制小写）。服务端可用于秒传去重。</summary>
+    public string? Sha256 { get; set; }
 }
 
 public sealed class AttachmentPresignResponseDto
@@ -16,6 +19,9 @@ public sealed class AttachmentPresignResponseDto
     public string ObjectKey { get; set; } = string.Empty;
     public string Ticket { get; set; } = string.Empty;
     public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>是否秒传命中（服务端已有同 hash 文件，无需上传）。</summary>
+    public bool Deduplicated { get; set; }
 }
 
 public sealed class ConfirmAttachmentRequestDto

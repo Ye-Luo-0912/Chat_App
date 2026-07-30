@@ -21,6 +21,7 @@
       <Compile Remove="Interfaces\IMessageStore.cs" />
       <Compile Remove="Services\MessageStore.cs" />
       <Compile Remove="Services\ChatMessageCoordinator.cs" />
+      <Compile Remove="Services\AttachmentRecoveryService.cs" />
     </ItemGroup>
 
     <!-- UI/ViewModels should reference Core directly -->
