@@ -198,4 +198,321 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await db.Servers.ExecuteDeleteAsync(None);
     }
+
+    // ---- 会话（P0-6 持久化聊天系统）----
+
+    public async Task<List<LocalConversation>> GetConversationsAsync(long ownerUserId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Conversations
+            .AsNoTracking()
+            .Where(c => c.OwnerUserId == ownerUserId)
+            .ToListAsync(None);
+    }
+
+    public async Task<LocalConversation?> GetConversationAsync(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Conversations
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId, None);
+    }
+
+    public async Task UpsertConversationAsync(LocalConversation conversation)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.Conversations
+            .FirstOrDefaultAsync(c => c.OwnerUserId == conversation.OwnerUserId
+                                   && c.ConversationId == conversation.ConversationId, None);
+        if (existing is not null)
+        {
+            existing.Type               = conversation.Type;
+            existing.PeerUserId         = conversation.PeerUserId;
+            existing.LastMessageId      = conversation.LastMessageId;
+            existing.LastMessagePreview = conversation.LastMessagePreview;
+            existing.LastMessageAtMs    = conversation.LastMessageAtMs;
+            existing.LastSenderUserId   = conversation.LastSenderUserId;
+            existing.UnreadCount        = conversation.UnreadCount;
+            existing.LastReadMessageId  = conversation.LastReadMessageId;
+            existing.LastReadAtMs       = conversation.LastReadAtMs;
+            existing.IsPinned           = conversation.IsPinned;
+            existing.PinnedAtMs         = conversation.PinnedAtMs;
+            existing.IsMuted            = conversation.IsMuted;
+            existing.MutedUntilMs       = conversation.MutedUntilMs;
+            existing.LastSynced         = conversation.LastSynced;
+        }
+        else
+        {
+            await db.Conversations.AddAsync(conversation, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
+
+    public async Task DeleteConversationAsync(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Conversations
+            .Where(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId)
+            .ExecuteDeleteAsync(None);
+    }
+
+    // ---- 消息（P0-6）----
+
+    public async Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.Messages
+            .AsNoTracking()
+            .Where(m => m.OwnerUserId == ownerUserId && m.ConversationId == conversationId);
+        if (beforeReceivedAtMs is long beforeMs)
+        {
+            query = query.Where(m => m.ReceivedAtMs < beforeMs);
+        }
+        // 游标分页：按 ReceivedAtMs 倒序取一页，再反转为时间正序，便于 UI 直接追加。
+        var page = await query
+            .OrderByDescending(m => m.ReceivedAtMs)
+            .Take(limit)
+            .ToListAsync(None);
+        page.Reverse();
+        return page;
+    }
+
+    public async Task<LocalMessage?> GetMessageByServerIdAsync(long ownerUserId, string messageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Messages
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId, None);
+    }
+
+    public async Task<LocalMessage?> GetMessageByClientIdAsync(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Messages
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId && m.ClientMessageId == clientMessageId, None);
+    }
+
+    public async Task UpsertMessageAsync(LocalMessage message)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        LocalMessage? existing = null;
+        if (!string.IsNullOrEmpty(message.MessageId))
+        {
+            existing = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.MessageId == message.MessageId, None);
+        }
+        if (existing is null && !string.IsNullOrEmpty(message.ClientMessageId))
+        {
+            existing = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.ClientMessageId == message.ClientMessageId, None);
+        }
+        if (existing is not null)
+        {
+            existing.Content         = message.Content;
+            existing.ReceivedAtMs    = message.ReceivedAtMs;
+            existing.DeliveredAtMs   = message.DeliveredAtMs;
+            existing.ReadAtMs        = message.ReadAtMs;
+            existing.RecalledAtMs    = message.RecalledAtMs;
+            existing.EditVersion     = message.EditVersion;
+            existing.EditedAtMs      = message.EditedAtMs;
+            existing.AttachmentsJson = message.AttachmentsJson;
+            existing.Status          = message.Status;
+            existing.FailureReason   = message.FailureReason;
+            existing.UpdatedAt       = message.UpdatedAt;
+            // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
+            if (string.IsNullOrEmpty(existing.MessageId) && !string.IsNullOrEmpty(message.MessageId))
+            {
+                existing.MessageId = message.MessageId;
+            }
+        }
+        else
+        {
+            await db.Messages.AddAsync(message, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
+
+    public async Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, byte status, string? failureReason = null)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId);
+        if (!string.IsNullOrEmpty(messageId))
+        {
+            query = query.Where(m => m.MessageId == messageId);
+        }
+        else if (!string.IsNullOrEmpty(clientMessageId))
+        {
+            query = query.Where(m => m.ClientMessageId == clientMessageId);
+        }
+        else
+        {
+            return;
+        }
+        await query.ExecuteUpdateAsync(m
+            => m.SetProperty(x => x.Status, status)
+                .SetProperty(x => x.FailureReason, failureReason)
+                .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+    }
+
+    public async Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs)
+    {
+        const byte Recalled = 5;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId)
+            .ExecuteUpdateAsync(m
+                => m.SetProperty(x => x.Status, Recalled)
+                    .SetProperty(x => x.RecalledAtMs, recalledAtMs)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+    }
+
+    public async Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId)
+            .ExecuteUpdateAsync(m
+                => m.SetProperty(x => x.Content, content)
+                    .SetProperty(x => x.EditVersion, editVersion)
+                    .SetProperty(x => x.EditedAtMs, editedAtMs)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+    }
+
+    public async Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Messages
+            .AsNoTracking()
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.ReceivedAtMs > afterReceivedAtMs)
+            .OrderBy(m => m.ReceivedAtMs)
+            .Take(limit)
+            .ToListAsync(None);
+    }
+
+    // ---- Outbox（P0-6）----
+
+    public async Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.OutboxMessages.AddAsync(outbox, None);
+        await db.SaveChangesAsync(None);
+        return outbox.Id;
+    }
+
+    public async Task<LocalOutboxMessage?> GetOutboxByClientIdAsync(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.OutboxMessages
+            .AsNoTracking()
+            .FirstOrDefaultAsync(o => o.OwnerUserId == ownerUserId && o.ClientMessageId == clientMessageId, None);
+    }
+
+    public async Task<List<LocalOutboxMessage>> GetPendingOutboxAsync(long ownerUserId, int limit = 50)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        // Status: 0=Queued, 3=Failed；按下次重试时间（或入队时间）升序处理。
+        return await db.OutboxMessages
+            .AsNoTracking()
+            .Where(o => o.OwnerUserId == ownerUserId && (o.Status == 0 || o.Status == 3))
+            .OrderBy(o => o.NextRetryAt ?? o.QueuedAt)
+            .Take(limit)
+            .ToListAsync(None);
+    }
+
+    public async Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, byte status, string? messageId = null, string? failureReason = null)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId && o.ClientMessageId == clientMessageId);
+        var now = DateTime.UtcNow;
+        if (!string.IsNullOrEmpty(messageId))
+        {
+            await query.ExecuteUpdateAsync(o
+                => o.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.MessageId, messageId)
+                    .SetProperty(x => x.SentAt, now)
+                    .SetProperty(x => x.FailureReason, failureReason), None);
+        }
+        else if (!string.IsNullOrEmpty(failureReason))
+        {
+            await query.ExecuteUpdateAsync(o
+                => o.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.FailureReason, failureReason), None);
+        }
+        else
+        {
+            await query.ExecuteUpdateAsync(o
+                => o.SetProperty(x => x.Status, status), None);
+        }
+    }
+
+    public async Task DeleteOutboxAsync(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId && o.ClientMessageId == clientMessageId)
+            .ExecuteDeleteAsync(None);
+    }
+
+    // ---- 同步水位（P0-6）----
+
+    public async Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.SyncCursors
+            .AsNoTracking()
+            .FirstOrDefaultAsync(s => s.OwnerUserId == ownerUserId && s.ConversationId == conversationId, None);
+    }
+
+    public async Task UpsertSyncCursorAsync(LocalSyncCursor cursor)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.SyncCursors
+            .FirstOrDefaultAsync(s => s.OwnerUserId == cursor.OwnerUserId && s.ConversationId == cursor.ConversationId, None);
+        if (existing is not null)
+        {
+            existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
+            existing.AfterMessageId    = cursor.AfterMessageId;
+            existing.UpdatedAt         = cursor.UpdatedAt;
+        }
+        else
+        {
+            await db.SyncCursors.AddAsync(cursor, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
+
+    // ---- 会话已读状态（P0-6）----
+
+    public async Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.ConversationReadStates
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.OwnerUserId == ownerUserId && r.ConversationId == conversationId, None);
+    }
+
+    public async Task UpsertReadStateAsync(LocalConversationReadState readState)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.ConversationReadStates
+            .FirstOrDefaultAsync(r => r.OwnerUserId == readState.OwnerUserId && r.ConversationId == readState.ConversationId, None);
+        if (existing is not null)
+        {
+            existing.LastReadMessageId = readState.LastReadMessageId;
+            existing.LastReadAtMs      = readState.LastReadAtMs;
+            existing.UnreadCount       = readState.UnreadCount;
+            existing.UpdatedAt         = readState.UpdatedAt;
+        }
+        else
+        {
+            await db.ConversationReadStates.AddAsync(readState, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
 }

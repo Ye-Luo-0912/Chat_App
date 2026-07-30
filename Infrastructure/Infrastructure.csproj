@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
@@ -34,6 +34,14 @@
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </None>
       <Compile Remove="Services\CurrentUserContext .cs" />
+    </ItemGroup>
+
+    <!-- 跨项目编译：这三个文件物理位于 Core\，但依赖 Infrastructure 类型，故在此编译。 -->
+    <ItemGroup>
+      <Compile Include="..\Core\Events\ChatEvents.cs" />
+      <Compile Include="..\Core\Interfaces\IMessageStore.cs" />
+      <Compile Include="..\Core\Services\MessageStore.cs" />
+      <Compile Include="..\Core\Services\ChatMessageCoordinator.cs" />
     </ItemGroup>
 
 </Project>

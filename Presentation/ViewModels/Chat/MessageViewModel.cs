@@ -3,14 +3,17 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
+using Chat_App.Infrastructure.Persistence;
 using Chat_App.Models;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Contracts.Attachments;
+using Core.Events;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models.DTO;
@@ -27,8 +30,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly INotificationService _notificationService;
     private readonly IChatSessionClient _chatSession;
     private readonly IAttachmentClientService _attachments;
+    private readonly IMessageStore _messageStore;
+    private readonly IEventBus _eventBus;
+    private readonly IDatabaseService _dbService;
+    private readonly ICurrentUserContext _currentUserContext;
+    private readonly List<IDisposable> _eventSubscriptions = [];
 
     private LocalFriend? CurrFriend { get; set; }
+    private string? CurrConversationId { get; set; }
 
     private string _peerTitle = string.Empty;
     public string PeerTitle
@@ -177,11 +186,19 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public MessageViewModel(
         INotificationService notificationService,
         IChatSessionClient chatSessionClient,
-        IAttachmentClientService attachmentClientService)
+        IAttachmentClientService attachmentClientService,
+        IMessageStore messageStore,
+        IEventBus eventBus,
+        IDatabaseService dbService,
+        ICurrentUserContext currentUserContext)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
         _attachments = attachmentClientService;
+        _messageStore = messageStore;
+        _eventBus = eventBus;
+        _dbService = dbService;
+        _currentUserContext = currentUserContext;
 
         SendMessageCommand = new AsyncRelayCommand(
             SendMessage,
@@ -331,67 +348,93 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 _notificationService.ShowError($"附件下载失败: {ex.Message}");
             });
 
-        _chatSession.ChatMessageReceived += OnChatMessageReceived;
         _chatSession.MessageRecalled += OnMessageRecalled;
         _chatSession.MessageEdited += OnMessageEdited;
-        _chatSession.MessageAcknowledged += OnMessageAcknowledged;
         _chatSession.TypingUpdated += OnTypingUpdated;
         _chatSession.PresenceChanged += OnPresenceChanged;
+
+        _eventSubscriptions.Add(_eventBus.Subscribe<MessagePersistedEvent>(OnMessagePersisted));
+        _eventSubscriptions.Add(_eventBus.Subscribe<MessageStatusChangedEvent>(OnMessageStatusChanged));
+        _eventSubscriptions.Add(_eventBus.Subscribe<OutboxStatusChangedEvent>(OnOutboxStatusChanged));
+        _eventSubscriptions.Add(_eventBus.Subscribe<MessageRecalledEvent>(OnMessageRecalledPersisted));
+        _eventSubscriptions.Add(_eventBus.Subscribe<MessageEditedEvent>(OnMessageEditedPersisted));
     }
 
-    private void OnMessageAcknowledged(object? sender, MessageAcknowledgementDto ack)
+    private void OnMessagePersisted(MessagePersistedEvent e)
     {
-        if (string.IsNullOrWhiteSpace(ack.ClientMessageId))
+        if (CurrConversationId is null || e.Message.ConversationId != CurrConversationId)
             return;
-
         Dispatcher.UIThread.Post(() =>
         {
-            var local = Messages.FirstOrDefault(m =>
-                string.Equals(m.ClientMessageId, ack.ClientMessageId, StringComparison.Ordinal));
-            if (local is null)
-                return;
+            var msg = e.Message;
+            var existing = Messages.FirstOrDefault(m =>
+                (!string.IsNullOrWhiteSpace(msg.MessageId) && string.Equals(m.MessageId, msg.MessageId, StringComparison.Ordinal))
+                || (!string.IsNullOrWhiteSpace(msg.ClientMessageId) && string.Equals(m.ClientMessageId, msg.ClientMessageId, StringComparison.Ordinal)));
+            if (existing is not null) return;
+            var ui = ToUiMessage(msg);
+            if (ui is not null) Messages.Add(ui);
+        });
+    }
 
-            if (!ack.Accepted)
-            {
-                _notificationService.ShowError(
-                    string.IsNullOrWhiteSpace(ack.ErrorMessage)
-                        ? "消息发送被拒绝。"
-                        : ack.ErrorMessage);
-                return;
-            }
+    private void OnMessageStatusChanged(MessageStatusChangedEvent e)
+    {
+        if (CurrConversationId is null || e.ConversationId != CurrConversationId)
+            return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            var local = FindMessage(e.MessageId, e.ClientMessageId);
+            if (local is null) return;
+            local.Status = e.NewStatus;
+        });
+    }
 
-            if (!string.IsNullOrWhiteSpace(ack.CommandId))
+    private void OnOutboxStatusChanged(OutboxStatusChangedEvent e)
+    {
+        if (string.IsNullOrWhiteSpace(e.ClientMessageId))
+            return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            var local = Messages.FirstOrDefault(m => string.Equals(m.ClientMessageId, e.ClientMessageId, StringComparison.Ordinal));
+            if (local is null) return;
+            local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
+            if (!string.IsNullOrWhiteSpace(e.ServerMessageId))
             {
-                local.MessageId = ack.CommandId;
+                local.MessageId = e.ServerMessageId;
                 RecallMessageCommand.RaiseCanExecuteChanged();
                 BeginEditMessageCommand.RaiseCanExecuteChanged();
             }
         });
     }
 
-    private void OnChatMessageReceived(object? sender, ChatMessageDto msg)
+    private void OnMessageRecalledPersisted(MessageRecalledEvent e)
     {
-        if (CurrFriend is null || msg.SenderUserId != CurrFriend.FriendId)
+        if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
+        Dispatcher.UIThread.Post(() => ApplyRecalled(e.MessageId));
+    }
 
-        Dispatcher.UIThread.Post(() =>
+    private void OnMessageEditedPersisted(MessageEditedEvent e)
+    {
+        if (CurrConversationId is null || e.ConversationId != CurrConversationId)
+            return;
+        Dispatcher.UIThread.Post(() => ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs));
+    }
+
+    private static byte MapOutboxStatusToMessageStatus(byte os) => os switch
+    {
+        0 => 0, 1 => 1, 2 => 2, 3 => 4, 4 => 4, _ => os
+    };
+
+    private Message? FindMessage(string? messageId, string? clientMessageId)
+    {
+        if (!string.IsNullOrWhiteSpace(messageId))
         {
-            Messages.Add(new Message
-            {
-                MessageId = msg.MessageId,
-                Content = msg.Content?.Trim() ?? string.Empty,
-                Timestamp = msg.SentUtc,
-                IsSentByMe = false,
-                Sender = new User(),
-                Attachments = msg.Attachments,
-                ReplyToMessageId = msg.ReplyToMessageId,
-                ReplyToSenderUserId = msg.ReplyToSenderUserId,
-                ReplyToPreview = msg.ReplyToPreview,
-                ForwardedFromMessageId = msg.ForwardedFromMessageId,
-                ForwardedFromSenderUserId = msg.ForwardedFromSenderUserId,
-                ForwardedFromPreview = msg.ForwardedFromPreview
-            });
-        });
+            var byServer = Messages.FirstOrDefault(m => string.Equals(m.MessageId, messageId, StringComparison.Ordinal));
+            if (byServer is not null) return byServer;
+        }
+        if (!string.IsNullOrWhiteSpace(clientMessageId))
+            return Messages.FirstOrDefault(m => string.Equals(m.ClientMessageId, clientMessageId, StringComparison.Ordinal));
+        return null;
     }
 
     private void OnMessageRecalled(object? sender, MessageRecalledUpdateDto update)
@@ -485,6 +528,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = UnwatchPeerPresenceAsync(previousPeerId);
 
         CurrFriend = selectedFriend;
+        try
+        {
+            CurrConversationId = ConversationId.CreateDirect(
+                _currentUserContext.RequireUserId(), selectedFriend.FriendId);
+        }
+        catch
+        {
+            CurrConversationId = null;
+        }
         PeerTitle = selectedFriend.Title;
         PeerIsOnline = selectedFriend.IsOnline;
         IsPeerTyping = false;
@@ -504,6 +556,80 @@ public class MessageViewModel : ViewModelBase, IDisposable
         AttachFileCommand.RaiseCanExecuteChanged();
         Log.Debug("MessageView 初始化: 好友={FriendName}", selectedFriend.FriendName);
         _ = RefreshPeerPresenceAsync(selectedFriend.FriendId);
+        _ = LoadHistoryAsync();
+    }
+
+    private async Task LoadHistoryAsync()
+    {
+        if (CurrFriend is null || CurrConversationId is null)
+            return;
+
+        try
+        {
+            var history = await _messageStore.LoadHistoryAsync(CurrConversationId, limit: 100)
+                .ConfigureAwait(true);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                foreach (var lm in history)
+                {
+                    var ui = ToUiMessage(lm);
+                    if (ui is not null)
+                        Messages.Add(ui);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "加载历史消息失败");
+        }
+    }
+
+    private Message? ToUiMessage(LocalMessage lm)
+    {
+        var selfId = _currentUserContext.HasUserId ? _currentUserContext.UserId!.Value : 0;
+        var ts = lm.ReceivedAtMs > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(lm.ReceivedAtMs).LocalDateTime
+            : DateTime.UtcNow;
+
+        IReadOnlyList<AttachmentRefDto>? attachments = null;
+        if (!string.IsNullOrWhiteSpace(lm.AttachmentsJson))
+        {
+            try
+            {
+                attachments = JsonSerializer.Deserialize<List<AttachmentRefDto>>(lm.AttachmentsJson);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "反序列化附件 JSON 失败");
+            }
+        }
+
+        var msg = new Message
+        {
+            MessageId = lm.MessageId,
+            ClientMessageId = lm.ClientMessageId,
+            Content = lm.Content ?? string.Empty,
+            Timestamp = ts,
+            IsSentByMe = lm.SenderUserId == selfId,
+            Status = lm.Status,
+            Sender = new User(),
+            Attachments = attachments,
+            ReplyToMessageId = lm.ReplyToMessageId,
+            ReplyToSenderUserId = lm.ReplyToSenderUserId,
+            ReplyToPreview = lm.ReplyToPreview,
+            ForwardedFromMessageId = lm.ForwardedFromMessageId,
+            ForwardedFromSenderUserId = lm.ForwardedFromSenderUserId,
+            ForwardedFromPreview = lm.ForwardedFromPreview,
+            EditVersion = lm.EditVersion > 0 ? lm.EditVersion : 1,
+            EditedAtMs = lm.EditedAtMs
+        };
+
+        if (lm.RecalledAtMs is > 0)
+            msg.ApplyRecalled();
+        else if (lm.EditVersion > 1 || lm.EditedAtMs is > 0)
+            msg.IsEdited = true;
+
+        return msg;
     }
 
     /// <summary>将同步 catch-up 消息合并进当前打开的会话（按 MessageId 去重）。</summary>
@@ -511,6 +637,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrFriend is null || items.Count == 0)
             return;
+
+        if (CurrConversationId is not null)
+            _ = _messageStore.PersistHistoryAsync(CurrConversationId, items);
 
         var peerId = CurrFriend.FriendId;
         var selfId = _chatSession.CurrentUserId;
@@ -628,15 +757,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var replySenderId = _replyToSenderUserId;
         var replyPreview = _replyDraftPreview;
 
-        var clientMessageId = await _chatSession.SendChatMessageAsync(
-                CurrFriend.FriendId,
-                text,
-                attachmentIds,
-                replyMessageId,
-                replySenderId,
-                replyPreview,
-                ct: ct)
-            .ConfigureAwait(true);
+        var selfId = _currentUserContext.RequireUserId();
+        var conversationId = ConversationId.CreateDirect(selfId, CurrFriend.FriendId);
+        var nowUtc = DateTime.UtcNow;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        var attachmentIdsJson = hasAttachment
+            ? JsonSerializer.Serialize(attachmentIds)
+            : null;
 
         var attachments = hasAttachment
             ? new AttachmentRefDto[]
@@ -652,12 +780,90 @@ public class MessageViewModel : ViewModelBase, IDisposable
             }
             : null;
 
+        string clientMessageId;
+        byte outboxStatus;
+        byte messageStatus;
+
+        try
+        {
+            clientMessageId = await _chatSession.SendChatMessageAsync(
+                    CurrFriend.FriendId,
+                    text,
+                    attachmentIds,
+                    replyMessageId,
+                    replySenderId,
+                    replyPreview,
+                    ct: ct)
+                .ConfigureAwait(true);
+            outboxStatus = 2;
+            messageStatus = 2;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "发送消息失败，已入 Outbox 等待重试");
+            clientMessageId = Guid.CreateVersion7().ToString("N");
+            outboxStatus = 3;
+            messageStatus = 4;
+            _notificationService.ShowError($"消息发送失败，已保存可重试: {ex.Message}");
+        }
+
+        var outbox = new LocalOutboxMessage
+        {
+            OwnerUserId = selfId,
+            ClientMessageId = clientMessageId,
+            ConversationId = conversationId,
+            TargetUserId = CurrFriend.FriendId,
+            Content = text,
+            AttachmentIdsJson = attachmentIdsJson,
+            ReplyToMessageId = replyMessageId,
+            ReplyToSenderUserId = replySenderId,
+            ReplyToPreview = replyPreview,
+            Status = outboxStatus,
+            QueuedAt = nowUtc,
+            SentAt = outboxStatus == 2 ? nowUtc : null
+        };
+        try
+        {
+            await _dbService.EnqueueOutboxAsync(outbox).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Outbox 入库失败 ClientMessageId={ClientMessageId}", clientMessageId);
+        }
+
+        var localMessage = new LocalMessage
+        {
+            OwnerUserId = selfId,
+            ClientMessageId = clientMessageId,
+            ConversationId = conversationId,
+            SenderUserId = selfId,
+            ReceiverUserId = CurrFriend.FriendId,
+            Content = text ?? string.Empty,
+            ReceivedAtMs = nowMs,
+            AttachmentsJson = attachmentIdsJson,
+            ReplyToMessageId = replyMessageId,
+            ReplyToSenderUserId = replySenderId,
+            ReplyToPreview = replyPreview,
+            Status = messageStatus,
+            CreatedAt = nowUtc,
+            UpdatedAt = nowUtc
+        };
+        try
+        {
+            await _dbService.UpsertMessageAsync(localMessage).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "LocalMessage 入库失败 ClientMessageId={ClientMessageId}", clientMessageId);
+        }
+
         Messages.Add(new Message
         {
             ClientMessageId = clientMessageId,
             Content = text ?? string.Empty,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
+            Status = messageStatus,
             Sender = new User(),
             Attachments = attachments,
             ReplyToMessageId = replyMessageId,
@@ -868,6 +1074,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = UnwatchPeerPresenceAsync(peerId);
 
         CurrFriend = null;
+        CurrConversationId = null;
         PeerTitle = string.Empty;
         PeerIsOnline = false;
         IsPeerTyping = false;
@@ -887,12 +1094,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (peerId > 0)
             _ = UnwatchPeerPresenceAsync(peerId);
 
-        _chatSession.ChatMessageReceived -= OnChatMessageReceived;
         _chatSession.MessageRecalled -= OnMessageRecalled;
         _chatSession.MessageEdited -= OnMessageEdited;
-        _chatSession.MessageAcknowledged -= OnMessageAcknowledged;
         _chatSession.TypingUpdated -= OnTypingUpdated;
         _chatSession.PresenceChanged -= OnPresenceChanged;
+
+        foreach (var sub in _eventSubscriptions)
+            sub.Dispose();
+        _eventSubscriptions.Clear();
         GC.SuppressFinalize(this);
     }
 

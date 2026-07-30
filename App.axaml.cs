@@ -90,7 +90,10 @@ public partial class App : Application
             .AddSingleton<IMessagePacketCodec, MessagePacketCodec>()
             .AddSingleton<IPacketBodySerializer, JsonPacketBodySerializer>()
             .AddSingleton<ICurrentUserState, CurrentUserContext>()
-            .AddSingleton<ICurrentUserContext>(sp => sp.GetRequiredService<ICurrentUserState>());
+            .AddSingleton<ICurrentUserContext>(sp => sp.GetRequiredService<ICurrentUserState>())
+            .AddSingleton<IEventBus, InMemoryEventBus>()
+            .AddSingleton<IMessageStore, MessageStore>()
+            .AddSingleton<ChatMessageCoordinator>();
 
 
         services.AddHttpClient<IAuthClientService, AuthClientService>("AuthClient", (sp, client) =>
@@ -179,6 +182,9 @@ public partial class App : Application
 
             db.Database.Migrate();
         }
+
+        // 实例化协调器，开始订阅网络事件进行持久化
+        Services.GetRequiredService<Core.Services.ChatMessageCoordinator>();
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

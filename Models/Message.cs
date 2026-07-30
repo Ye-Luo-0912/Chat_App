@@ -48,6 +48,25 @@ public class Message : INotifyPropertyChanged
 
     public DateTime Timestamp { get; set; }
     public bool IsSentByMe { get; set; }
+
+    private byte _status = 2;
+    public byte Status
+    {
+        get => _status;
+        set
+        {
+            if (_status == value)
+                return;
+            _status = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IsFailed));
+            OnPropertyChanged(nameof(IsPending));
+        }
+    }
+
+    public bool IsFailed => Status == 4;
+    public bool IsPending => Status == 0 || Status == 1;
+
     public required User Sender { get; set; }
 
     public IReadOnlyList<AttachmentRefDto>? Attachments
