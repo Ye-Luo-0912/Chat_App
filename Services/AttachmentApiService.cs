@@ -20,6 +20,11 @@ public sealed class AttachmentApiService : IAttachmentClientService
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private static readonly HttpClient S3UploadClient = new()
+    {
+        Timeout = TimeSpan.FromMinutes(10)
+    };
+
     private readonly HttpClient _httpClient;
 
     public AttachmentApiService(HttpClient httpClient)
@@ -75,8 +80,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
             && !IsSameAuthority(absolute, _httpClient.BaseAddress))
         {
             // S3 预签名：不带 Bearer，直接 PUT 到绝对 URL。
-            using var s3Client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-            response = await s3Client
+            response = await S3UploadClient
                 .PutAsync(absolute, streamContent, ct)
                 .ConfigureAwait(false);
         }
@@ -125,6 +129,9 @@ public sealed class AttachmentApiService : IAttachmentClientService
         if (contentLength <= 0)
             throw new ArgumentOutOfRangeException(nameof(contentLength));
         maxAttempts = Math.Clamp(maxAttempts, 1, 5);
+
+        if (maxAttempts > 1 && !content.CanSeek)
+            throw new ArgumentException("非 seekable 流不支持重试，请设置 maxAttempts=1 或传入可 seek 的流", nameof(content));
 
         AttachmentPresignResponseDto? ticket = null;
         Exception? lastError = null;
@@ -317,8 +324,21 @@ public sealed class AttachmentApiService : IAttachmentClientService
     {
         private readonly Stream _inner;
         private readonly long _total;
+        private const long MinReportIntervalTicks = 500000; // 50ms
+
         private readonly Action<long> _onProgress;
         private long _read;
+        private long _lastReportTicks;
+
+        private void MaybeReportProgress()
+        {
+            var now = DateTime.UtcNow.Ticks;
+            if (now - _lastReportTicks >= MinReportIntervalTicks || _read >= _total)
+            {
+                _lastReportTicks = now;
+                _onProgress(_read);
+            }
+        }
 
         public ProgressReadStream(Stream inner, long total, Action<long> onProgress)
         {
@@ -345,7 +365,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
             if (n > 0)
             {
                 _read += n;
-                _onProgress(_read);
+                MaybeReportProgress();
             }
 
             return n;
@@ -362,7 +382,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
             if (n > 0)
             {
                 _read += n;
-                _onProgress(_read);
+                MaybeReportProgress();
             }
 
             return n;
@@ -376,7 +396,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
             if (n > 0)
             {
                 _read += n;
-                _onProgress(_read);
+                MaybeReportProgress();
             }
 
             return n;

@@ -23,6 +23,11 @@ namespace Core.Models
         public const uint MagicNumber = 0x1A2B3C4D;
 
         /// <summary>
+        /// 帧头魔数字节序列（MagicNumber 的小端字节序表示），用于坏包重新同步时按字节搜索。
+        /// </summary>
+        public static readonly byte[] MagicBytes = { 0x4D, 0x3C, 0x2B, 0x1A };
+
+        /// <summary>
         /// 包体最大长度 (80KB)，可以根据实际需求调整
         /// </summary>
         public const int MaxBodySize = 81920;

@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using Chat_App.Presentation.ViewModels.Shell;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
@@ -50,13 +51,23 @@ public class FriendsViewModel : ViewModelBase
     #region ── 好友列表 ──────────────────────────────────
 
     private string _searchText = string.Empty;
+    private CancellationTokenSource? _searchDebounceCts;
     public string SearchText
     {
         get => _searchText;
         set
         {
             if (SetProperty(ref _searchText, value))
-                FilterFriends();
+            {
+                _searchDebounceCts?.Cancel();
+                _searchDebounceCts = new CancellationTokenSource();
+                var token = _searchDebounceCts.Token;
+                _ = Task.Delay(200, token).ContinueWith(_ =>
+                {
+                    if (!token.IsCancellationRequested)
+                        Dispatcher.UIThread.Post(FilterFriends);
+                }, TaskScheduler.Default);
+            }
         }
     }
 

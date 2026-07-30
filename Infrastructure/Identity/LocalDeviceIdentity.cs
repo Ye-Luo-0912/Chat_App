@@ -65,8 +65,21 @@ public sealed class LocalDeviceIdentity : ILocalDeviceIdentity
 
     private static string ResolvePath()
     {
-        var dataDir = Path.Combine(AppContext.BaseDirectory, "Data");
-        return Path.Combine(dataDir, FileName);
+        var dataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ChatApp",
+            "Data");
+        Directory.CreateDirectory(dataDir);
+        var newPath = Path.Combine(dataDir, FileName);
+
+        // 迁移旧路径的 device.id
+        var oldPath = Path.Combine(AppContext.BaseDirectory, "Data", FileName);
+        if (File.Exists(oldPath) && !File.Exists(newPath))
+        {
+            try { File.Copy(oldPath, newPath); } catch { }
+        }
+
+        return newPath;
     }
 
     private static string CreateNew()

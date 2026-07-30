@@ -19,6 +19,7 @@ using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using Infrastructure.Models;
+using Infrastructure.Serialization;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
@@ -157,6 +158,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public string SendButtonText => HasEditDraft ? "保存" : "发送";
 
     public ObservableCollection<Message> Messages { get; } = [];
+
+    private readonly Dictionary<string, Message> _messagesByServerId = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Message> _messagesByClientId = new(StringComparer.Ordinal);
+    private static readonly User EmptyUser = new();
 
     public AsyncRelayCommand SendMessageCommand { get; }
     public AsyncRelayCommand AttachFileCommand { get; }
@@ -381,12 +386,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         Dispatcher.UIThread.Post(() =>
         {
             var msg = e.Message;
-            var existing = Messages.FirstOrDefault(m =>
-                (!string.IsNullOrWhiteSpace(msg.MessageId) && string.Equals(m.MessageId, msg.MessageId, StringComparison.Ordinal))
-                || (!string.IsNullOrWhiteSpace(msg.ClientMessageId) && string.Equals(m.ClientMessageId, msg.ClientMessageId, StringComparison.Ordinal)));
+            var existing = FindMessage(msg.MessageId, msg.ClientMessageId);
             if (existing is not null) return;
             var ui = ToUiMessage(msg);
-            if (ui is not null) Messages.Add(ui);
+            if (ui is not null) AddMessage(ui);
         });
     }
 
@@ -408,12 +411,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         Dispatcher.UIThread.Post(() =>
         {
-            var local = Messages.FirstOrDefault(m => string.Equals(m.ClientMessageId, e.ClientMessageId, StringComparison.Ordinal));
+            var local = FindMessage(null, e.ClientMessageId);
             if (local is null) return;
             local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
             if (!string.IsNullOrWhiteSpace(e.ServerMessageId))
             {
                 local.MessageId = e.ServerMessageId;
+                _messagesByServerId[e.ServerMessageId] = local;
                 RecallMessageCommand.RaiseCanExecuteChanged();
                 BeginEditMessageCommand.RaiseCanExecuteChanged();
             }
@@ -446,14 +450,27 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private Message? FindMessage(string? messageId, string? clientMessageId)
     {
-        if (!string.IsNullOrWhiteSpace(messageId))
-        {
-            var byServer = Messages.FirstOrDefault(m => string.Equals(m.MessageId, messageId, StringComparison.Ordinal));
-            if (byServer is not null) return byServer;
-        }
-        if (!string.IsNullOrWhiteSpace(clientMessageId))
-            return Messages.FirstOrDefault(m => string.Equals(m.ClientMessageId, clientMessageId, StringComparison.Ordinal));
+        if (!string.IsNullOrWhiteSpace(messageId) && _messagesByServerId.TryGetValue(messageId, out var m))
+            return m;
+        if (!string.IsNullOrWhiteSpace(clientMessageId) && _messagesByClientId.TryGetValue(clientMessageId, out m))
+            return m;
         return null;
+    }
+
+    internal void AddMessage(Message msg)
+    {
+        Messages.Add(msg);
+        if (!string.IsNullOrWhiteSpace(msg.MessageId))
+            _messagesByServerId[msg.MessageId] = msg;
+        if (!string.IsNullOrWhiteSpace(msg.ClientMessageId))
+            _messagesByClientId[msg.ClientMessageId] = msg;
+    }
+
+    private void ClearMessages()
+    {
+        Messages.Clear();
+        _messagesByServerId.Clear();
+        _messagesByClientId.Clear();
     }
 
     private void OnMessageRecalled(object? sender, MessageRecalledUpdateDto update)
@@ -527,16 +544,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private void ApplyRecalled(string messageId)
     {
-        var existing = Messages.FirstOrDefault(m =>
-            string.Equals(m.MessageId, messageId, StringComparison.Ordinal));
+        var existing = FindMessage(messageId, null);
         existing?.ApplyRecalled();
         BeginEditMessageCommand.RaiseCanExecuteChanged();
     }
 
     private void ApplyEdited(string messageId, string content, int editVersion, long editedAtMs)
     {
-        var existing = Messages.FirstOrDefault(m =>
-            string.Equals(m.MessageId, messageId, StringComparison.Ordinal));
+        var existing = FindMessage(messageId, null);
         existing?.ApplyEdited(content, editVersion, editedAtMs);
     }
 
@@ -560,7 +575,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         PeerIsOnline = selectedFriend.IsOnline;
         IsPeerTyping = false;
         CancelPeerTypingClear();
-        Messages.Clear();
+        ClearMessages();
         if (_newMessage.Length > 0)
         {
             _newMessage = string.Empty;
@@ -594,7 +609,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 {
                     var ui = ToUiMessage(lm);
                     if (ui is not null)
-                        Messages.Add(ui);
+                        AddMessage(ui);
                 }
             });
         }
@@ -697,7 +712,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         {
             try
             {
-                attachments = JsonSerializer.Deserialize<List<AttachmentRefDto>>(lm.AttachmentsJson);
+                attachments = JsonSerializer.Deserialize<List<AttachmentRefDto>>(lm.AttachmentsJson, ChatJsonContext.Default.Options);
             }
             catch (Exception ex)
             {
@@ -713,7 +728,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Timestamp = ts,
             IsSentByMe = lm.SenderUserId == selfId,
             Status = lm.Status,
-            Sender = new User(),
+            Sender = EmptyUser,
             Attachments = attachments,
             ReplyToMessageId = lm.ReplyToMessageId,
             ReplyToSenderUserId = lm.ReplyToSenderUserId,
@@ -757,8 +772,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
             if (!string.IsNullOrWhiteSpace(item.MessageId))
             {
-                var existingMessage = Messages.FirstOrDefault(m =>
-                    string.Equals(m.MessageId, item.MessageId, StringComparison.Ordinal));
+                var existingMessage = FindMessage(item.MessageId, null);
                 if (existingMessage is not null)
                 {
                     if (item.RecalledAtMs is > 0)
@@ -781,7 +795,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 Content = item.Content?.Trim() ?? string.Empty,
                 Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(item.ReceivedAtMs).LocalDateTime,
                 IsSentByMe = item.SenderUserId == selfId,
-                Sender = new User(),
+                Sender = EmptyUser,
                 Attachments = item.Attachments,
                 ReplyToMessageId = item.ReplyToMessageId,
                 ReplyToSenderUserId = item.ReplyToSenderUserId,
@@ -796,7 +810,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 message.ApplyRecalled();
             else if (item.EditVersion > 1 || item.EditedAtMs is > 0)
                 message.IsEdited = true;
-            Messages.Add(message);
+            AddMessage(message);
         }
     }
 
@@ -876,10 +890,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         var attachmentIdsJson = hasAttachments
-            ? JsonSerializer.Serialize(attachmentIds)
+            ? JsonSerializer.Serialize(attachmentIds, ChatJsonContext.Default.Options)
             : null;
         var attachmentsJson = hasAttachments
-            ? JsonSerializer.Serialize(attachments)
+            ? JsonSerializer.Serialize(attachments, ChatJsonContext.Default.Options)
             : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
@@ -961,14 +975,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Log.Warning(ex, "LocalMessage 入库失败 ClientMessageId={ClientMessageId}", clientMessageId);
         }
 
-        Messages.Add(new Message
+        AddMessage(new Message
         {
             ClientMessageId = clientMessageId,
             Content = text ?? string.Empty,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
             Status = messageStatus,
-            Sender = new User(),
+            Sender = EmptyUser,
             Attachments = attachments,
             ReplyToMessageId = replyMessageId,
             ReplyToSenderUserId = replySenderId,
@@ -1051,7 +1065,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Content = content,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
-            Sender = new User(),
+            Sender = EmptyUser,
             ForwardedFromMessageId = source.MessageId,
             ForwardedFromSenderUserId = forwardSenderId,
             ForwardedFromPreview = forwardPreview
@@ -1441,7 +1455,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         PeerIsOnline = false;
         IsPeerTyping = false;
         CancelPeerTypingClear();
-        Messages.Clear();
+        ClearMessages();
         NewMessage = string.Empty;
         ClearPendingAttachment();
         ClearReplyDraft();

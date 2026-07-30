@@ -1,6 +1,7 @@
 using Core.Interfaces;
 using Core.Models;
 using System.Buffers;
+using System.Diagnostics;
 
 namespace Core.Protocol
 {
@@ -30,6 +31,35 @@ namespace Core.Protocol
             // 将新的数据块复制到缓冲区中，并更新读取位置
             chunk.CopyTo(_buffer.AsMemory(_bufferedLength));
             _bufferedLength += chunk.Length;
+        }
+
+        /// <summary>
+        /// 重新同步缓冲区：搜索下一个帧头魔数，丢弃其前的字节；找不到则保留末尾 magic.Length-1 字节防止跨 chunk。
+        /// </summary>
+        private void ResyncToNextMagic()
+        {
+            var magic = MessagePacket.MagicBytes;
+            if (_bufferedLength < magic.Length)
+                return;
+
+            // 跳过位置 0（坏帧开头），从位置 1 起搜索下一个魔数
+            var span = _buffer.AsSpan(1, _bufferedLength - 1);
+            var idx = span.IndexOf(magic);
+            if (idx >= 0)
+            {
+                var discardCount = idx + 1;
+                _buffer.AsSpan(discardCount, _bufferedLength - discardCount).CopyTo(_buffer);
+                _bufferedLength -= discardCount;
+            }
+            else
+            {
+                var keep = magic.Length - 1;
+                if (_bufferedLength > keep)
+                {
+                    _buffer.AsSpan(_bufferedLength - keep, keep).CopyTo(_buffer);
+                    _bufferedLength = keep;
+                }
+            }
         }
 
         public void Reset()
@@ -67,10 +97,12 @@ namespace Core.Protocol
 
             packet = default;
 
-            // 如果解析失败但不是因为数据不足（即数据格式错误），则抛出异常
+            // 解析失败但数据格式错误（坏帧）：丢弃坏帧并重新同步到下一个魔数，避免单个坏帧终止整个连接。
             if (result == PacketParseResult.InvalidPacket)
             {
-                throw new InvalidDataException("接收到非法的协议数据包 (魔数错误或长度越界)！");
+                Debug.WriteLine("丢弃损坏帧，尝试重新同步到下一个魔数");
+                ResyncToNextMagic();
+                return false;
             }
 
             // 解析失败但数据不足，等待更多数据到来

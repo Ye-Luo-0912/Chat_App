@@ -41,7 +41,23 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task AddFriendAsync(List<LocalFriend> friend)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        await db.Friends.AddRangeAsync(friend, None);
+        foreach (var f in friend)
+        {
+            var existing = await db.Friends.FirstOrDefaultAsync(
+                x => x.OwnerUserId == f.OwnerUserId && x.FriendId == f.FriendId, None);
+            if (existing != null)
+            {
+                existing.FriendName = f.FriendName;
+                existing.Note = f.Note;
+                existing.Status = f.Status;
+                existing.AvatarUrl = f.AvatarUrl;
+                existing.LastSynced = DateTime.UtcNow;
+            }
+            else
+            {
+                db.Friends.Add(f);
+            }
+        }
         await db.SaveChangesAsync(None);
     }
 
@@ -57,7 +73,14 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         var friend = await db.Friends.FirstOrDefaultAsync(f => f.Id == updatedFriend.Id, None);
         if (friend != null)
         {
-            db.Friends.Update(friend);
+            friend.FriendId = updatedFriend.FriendId;
+            friend.OwnerUserId = updatedFriend.OwnerUserId;
+            friend.FriendName = updatedFriend.FriendName;
+            friend.Note = updatedFriend.Note;
+            friend.Status = updatedFriend.Status;
+            friend.AvatarUrl = updatedFriend.AvatarUrl;
+            friend.IsOnline = updatedFriend.IsOnline;
+            friend.LastSynced = DateTime.UtcNow;
             await db.SaveChangesAsync(None);
         }
     }

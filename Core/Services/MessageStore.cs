@@ -6,6 +6,7 @@ using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using Infrastructure.Models;
+using Infrastructure.Serialization;
 
 namespace Core.Services;
 
@@ -16,8 +17,6 @@ namespace Core.Services;
 public sealed class MessageStore : IMessageStore
 {
     private const byte ConversationTypeDirect = 1;
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IDatabaseService _db;
     private readonly IEventBus _eventBus;
@@ -513,5 +512,5 @@ public sealed class MessageStore : IMessageStore
     }
 
     private static string? SerializeAttachments(IReadOnlyList<AttachmentRefDto>? attachments)
-        => attachments is null || attachments.Count == 0 ? null : JsonSerializer.Serialize(attachments, JsonOptions);
+        => attachments is null || attachments.Count == 0 ? null : JsonSerializer.Serialize(attachments, ChatJsonContext.Default.Options);
 }

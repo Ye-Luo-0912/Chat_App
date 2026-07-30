@@ -41,13 +41,10 @@
 
     <ItemGroup>
       <AvaloniaXaml Remove="Infrastructure\**" />
-      <AvaloniaXaml Remove="Presentation\Controls\FriendsItemControl .axaml" />
     </ItemGroup>
 
     <ItemGroup>
       <Compile Remove="Infrastructure\**" />
-      <Compile Remove="Infrastructure\Services\CurrentUserContext .cs" />
-      <Compile Remove="Presentation\Controls\FriendsItemControl .axaml.cs" />
     </ItemGroup>
 
     <ItemGroup>

@@ -5,6 +5,9 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Avalonia.Threading;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
 
@@ -14,6 +17,7 @@ public sealed class ChatFriendListState : IDisposable
     private readonly ObservableCollection<LocalFriend> _filteredFriends;
     private string _searchText = string.Empty;
     private LocalFriend? _selectedFriend;
+    private CancellationTokenSource? _searchDebounceCts;
 
     public ChatFriendListState(ObservableCollection<LocalFriend> friends, ObservableCollection<LocalFriend> filteredFriends)
     {
@@ -30,7 +34,14 @@ public sealed class ChatFriendListState : IDisposable
                 return;
 
             _searchText = value;
-            ApplyFilter();
+            _searchDebounceCts?.Cancel();
+            _searchDebounceCts = new CancellationTokenSource();
+            var token = _searchDebounceCts.Token;
+            _ = Task.Delay(200, token).ContinueWith(_ =>
+            {
+                if (!token.IsCancellationRequested)
+                    Dispatcher.UIThread.Post(ApplyFilter);
+            }, TaskScheduler.Default);
         }
     }
 
@@ -129,5 +140,8 @@ public sealed class ChatFriendListState : IDisposable
 
     public void Dispose()
     {
+        _searchDebounceCts?.Cancel();
+        _searchDebounceCts?.Dispose();
+        _searchDebounceCts = null;
     }
 }

@@ -56,6 +56,15 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
             .HasIndex(x => new { x.OwnerUserId, x.MessageId });
         modelBuilder.Entity<LocalMessage>()
             .HasIndex(x => new { x.OwnerUserId, x.ClientMessageId });
+        // 游标分页查询覆盖索引：按会话+时间倒序取一页
+        modelBuilder.Entity<LocalMessage>()
+            .HasIndex(x => new { x.OwnerUserId, x.ConversationId, x.ReceivedAtMs })
+            .HasDatabaseName("ix_messages_owner_conv_time");
+
+        // GetMessagesAfter 查询索引
+        modelBuilder.Entity<LocalMessage>()
+            .HasIndex(x => new { x.OwnerUserId, x.ConversationId, x.ReceivedAtMs, x.MessageId })
+            .HasDatabaseName("ix_messages_owner_conv_time_msgid");
 
         // ---- 发送 Outbox（P0-6）----
         modelBuilder.Entity<LocalOutboxMessage>()

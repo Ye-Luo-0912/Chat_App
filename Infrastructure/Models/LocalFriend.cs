@@ -12,10 +12,10 @@ public class LocalFriend : INotifyPropertyChanged
     public long FriendId { get; set; }
     public string? FriendName { get; set; } = string.Empty;
 
-    public string? AvatarUrl { get; init; }
+    public string? AvatarUrl { get; set; }
 
     public string? Note { get; set; }
-    public FriendshipStatus Status { get; init; }
+    public FriendshipStatus Status { get; set; }
 
     public bool IsDeleted { get; set; }
 

@@ -128,7 +128,11 @@ public partial class App : Application
             })
             .AddHttpMessageHandler<AuthInterceptor>();
 
-        Services = services.BuildServiceProvider();
+        Services = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateScopes = true,
+            ValidateOnBuild = true
+        });
     }
 
     private static void ApplyDeviceHeaders(HttpClient client, ILocalDeviceIdentity device)
@@ -146,45 +150,14 @@ public partial class App : Application
         var dbFactory = Services.GetRequiredService<IDbContextFactory<ClientDbContext>>();
         using (var db = dbFactory.CreateDbContext())
         {
-
-            // 使用 sqlite_master 可靠地检测是否存在迁移历史表。
-            // EnsureCreated() 创建的旧库没有 __EFMigrationsHistory，
-            // 直接删除旧库让 Migrate() 从零重建（用户需重新登录一次）。
-            db.Database.OpenConnection();
-            using (var cmd = db.Database.GetDbConnection().CreateCommand())
+            try
             {
-                cmd.CommandText =
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='__EFMigrationsHistory'";
-                var hasHistoryTable = (long)cmd.ExecuteScalar()! > 0;
-
-                if (!hasHistoryTable)
-                {
-                    // 无迁移历史表 → 旧库，删除后由 Migrate() 重建
-                    db.Database.CloseConnection();
-                    db.Database.EnsureDeleted();
-                }
-                else
-                {
-                    // 迁移历史表存在但可能为空（曾发生半途失败），
-                    // 若已有业务表但没有任何迁移记录，同样视为旧库
-                    cmd.CommandText = "SELECT COUNT(*) FROM \"__EFMigrationsHistory\"";
-                    var historyRows = (long)cmd.ExecuteScalar()!;
-
-                    if (historyRows == 0)
-                    {
-                        cmd.CommandText =
-                            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='Servers'";
-                        var hasDataTables = (long)cmd.ExecuteScalar()! > 0;
-                        if (hasDataTables)
-                        {
-                            db.Database.CloseConnection();
-                            db.Database.EnsureDeleted();
-                        }
-                    }
-                }
+                db.Database.Migrate();
             }
-
-            db.Database.Migrate();
+            catch (Exception ex)
+            {
+                Log.Error(ex, "数据库迁移失败，可能需要手动删除 Data/ChatApp.db");
+            }
         }
 
         // 实例化协调器，开始订阅网络事件进行持久化
@@ -220,19 +193,14 @@ public partial class App : Application
     /// </summary>
     private static IServiceCollection AddDbContext(IServiceCollection services, IConfiguration configuration)
     {
-        var connectionString = configuration.GetConnectionString("DefaultConnection");
-
-        // 确保数据库目录存在，防止 SQLite Error 14
-        if (!string.IsNullOrEmpty(connectionString))
-        {
-            var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connectionString);
-            var dbPath = builder.DataSource;
-            var dbDir = Path.GetDirectoryName(Path.GetFullPath(dbPath));
-            if (!string.IsNullOrEmpty(dbDir) && !Directory.Exists(dbDir))
-            {
-                Directory.CreateDirectory(dbDir);
-            }
-        }
+        // 数据库存储在用户数据目录
+        var dbDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ChatApp",
+            "Data");
+        Directory.CreateDirectory(dbDir);
+        var dbPath = Path.Combine(dbDir, "ChatApp.db");
+        var connectionString = $"Data Source={dbPath};Cache=Shared;Journal Mode=WAL;Synchronous=NORMAL;Busy Timeout=5000;Foreign Keys=ON;";
 
         
         // 使用池化工厂：每个仓储操作通过 CreateDbContextAsync 获取独立短生命周期 DbContext，

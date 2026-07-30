@@ -4,6 +4,7 @@ using Core.Models.DTO;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Text;
+using System.Diagnostics;
 
 namespace Core.Services
 {
@@ -22,6 +23,9 @@ namespace Core.Services
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageHistoryPageDto>> _historyPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageReceiptAckDto>> _receiptPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationMarkReadResponseDto>> _markReadPending = new(StringComparer.Ordinal);
+
+        private long _lastHeartbeatAckTicks;
+        private const int HeartbeatTimeoutSeconds = 60;
 
         public bool IsConnected => _tcpClient.IsConnected;
 
@@ -70,7 +74,14 @@ namespace Core.Services
             // 疯狂往外掏完整的包
             while (_codec.TryRead(out var packet))
             {
-                RoutePacket(packet);
+                try
+                {
+                    RoutePacket(packet);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"路由帧失败 Command={packet.Command}, Error={ex.Message}");
+                }
             }
         }
 
@@ -88,6 +99,7 @@ namespace Core.Services
             else
             {
                 IsAuthenticated = false;
+                Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
                 FailPendingRequests(new IOException(status));
                 ConnectionClosed?.Invoke(this, status);
             }
@@ -143,6 +155,7 @@ namespace Core.Services
         {
             IsAuthenticated = false;
             CurrentUserId = 0;
+            Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
             _tcpClient.Disconnect(reason);
             await Task.CompletedTask; // 占位，保持异步签名
         }
@@ -251,7 +264,20 @@ namespace Core.Services
 
         public async Task SendHeartbeatAsync(CancellationToken ct = default)
         {
-            await SendPacketAsync(PacketCommand.Heartbeat, "", ct);
+            // 检查半开连接：距上次 ACK 超过阈值则主动断连
+            var lastAckTicks = Interlocked.Read(ref _lastHeartbeatAckTicks);
+            if (lastAckTicks > 0)
+            {
+                var elapsed = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - lastAckTicks);
+                if (elapsed.TotalSeconds > HeartbeatTimeoutSeconds)
+                {
+                    Debug.WriteLine($"心跳 ACK 超时 {(int)elapsed.TotalSeconds}s，判定半开连接，主动断开");
+                    _ = DisconnectAsync("心跳超时", ct);
+                    return;
+                }
+            }
+
+            await SendPacketAsync(PacketCommand.Heartbeat, (object?)null, ct);
         }
 
         public async Task<ConversationListResponseDto> QueryConversationListAsync(
@@ -701,15 +727,17 @@ namespace Core.Services
         /// <returns></returns>
         private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct)
         {
-            if (payload is null)
-                return;
+            ReadOnlyMemory<byte> bodyBytes = default;
+            if (payload is not null)
+                bodyBytes = _bodySerializer.Serialize(payload);
 
-            var bodyBytes = _bodySerializer.Serialize(payload);
-
-            var packet = new MessagePacket(command, new ReadOnlySequence<byte>(bodyBytes));
+            var bodyLen = bodyBytes.Length;
+            var packet = new MessagePacket(
+                command,
+                bodyBytes.IsEmpty ? ReadOnlySequence<byte>.Empty : new ReadOnlySequence<byte>(bodyBytes));
 
             // 借用内存池写入包头+包体
-            var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyBytes.Length);
+            var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyLen);
 
             if (_codec.TryWrite(packet, writer, out _))
             {
@@ -717,7 +745,7 @@ namespace Core.Services
             }
             else
             {
-                throw new InvalidOperationException($"法序列化命令 { command } 的消息包");
+                throw new InvalidOperationException($"帧编码失败: {command}");
             }
         }
 
@@ -820,7 +848,9 @@ namespace Core.Services
                         ConversationChanged?.Invoke(this, changed);
                     return;
                 case PacketCommand.Heartbeat:
+                    return;
                 case PacketCommand.HeartbeatAck:
+                    Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
                     return;
                 case PacketCommand.MessageAck:
                     var ack = _bodySerializer.Deserialize<MessageAcknowledgementDto>(packet.Body);
@@ -899,6 +929,7 @@ namespace Core.Services
             {
                 IsAuthenticated = true;
                 CurrentUserId = response.UserId.Value;
+                Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
                 _authTcs?.TrySetResult(true);
                 Authenticated?.Invoke(this, CurrentUserId);
 

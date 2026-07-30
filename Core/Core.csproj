@@ -10,10 +10,6 @@
       <Folder Include="tools\" />
     </ItemGroup>
 
-    <ItemGroup>
-      <Compile Remove="Interfaces\IChatSessionClient .cs" />
-      <Compile Remove="Interfaces\ICurrentUserState .cs" />
-    </ItemGroup>
 
     <!-- 这三个文件依赖 Infrastructure（IDatabaseService / Infrastructure.Models），改由 Infrastructure.csproj 编译，避免循环依赖。 -->
     <ItemGroup>

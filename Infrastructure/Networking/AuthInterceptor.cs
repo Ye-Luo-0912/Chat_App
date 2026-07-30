@@ -69,11 +69,24 @@ public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIde
 
         if (req.Content != null)
         {
-            var bytes = await req.Content.ReadAsByteArrayAsync(cancellation).ConfigureAwait(false);
-            clone.Content = new ByteArrayContent(bytes);
+            // 对流式内容不自动缓冲重放（避免大文件 OOM）
+            if (req.Content is ByteArrayContent or StringContent or FormUrlEncodedContent)
+            {
+                var bytes = await req.Content.ReadAsByteArrayAsync(cancellation).ConfigureAwait(false);
+                clone.Content = new ByteArrayContent(bytes);
+            }
+            else
+            {
+                // 流式内容（如 StreamContent）：不重放，401 重试由上层处理
+                System.Diagnostics.Debug.WriteLine("流式请求内容在 401 时不自动重放，上层需处理重试");
+                clone.Content = null;
+            }
 
-            foreach (var h in req.Content.Headers)
-                clone.Content.Headers.Add(h.Key, h.Value);
+            if (clone.Content != null)
+            {
+                foreach (var h in req.Content.Headers)
+                    clone.Content.Headers.Add(h.Key, h.Value);
+            }
         }
 
         foreach (var h in req.Headers)

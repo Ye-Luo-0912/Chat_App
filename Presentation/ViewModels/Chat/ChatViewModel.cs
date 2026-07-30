@@ -29,6 +29,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private bool _disposed;
     private Message? _pendingForwardMessage;
     private long[] _watchedPresenceUserIds = [];
+    private readonly Dictionary<long, LocalFriend> _friendsById = new();
 
     public ObservableCollection<LocalFriend> Friends { get; } = [];
     public ObservableCollection<LocalFriend> FilteredFriends { get; } = [];
@@ -139,8 +140,19 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _ => "#FCA5A5"
     };
 
-    public Avalonia.Media.IBrush ConnectionIndicatorBrush =>
-        Avalonia.Media.Brush.Parse(ConnectionIndicatorColor);
+    private static readonly Avalonia.Media.IBrush ConnectedBrush = Avalonia.Media.Brush.Parse("#86EFAC");
+    private static readonly Avalonia.Media.IBrush ConnectingBrush = Avalonia.Media.Brush.Parse("#FDE68A");
+    private static readonly Avalonia.Media.IBrush ReconnectingBrush = Avalonia.Media.Brush.Parse("#FDBA74");
+    private static readonly Avalonia.Media.IBrush DisconnectedBrush = Avalonia.Media.Brush.Parse("#FCA5A5");
+
+    public Avalonia.Media.IBrush ConnectionIndicatorBrush => ConnectionStatus switch
+    {
+        ChatConnectionStatus.Connected => ConnectedBrush,
+        ChatConnectionStatus.Connecting => ConnectingBrush,
+        ChatConnectionStatus.Authenticating => ConnectingBrush,
+        ChatConnectionStatus.Reconnecting => ReconnectingBrush,
+        _ => DisconnectedBrush
+    };
 
     public AsyncRelayCommand<LocalFriend> PinFriendCommand { get; }
     public AsyncRelayCommand<LocalFriend> UnpinFriendCommand { get; }
@@ -159,6 +171,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             Friends.Add(new LocalFriend { FriendName = "Avalonia 机器人", FriendId = 10003, DisplayName = "Avalonia 机器人" });
 
             _friendListState = new ChatFriendListState(Friends, FilteredFriends);
+            RebuildFriendsIndex();
             _friendListState.ApplyFilter();
             PinFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
             UnpinFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
@@ -223,12 +236,18 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _chatSession.PresenceChanged += OnPresenceChanged;
     }
 
+    private void RebuildFriendsIndex()
+    {
+        _friendsById.Clear();
+        foreach (var f in Friends)
+            _friendsById[f.FriendId] = f;
+    }
+
     private void OnPresenceChanged(object? sender, Core.Models.DTO.PresenceChangedDto e)
     {
         Dispatcher.UIThread.Post(() =>
         {
-            var friend = Friends.FirstOrDefault(f => f.FriendId == e.UserId);
-            if (friend is not null)
+            if (_friendsById.TryGetValue(e.UserId, out var friend))
                 friend.IsOnline = e.IsOnline;
         });
     }
@@ -250,17 +269,12 @@ public class ChatViewModel : ViewModelBase, IDisposable
             {
                 foreach (var item in snap.Items)
                 {
-                    var friend = Friends.FirstOrDefault(f => f.FriendId == item.UserId);
-                    if (friend is not null)
+                    if (_friendsById.TryGetValue(item.UserId, out var friend))
                         friend.IsOnline = item.IsOnline;
                 }
 
-                if (SelectedFriend is not null)
-                {
-                    var selected = Friends.FirstOrDefault(f => f.FriendId == SelectedFriend.FriendId);
-                    if (selected is not null)
-                        SelectedFriend.IsOnline = selected.IsOnline;
-                }
+                if (SelectedFriend is not null && _friendsById.TryGetValue(SelectedFriend.FriendId, out var selected))
+                    SelectedFriend.IsOnline = selected.IsOnline;
             });
         }
         catch (Exception ex)
@@ -324,7 +338,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             }
 
             if (localBubble is not null)
-                _messageViewModel.Messages.Add(localBubble);
+                _messageViewModel.AddMessage(localBubble);
         }
     }
 
@@ -343,6 +357,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             {
                 var friends = await _friendLoader.LoadAsync(ct);
                 _friendListState.ReplaceFriends(friends);
+                RebuildFriendsIndex();
                 _isInitialized = true;
                 if (_chatSession.IsAuthenticated)
                     _ = RefreshPresenceAsync(ct);
@@ -562,6 +577,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
         Friends.Clear();
         FilteredFriends.Clear();
+        RebuildFriendsIndex();
         _friendListState.ApplyFilter();
 
         _messageViewModel.Clear();
