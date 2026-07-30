@@ -43,7 +43,7 @@ public interface IDatabaseService
     Task<LocalMessage?> GetMessageByServerIdAsync(long ownerUserId, string messageId);
     Task<LocalMessage?> GetMessageByClientIdAsync(long ownerUserId, string clientMessageId);
     Task UpsertMessageAsync(LocalMessage message);
-    Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, byte status, string? failureReason = null);
+    Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null);
     Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs);
     Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs);
     Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100);
@@ -52,14 +52,18 @@ public interface IDatabaseService
     Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox);
     Task<LocalOutboxMessage?> GetOutboxByClientIdAsync(long ownerUserId, string clientMessageId);
     Task<List<LocalOutboxMessage>> GetPendingOutboxAsync(long ownerUserId, int limit = 50);
-    Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, byte status, string? messageId = null, string? failureReason = null);
+    Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
     Task DeleteOutboxAsync(long ownerUserId, string clientMessageId);
 
     // ---- 同步水位（P0-6）----
     Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId);
     Task UpsertSyncCursorAsync(LocalSyncCursor cursor);
+    Task<List<LocalSyncCursor>> GetAllSyncCursorsAsync(long ownerUserId);
 
     // ---- 会话已读状态（P0-6）----
     Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId);
     Task UpsertReadStateAsync(LocalConversationReadState readState);
+
+    /// <summary>批量标记会话内消息为已读（ReceivedAtMs <= beforeReceivedAtMs 的消息）。</summary>
+    Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs);
 }

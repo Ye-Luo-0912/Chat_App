@@ -3,6 +3,7 @@ using Chat_App.Infrastructure.Persistence;
 using Core.Events;
 using Core.Helpers;
 using Core.Interfaces;
+using Core.Models;
 using Core.Models.DTO;
 using Infrastructure.Models;
 
@@ -14,14 +15,6 @@ namespace Core.Services;
 /// </summary>
 public sealed class MessageStore : IMessageStore
 {
-    private const byte StatusSent = 2;
-    private const byte StatusDelivered = 3;
-    private const byte StatusFailed = 4;
-    private const byte StatusRecalled = 5;
-
-    private const byte OutboxStatusSent = 2;
-    private const byte OutboxStatusFailed = 3;
-
     private const byte ConversationTypeDirect = 1;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -29,12 +22,14 @@ public sealed class MessageStore : IMessageStore
     private readonly IDatabaseService _db;
     private readonly IEventBus _eventBus;
     private readonly ICurrentUserContext _currentUserContext;
+    private readonly IChatSessionClient _chatSession;
 
-    public MessageStore(IDatabaseService db, IEventBus eventBus, ICurrentUserContext currentUserContext)
+    public MessageStore(IDatabaseService db, IEventBus eventBus, ICurrentUserContext currentUserContext, IChatSessionClient chatSession)
     {
         _db = db;
         _eventBus = eventBus;
         _currentUserContext = currentUserContext;
+        _chatSession = chatSession;
     }
 
     /// <inheritdoc />
@@ -76,7 +71,7 @@ public sealed class MessageStore : IMessageStore
             ForwardedFromMessageId = dto.ForwardedFromMessageId,
             ForwardedFromSenderUserId = dto.ForwardedFromSenderUserId,
             ForwardedFromPreview = dto.ForwardedFromPreview,
-            Status = StatusDelivered,
+            Status = MessageStatus.Delivered,
             FailureReason = null,
             RetryCount = 0,
             CreatedAt = DateTime.UtcNow,
@@ -130,7 +125,7 @@ public sealed class MessageStore : IMessageStore
                 ForwardedFromMessageId = item.ForwardedFromMessageId,
                 ForwardedFromSenderUserId = item.ForwardedFromSenderUserId,
                 ForwardedFromPreview = item.ForwardedFromPreview,
-                Status = item.RecalledAtMs.HasValue ? StatusRecalled : StatusDelivered,
+                Status = item.RecalledAtMs.HasValue ? MessageStatus.Recalled : MessageStatus.Delivered,
                 FailureReason = null,
                 RetryCount = 0,
                 CreatedAt = DateTime.UtcNow,
@@ -169,22 +164,22 @@ public sealed class MessageStore : IMessageStore
         if (ack.Accepted)
         {
             var serverMessageId = ack.CommandId;
-            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatusSent, serverMessageId, null);
-            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, StatusSent, null);
+            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatus.Sent, serverMessageId, null);
+            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, MessageStatus.Sent, null, ackServerMessageId: serverMessageId);
 
-            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatusSent, serverMessageId));
+            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Sent, serverMessageId));
             if (conversationId is not null)
-                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, StatusSent, null));
+                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, MessageStatus.Sent, null));
         }
         else
         {
             var failureReason = string.IsNullOrWhiteSpace(ack.ErrorMessage) ? ack.ErrorCode : ack.ErrorMessage;
-            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatusFailed, null, failureReason);
-            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, StatusFailed, failureReason);
+            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatus.Failed, null, failureReason);
+            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, MessageStatus.Failed, failureReason);
 
-            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatusFailed, null));
+            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Failed, null));
             if (conversationId is not null)
-                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, StatusFailed, failureReason));
+                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, MessageStatus.Failed, failureReason));
         }
     }
 
@@ -311,6 +306,115 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<ConversationSyncWatermarkDto>> GetSyncWatermarksAsync(CancellationToken ct = default)
+    {
+        var owner = _currentUserContext.RequireUserId();
+        var cursors = await _db.GetAllSyncCursorsAsync(owner);
+        return cursors
+            .Where(c => !string.IsNullOrWhiteSpace(c.AfterMessageId))
+            .Select(c => new ConversationSyncWatermarkDto
+            {
+                ConversationId = c.ConversationId,
+                AfterReceivedAtMs = c.AfterReceivedAtMs,
+                AfterMessageId = c.AfterMessageId
+            })
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    /// <inheritdoc />
+    public async Task HandleReceiptAsync(MessageReceiptDto dto, CancellationToken ct = default)
+    {
+        var owner = _currentUserContext.RequireUserId();
+        var conversationId = ResolveConversationId(dto.ConversationId, owner, dto.ReaderUserId ?? 0, dto.ReceiverUserId ?? 0);
+        if (conversationId is null)
+            return;
+
+        if (dto.LastReadAtMs.HasValue)
+            await _db.MarkConversationMessagesReadAsync(owner, conversationId, dto.LastReadAtMs.Value);
+
+        var readState = await _db.GetReadStateAsync(owner, conversationId)
+            ?? new LocalConversationReadState { OwnerUserId = owner, ConversationId = conversationId };
+        if (!string.IsNullOrWhiteSpace(dto.LastReadMessageId))
+            readState.LastReadMessageId = dto.LastReadMessageId;
+        if (dto.LastReadAtMs.HasValue)
+            readState.LastReadAtMs = dto.LastReadAtMs;
+        readState.UpdatedAt = DateTime.UtcNow;
+        await _db.UpsertReadStateAsync(readState);
+
+        _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+    }
+    /// <inheritdoc />
+    public async Task HandleReceiptUpdatedAsync(MessageReceiptUpdatedDto dto, CancellationToken ct = default)
+    {
+        var owner = _currentUserContext.RequireUserId();
+        var conversationId = dto.ConversationId;
+        if (string.IsNullOrWhiteSpace(conversationId))
+            return;
+
+        if (dto.LastReadAtMs.HasValue)
+            await _db.MarkConversationMessagesReadAsync(owner, conversationId, dto.LastReadAtMs.Value);
+
+        var readState = await _db.GetReadStateAsync(owner, conversationId)
+            ?? new LocalConversationReadState { OwnerUserId = owner, ConversationId = conversationId };
+        if (!string.IsNullOrWhiteSpace(dto.LastReadMessageId))
+            readState.LastReadMessageId = dto.LastReadMessageId;
+        if (dto.LastReadAtMs.HasValue)
+            readState.LastReadAtMs = dto.LastReadAtMs;
+        readState.UpdatedAt = DateTime.UtcNow;
+        await _db.UpsertReadStateAsync(readState);
+
+        _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+    }
+    /// <inheritdoc />
+    public async Task HandleUnreadCountChangedAsync(UnreadCountChangedDto dto, CancellationToken ct = default)
+    {
+        var owner = _currentUserContext.RequireUserId();
+        var conv = await _db.GetConversationAsync(owner, dto.ConversationId);
+        if (conv is not null)
+        {
+            conv.UnreadCount = dto.UnreadCount;
+            if (!string.IsNullOrWhiteSpace(dto.LastReadMessageId))
+                conv.LastReadMessageId = dto.LastReadMessageId;
+            if (dto.LastReadAtMs.HasValue)
+                conv.LastReadAtMs = dto.LastReadAtMs;
+            await _db.UpsertConversationAsync(conv);
+            _eventBus.Publish(new ConversationUpdatedEvent(conv));
+        }
+
+        var readState = await _db.GetReadStateAsync(owner, dto.ConversationId)
+            ?? new LocalConversationReadState { OwnerUserId = owner, ConversationId = dto.ConversationId };
+        readState.UnreadCount = dto.UnreadCount;
+        if (!string.IsNullOrWhiteSpace(dto.LastReadMessageId))
+            readState.LastReadMessageId = dto.LastReadMessageId;
+        if (dto.LastReadAtMs.HasValue)
+            readState.LastReadAtMs = dto.LastReadAtMs;
+        readState.UpdatedAt = DateTime.UtcNow;
+        await _db.UpsertReadStateAsync(readState);
+    }
+    /// <inheritdoc />
+    public async Task<List<LocalMessage>> FetchAndPersistHistoryAsync(string conversationId, int limit = 50, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
+    {
+        var owner = _currentUserContext.RequireUserId();
+        var response = await _chatSession.QueryMessageHistoryAsync(conversationId, limit, beforeReceivedAtMs, beforeMessageId, ct);
+        if (response.Items is { Count: > 0 })
+            await PersistHistoryAsync(conversationId, response.Items, ct);
+        return await _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs);
+    }
+
+    /// <inheritdoc />
+    public async Task MarkConversationReadAndNotifyAsync(string conversationId, string? lastReadMessageId, CancellationToken ct = default)
+    {
+        await MarkConversationReadAsync(conversationId, lastReadMessageId, ct);
+        try
+        {
+            await _chatSession.MarkConversationReadAsync(conversationId, lastReadMessageId, null, ct);
+        }
+        catch
+        {
+            // 网络失败不影响本地已读状态
+        }
+    }
     public void Reset()
     {
         // 无内存状态需清理；DB 数据按 OwnerUserId 隔离，登出时不删除。

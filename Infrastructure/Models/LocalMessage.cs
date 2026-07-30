@@ -1,3 +1,5 @@
+using Core.Models;
+
 namespace Infrastructure.Models;
 
 /// <summary>
@@ -54,8 +56,8 @@ public class LocalMessage
 
     public string? ForwardedFromPreview { get; set; }
 
-    /// <summary>消息状态：0=Pending, 1=Sending, 2=Sent, 3=Delivered, 4=Failed, 5=Recalled。</summary>
-    public byte Status { get; set; }
+    /// <summary>消息状态。见 <see cref="Core.Models.MessageStatus"/>。</summary>
+    public MessageStatus Status { get; set; }
 
     /// <summary>失败原因。</summary>
     public string? FailureReason { get; set; }

@@ -1,3 +1,5 @@
+using Core.Models;
+
 namespace Infrastructure.Models;
 
 /// <summary>
@@ -39,8 +41,8 @@ public class LocalOutboxMessage
 
     public string? ForwardedFromPreview { get; set; }
 
-    /// <summary>状态：0=Queued, 1=Sending, 2=Sent, 3=Failed, 4=Cancelled。</summary>
-    public byte Status { get; set; }
+    /// <summary>Outbox 发送状态。见 <see cref="Core.Models.OutboxStatus"/>。</summary>
+    public OutboxStatus Status { get; set; }
 
     public string? FailureReason { get; set; }
 

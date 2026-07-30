@@ -4,9 +4,11 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Core.Helpers;
 using Core.Interfaces;
+using Core.Models.DTO;
 using Infrastructure.Models;
 using Serilog;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
@@ -21,6 +23,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly IChatFriendLoader _friendLoader;
     private readonly IChatConnectionCoordinator _connectionCoordinator;
     private readonly IChatSessionClient _chatSession;
+    private readonly IMessageStore _messageStore;
     private readonly ChatFriendListState _friendListState;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _disposed;
@@ -171,13 +174,15 @@ public class ChatViewModel : ViewModelBase, IDisposable
         MessageViewModel messageViewModel,
         IChatFriendLoader friendLoader,
         IChatConnectionCoordinator connectionCoordinator,
-        IChatSessionClient chatSessionClient)
+        IChatSessionClient chatSessionClient,
+        IMessageStore messageStore)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
         _friendLoader = friendLoader;
         _connectionCoordinator = connectionCoordinator;
         _chatSession = chatSessionClient;
+        _messageStore = messageStore;
         _friendListState = new ChatFriendListState(Friends, FilteredFriends);
 
         PinFriendCommand = new AsyncRelayCommand<LocalFriend>(
@@ -393,12 +398,25 @@ public class ChatViewModel : ViewModelBase, IDisposable
         if (!_chatSession.IsAuthenticated)
             return;
 
-        // 空水位：服务端按 DeviceIdHash 加载 device_sync_cursors。
+        // 从本地 DB 加载持久化的同步水位，重连只拉取缺失数据（阶段 1-2）。
+        IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null;
+        try
+        {
+            watermarks = await _messageStore.GetSyncWatermarksAsync(ct).ConfigureAwait(false);
+            if (watermarks.Count == 0)
+                watermarks = null;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "加载本地同步水位失败，回退到空水位");
+            watermarks = null;
+        }
+
         var sync = await _chatSession.QuerySyncBootstrapAsync(
                 listLimit: 100,
                 historyLimitPerConversation: 30,
                 maxConversationsWithHistory: 10,
-                watermarks: null,
+                watermarks: watermarks,
                 ct)
             .ConfigureAwait(false);
 
@@ -436,16 +454,46 @@ public class ChatViewModel : ViewModelBase, IDisposable
         if (!_chatSession.IsAuthenticated)
             return;
 
-        var page = await _chatSession.QueryConversationListAsync(limit: 100, ct).ConfigureAwait(false);
-        if (!page.Succeeded)
+        var allItems = new List<ConversationListItemDto>();
+        bool? beforeIsPinned = null;
+        long? beforePinnedAtMs = null;
+        long? beforeLastMessageAtMs = null;
+        string? beforeConversationId = null;
+        var maxPages = 10; // 防止无限循环
+
+        for (var page = 0; page < maxPages; page++)
         {
-            Log.Warning("会话列表失败: {Code} {Message}", page.ErrorCode, page.ErrorMessage);
-            return;
+            var resp = await _chatSession.QueryConversationListAsync(
+                limit: 100,
+                beforeIsPinned,
+                beforePinnedAtMs,
+                beforeLastMessageAtMs,
+                beforeConversationId,
+                ct).ConfigureAwait(false);
+
+            if (!resp.Succeeded)
+            {
+                Log.Warning("会话列表失败: {Code} {Message}", resp.ErrorCode, resp.ErrorMessage);
+                break;
+            }
+
+            allItems.AddRange(resp.Items);
+
+            if (!resp.HasMore || resp.NextCursor is null)
+                break;
+
+            beforeIsPinned = resp.NextCursor.IsPinned;
+            beforePinnedAtMs = resp.NextCursor.PinnedAtMs;
+            beforeLastMessageAtMs = resp.NextCursor.LastMessageAtMs;
+            beforeConversationId = resp.NextCursor.ConversationId;
         }
+
+        if (allItems.Count == 0)
+            return;
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
-            _friendListState.ApplyConversationPrefs(page.Items, _chatSession.CurrentUserId);
+            _friendListState.ApplyConversationPrefs(allItems, _chatSession.CurrentUserId);
             RaisePrefsCommands();
         });
     }

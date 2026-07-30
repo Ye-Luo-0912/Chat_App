@@ -30,6 +30,7 @@ public interface IChatSessionClient : IDisposable
         string? forwardedFromMessageId = null,
         long? forwardedFromSenderUserId = null,
         string? forwardedFromPreview = null,
+        string? clientMessageId = null,
         CancellationToken ct = default);
 
     Task SendHeartbeatAsync(CancellationToken ct = default);
@@ -37,6 +38,10 @@ public interface IChatSessionClient : IDisposable
 
     Task<ConversationListResponseDto> QueryConversationListAsync(
         int limit = 50,
+        bool? beforeIsPinned = null,
+        long? beforePinnedAtMs = null,
+        long? beforeLastMessageAtMs = null,
+        string? beforeConversationId = null,
         CancellationToken ct = default);
 
     Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
@@ -76,6 +81,28 @@ public interface IChatSessionClient : IDisposable
         IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null,
         CancellationToken ct = default);
 
+    /// <summary>显式拉取会话历史消息（按游标分页）。</summary>
+    Task<MessageHistoryPageDto> QueryMessageHistoryAsync(
+        string conversationId,
+        int limit = 50,
+        long? beforeReceivedAtMs = null,
+        string? beforeMessageId = null,
+        CancellationToken ct = default);
+
+    /// <summary>发送已读回执（103）。告知服务端我已读到某条消息。</summary>
+    Task<MessageReceiptAckDto> SendMessageReceiptAsync(
+        string conversationId,
+        string? lastReadMessageId,
+        long? lastReadAtMs,
+        CancellationToken ct = default);
+
+    /// <summary>标记会话已读（110）。</summary>
+    Task<ConversationMarkReadResponseDto> MarkConversationReadAsync(
+        string conversationId,
+        string? lastReadMessageId = null,
+        long? lastReadAtMs = null,
+        CancellationToken ct = default);
+
     event EventHandler? Connected;
     event EventHandler<long>? Authenticated;
     event EventHandler<string>? AuthenticationFailed;
@@ -87,4 +114,10 @@ public interface IChatSessionClient : IDisposable
     event EventHandler<TypingUpdateDto>? TypingUpdated;
     event EventHandler<PresenceChangedDto>? PresenceChanged;
     event EventHandler<string>? ConnectionClosed;
+
+    event EventHandler<MessageReceiptDto>? MessageReceiptReceived;
+    event EventHandler<MessageReceiptUpdatedDto>? MessageReceiptUpdated;
+    event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
+    event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
+    event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
 }

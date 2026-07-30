@@ -1,3 +1,4 @@
+using Core.Models;
 using Infrastructure.Models;
 
 namespace Core.Events;
@@ -6,7 +7,7 @@ namespace Core.Events;
 public record MessagePersistedEvent(LocalMessage Message, bool IsNewConversation);
 
 /// <summary>消息状态变更（sending/sent/failed/delivered/recalled）。</summary>
-public record MessageStatusChangedEvent(string ConversationId, string? MessageId, string? ClientMessageId, byte NewStatus, string? FailureReason);
+public record MessageStatusChangedEvent(string ConversationId, string? MessageId, string? ClientMessageId, MessageStatus NewStatus, string? FailureReason);
 
 /// <summary>消息被撤回。</summary>
 public record MessageRecalledEvent(string ConversationId, string MessageId, long RecalledAtMs);
@@ -21,4 +22,4 @@ public record ConversationUpdatedEvent(LocalConversation Conversation);
 public record ConversationReadEvent(string ConversationId, long ReadAtMs);
 
 /// <summary>Outbox 条目状态变更。</summary>
-public record OutboxStatusChangedEvent(string ClientMessageId, byte NewStatus, string? ServerMessageId);
+public record OutboxStatusChangedEvent(string ClientMessageId, OutboxStatus NewStatus, string? ServerMessageId);

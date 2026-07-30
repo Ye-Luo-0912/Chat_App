@@ -29,6 +29,9 @@ public sealed class ChatMessageCoordinator : IDisposable
         _chatSession.MessageRecalled += OnMessageRecalled;
         _chatSession.MessageEdited += OnMessageEdited;
         _chatSession.Authenticated += OnAuthenticated;
+        _chatSession.MessageReceiptReceived += OnMessageReceiptReceived;
+        _chatSession.MessageReceiptUpdated += OnMessageReceiptUpdated;
+        _chatSession.UnreadCountChanged += OnUnreadCountChanged;
     }
 
     private void OnChatMessageReceived(object? sender, Core.Models.DTO.ChatMessageDto dto)
@@ -112,6 +115,32 @@ public sealed class ChatMessageCoordinator : IDisposable
         // 鉴权成功后可在此触发同步引导的持久化（后续阶段实现）
     }
 
+    private void OnMessageReceiptReceived(object? sender, Core.Models.DTO.MessageReceiptDto dto)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await _messageStore.HandleReceiptAsync(dto, CancellationToken.None); }
+            catch (Exception ex) { Log.Error(ex, "处理已读回执失败"); }
+        });
+    }
+
+    private void OnMessageReceiptUpdated(object? sender, Core.Models.DTO.MessageReceiptUpdatedDto dto)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await _messageStore.HandleReceiptUpdatedAsync(dto, CancellationToken.None); }
+            catch (Exception ex) { Log.Error(ex, "处理已读状态更新失败"); }
+        });
+    }
+
+    private void OnUnreadCountChanged(object? sender, Core.Models.DTO.UnreadCountChangedDto dto)
+    {
+        _ = Task.Run(async () =>
+        {
+            try { await _messageStore.HandleUnreadCountChangedAsync(dto, CancellationToken.None); }
+            catch (Exception ex) { Log.Error(ex, "处理未读数变更失败 ConversationId={ConversationId}", dto.ConversationId); }
+        });
+    }
     public void Dispose()
     {
         if (_disposed)
@@ -124,5 +153,8 @@ public sealed class ChatMessageCoordinator : IDisposable
         _chatSession.MessageRecalled -= OnMessageRecalled;
         _chatSession.MessageEdited -= OnMessageEdited;
         _chatSession.Authenticated -= OnAuthenticated;
+        _chatSession.MessageReceiptReceived -= OnMessageReceiptReceived;
+        _chatSession.MessageReceiptUpdated -= OnMessageReceiptUpdated;
+        _chatSession.UnreadCountChanged -= OnUnreadCountChanged;
     }
 }

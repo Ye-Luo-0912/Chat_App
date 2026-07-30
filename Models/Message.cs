@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using Core.Models;
 using Core.Models.DTO;
 
 namespace Chat_App.Models;
@@ -49,8 +50,8 @@ public class Message : INotifyPropertyChanged
     public DateTime Timestamp { get; set; }
     public bool IsSentByMe { get; set; }
 
-    private byte _status = 2;
-    public byte Status
+    private MessageStatus _status = MessageStatus.Sent;
+    public MessageStatus Status
     {
         get => _status;
         set
@@ -64,8 +65,10 @@ public class Message : INotifyPropertyChanged
         }
     }
 
-    public bool IsFailed => Status == 4;
-    public bool IsPending => Status == 0 || Status == 1;
+    public bool IsFailed => Status == MessageStatus.Failed;
+    public bool IsPending => Status == MessageStatus.Queued || Status == MessageStatus.Sending;
+    public bool IsRead => Status == MessageStatus.Read;
+    public bool IsRecalledStatus => Status == MessageStatus.Recalled;
 
     public required User Sender { get; set; }
 

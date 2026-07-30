@@ -44,7 +44,7 @@ namespace Infrastructure.Migrations
 
                     b.HasIndex("ServerIpAddress", "ServerPort");
 
-                    b.ToTable("Servers");
+                    b.ToTable("Servers", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Data.AuthToken", b =>
@@ -78,7 +78,7 @@ namespace Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("Tokens");
+                    b.ToTable("Tokens", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Data.LocalUser", b =>
@@ -117,7 +117,7 @@ namespace Infrastructure.Migrations
 
                     b.HasKey("UserId");
 
-                    b.ToTable("Users");
+                    b.ToTable("Users", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalConversation", b =>
@@ -180,7 +180,7 @@ namespace Infrastructure.Migrations
                     b.HasIndex("OwnerUserId", "ConversationId")
                         .IsUnique();
 
-                    b.ToTable("Conversations");
+                    b.ToTable("Conversations", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalConversationReadState", b =>
@@ -213,7 +213,7 @@ namespace Infrastructure.Migrations
                     b.HasIndex("OwnerUserId", "ConversationId")
                         .IsUnique();
 
-                    b.ToTable("ConversationReadStates");
+                    b.ToTable("ConversationReadStates", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalFriend", b =>
@@ -287,7 +287,7 @@ namespace Infrastructure.Migrations
                     b.HasIndex("OwnerUserId", "FriendId")
                         .IsUnique();
 
-                    b.ToTable("Friends");
+                    b.ToTable("Friends", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalMessage", b =>
@@ -381,7 +381,7 @@ namespace Infrastructure.Migrations
 
                     b.HasIndex("OwnerUserId", "MessageId");
 
-                    b.ToTable("Messages");
+                    b.ToTable("Messages", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalOutboxMessage", b =>
@@ -456,7 +456,7 @@ namespace Infrastructure.Migrations
 
                     b.HasIndex("OwnerUserId", "Status");
 
-                    b.ToTable("OutboxMessages");
+                    b.ToTable("OutboxMessages", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalSyncCursor", b =>
@@ -487,7 +487,7 @@ namespace Infrastructure.Migrations
                     b.HasIndex("OwnerUserId", "ConversationId")
                         .IsUnique();
 
-                    b.ToTable("SyncCursors");
+                    b.ToTable("SyncCursors", (string)null);
                 });
 
             modelBuilder.Entity("Infrastructure.Models.LocalFriend", b =>

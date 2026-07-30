@@ -19,6 +19,9 @@ namespace Core.Services
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageEditAcknowledgementDto>> _editPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<SyncBootstrapResponseDto>> _syncPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<PresenceSnapshotResponseDto>> _presencePending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageHistoryPageDto>> _historyPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageReceiptAckDto>> _receiptPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationMarkReadResponseDto>> _markReadPending = new(StringComparer.Ordinal);
 
         public bool IsConnected => _tcpClient.IsConnected;
 
@@ -37,6 +40,11 @@ namespace Core.Services
         public event EventHandler<TypingUpdateDto>? TypingUpdated;
         public event EventHandler<PresenceChangedDto>? PresenceChanged;
         public event EventHandler<string>? ConnectionClosed;
+        public event EventHandler<MessageReceiptDto>? MessageReceiptReceived;
+        public event EventHandler<MessageReceiptUpdatedDto>? MessageReceiptUpdated;
+        public event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
+        public event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
+        public event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
 
         public ChatSessionClient(ITcpClient tcpClient, IMessagePacketCodec codec, IPacketBodySerializer bodySerializer)
         {
@@ -164,6 +172,7 @@ namespace Core.Services
             string? forwardedFromMessageId = null,
             long? forwardedFromSenderUserId = null,
             string? forwardedFromPreview = null,
+            string? clientMessageIdParam = null,
             CancellationToken ct = default)
         {
             var hasAttachments = attachmentIds is { Count: > 0 };
@@ -218,7 +227,9 @@ namespace Core.Services
                     ? forwardedFromPreview
                     : forwardedFromPreview[..256]);
 
-            var clientMessageId = Guid.CreateVersion7().ToString("N");
+            var clientMessageId = string.IsNullOrWhiteSpace(clientMessageIdParam)
+                ? Guid.CreateVersion7().ToString("N")
+                : clientMessageIdParam;
             var chatPayload = new ChatMessageDto
             {
                 MessageId = clientMessageId,
@@ -245,6 +256,10 @@ namespace Core.Services
 
         public async Task<ConversationListResponseDto> QueryConversationListAsync(
             int limit = 50,
+            bool? beforeIsPinned = null,
+            long? beforePinnedAtMs = null,
+            long? beforeLastMessageAtMs = null,
+            string? beforeConversationId = null,
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
@@ -261,6 +276,10 @@ namespace Core.Services
                     new ConversationListRequestDto
                     {
                         RequestId = requestId,
+                        BeforeIsPinned = beforeIsPinned,
+                        BeforePinnedAtMs = beforePinnedAtMs,
+                        BeforeLastMessageAtMs = beforeLastMessageAtMs,
+                        BeforeConversationId = beforeConversationId,
                         Limit = Math.Clamp(limit, 1, 100)
                     },
                     ct);
@@ -514,6 +533,123 @@ namespace Core.Services
             }
         }
 
+        public async Task<MessageHistoryPageDto> QueryMessageHistoryAsync(
+            string conversationId,
+            int limit = 50,
+            long? beforeReceivedAtMs = null,
+            string? beforeMessageId = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
+
+            var requestId = Guid.NewGuid().ToString("N");
+            var tcs = new TaskCompletionSource<MessageHistoryPageDto>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_historyPending.TryAdd(requestId, tcs))
+                throw new InvalidOperationException("历史拉取请求 Id 冲突");
+
+            try
+            {
+                await SendPacketAsync(
+                    PacketCommand.MessageHistoryRequest,
+                    new MessageHistoryRequestDto
+                    {
+                        RequestId = requestId,
+                        ConversationId = conversationId.Trim(),
+                        BeforeReceivedAtMs = beforeReceivedAtMs,
+                        BeforeMessageId = beforeMessageId,
+                        Limit = Math.Clamp(limit, 1, 100)
+                    },
+                    ct);
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _historyPending.TryRemove(requestId, out _);
+            }
+        }
+        public async Task<MessageReceiptAckDto> SendMessageReceiptAsync(
+            string conversationId,
+            string? lastReadMessageId,
+            long? lastReadAtMs,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
+
+            var requestId = Guid.NewGuid().ToString("N");
+            var tcs = new TaskCompletionSource<MessageReceiptAckDto>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_receiptPending.TryAdd(requestId, tcs))
+                throw new InvalidOperationException("已读回执请求 Id 冲突");
+
+            try
+            {
+                await SendPacketAsync(
+                    PacketCommand.MessageReceipt,
+                    new MessageReceiptDto
+                    {
+                        RequestId = requestId,
+                        ConversationId = conversationId.Trim(),
+                        LastReadMessageId = lastReadMessageId,
+                        LastReadAtMs = lastReadAtMs,
+                        ReaderUserId = CurrentUserId
+                    },
+                    ct);
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _receiptPending.TryRemove(requestId, out _);
+            }
+        }
+        public async Task<ConversationMarkReadResponseDto> MarkConversationReadAsync(
+            string conversationId,
+            string? lastReadMessageId = null,
+            long? lastReadAtMs = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
+
+            var requestId = Guid.NewGuid().ToString("N");
+            var tcs = new TaskCompletionSource<ConversationMarkReadResponseDto>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_markReadPending.TryAdd(requestId, tcs))
+                throw new InvalidOperationException("标记已读请求 Id 冲突");
+
+            try
+            {
+                await SendPacketAsync(
+                    PacketCommand.ConversationMarkReadRequest,
+                    new ConversationMarkReadRequestDto
+                    {
+                        RequestId = requestId,
+                        ConversationId = conversationId.Trim(),
+                        LastReadMessageId = lastReadMessageId,
+                        LastReadAtMs = lastReadAtMs
+                    },
+                    ct);
+
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _markReadPending.TryRemove(requestId, out _);
+            }
+        }
         private void EnsureAuthenticated()
         {
             if (!IsConnected || !IsAuthenticated)
@@ -541,6 +677,18 @@ namespace Core.Services
             foreach (var pair in _syncPending)
                 pair.Value.TrySetException(ex);
             _syncPending.Clear();
+
+            foreach (var pair in _historyPending)
+                pair.Value.TrySetException(ex);
+            _historyPending.Clear();
+
+            foreach (var pair in _receiptPending)
+                pair.Value.TrySetException(ex);
+            _receiptPending.Clear();
+
+            foreach (var pair in _markReadPending)
+                pair.Value.TrySetException(ex);
+            _markReadPending.Clear();
         }
 
 
@@ -678,6 +826,52 @@ namespace Core.Services
                     var ack = _bodySerializer.Deserialize<MessageAcknowledgementDto>(packet.Body);
                     if (ack is not null)
                         MessageAcknowledged?.Invoke(this, ack);
+                    return;
+                case PacketCommand.MessageReceipt:
+                    var receipt = _bodySerializer.Deserialize<MessageReceiptDto>(packet.Body);
+                    if (receipt is not null)
+                        MessageReceiptReceived?.Invoke(this, receipt);
+                    return;
+                case PacketCommand.MessageReceiptAck:
+                    var receiptAck = _bodySerializer.Deserialize<MessageReceiptAckDto>(packet.Body);
+                    if (receiptAck is not null
+                        && !string.IsNullOrWhiteSpace(receiptAck.RequestId)
+                        && _receiptPending.TryRemove(receiptAck.RequestId, out var receiptTcs))
+                    {
+                        receiptTcs.TrySetResult(receiptAck);
+                    }
+                    return;
+                case PacketCommand.MessageReceiptUpdated:
+                    var receiptUpdated = _bodySerializer.Deserialize<MessageReceiptUpdatedDto>(packet.Body);
+                    if (receiptUpdated is not null)
+                        MessageReceiptUpdated?.Invoke(this, receiptUpdated);
+                    return;
+                case PacketCommand.MessageHistoryPage:
+                    var historyPage = _bodySerializer.Deserialize<MessageHistoryPageDto>(packet.Body);
+                    if (historyPage is not null
+                        && !string.IsNullOrWhiteSpace(historyPage.RequestId)
+                        && _historyPending.TryRemove(historyPage.RequestId, out var historyTcs))
+                    {
+                        historyTcs.TrySetResult(historyPage);
+                    }
+                    if (historyPage is not null)
+                        MessageHistoryPageReceived?.Invoke(this, historyPage);
+                    return;
+                case PacketCommand.ConversationMarkReadResponse:
+                    var markReadResp = _bodySerializer.Deserialize<ConversationMarkReadResponseDto>(packet.Body);
+                    if (markReadResp is not null
+                        && !string.IsNullOrWhiteSpace(markReadResp.RequestId)
+                        && _markReadPending.TryRemove(markReadResp.RequestId, out var markReadTcs))
+                    {
+                        markReadTcs.TrySetResult(markReadResp);
+                    }
+                    if (markReadResp is not null)
+                        ConversationMarkReadResponse?.Invoke(this, markReadResp);
+                    return;
+                case PacketCommand.UnreadCountChanged:
+                    var unreadChanged = _bodySerializer.Deserialize<UnreadCountChangedDto>(packet.Body);
+                    if (unreadChanged is not null)
+                        UnreadCountChanged?.Invoke(this, unreadChanged);
                     return;
                 case PacketCommand.Error:
                     var errorMsg = Encoding.UTF8.GetString(packet.Body.ToArray());

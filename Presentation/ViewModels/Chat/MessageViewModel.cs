@@ -16,6 +16,7 @@ using Core.Contracts.Attachments;
 using Core.Events;
 using Core.Helpers;
 using Core.Interfaces;
+using Core.Models;
 using Core.Models.DTO;
 using Infrastructure.Models;
 using Serilog;
@@ -358,6 +359,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _eventSubscriptions.Add(_eventBus.Subscribe<OutboxStatusChangedEvent>(OnOutboxStatusChanged));
         _eventSubscriptions.Add(_eventBus.Subscribe<MessageRecalledEvent>(OnMessageRecalledPersisted));
         _eventSubscriptions.Add(_eventBus.Subscribe<MessageEditedEvent>(OnMessageEditedPersisted));
+        _eventSubscriptions.Add(_eventBus.Subscribe<ConversationReadEvent>(OnConversationRead));
+        _eventSubscriptions.Add(_eventBus.Subscribe<ConversationUpdatedEvent>(OnConversationUpdated));
     }
 
     private void OnMessagePersisted(MessagePersistedEvent e)
@@ -420,9 +423,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         Dispatcher.UIThread.Post(() => ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs));
     }
 
-    private static byte MapOutboxStatusToMessageStatus(byte os) => os switch
+    private static MessageStatus MapOutboxStatusToMessageStatus(OutboxStatus os) => os switch
     {
-        0 => 0, 1 => 1, 2 => 2, 3 => 4, 4 => 4, _ => os
+        OutboxStatus.Queued => MessageStatus.Queued,
+        OutboxStatus.Sending => MessageStatus.Sending,
+        OutboxStatus.Sent => MessageStatus.Sent,
+        OutboxStatus.Failed => MessageStatus.Failed,
+        OutboxStatus.Cancelled => MessageStatus.Failed,
+        _ => MessageStatus.Sent
     };
 
     private Message? FindMessage(string? messageId, string? clientMessageId)
@@ -557,6 +565,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         Log.Debug("MessageView 初始化: 好友={FriendName}", selectedFriend.FriendName);
         _ = RefreshPeerPresenceAsync(selectedFriend.FriendId);
         _ = LoadHistoryAsync();
+        _ = MarkCurrentConversationReadAsync();
     }
 
     private async Task LoadHistoryAsync()
@@ -581,6 +590,87 @@ public class MessageViewModel : ViewModelBase, IDisposable
         catch (Exception ex)
         {
             Log.Warning(ex, "加载历史消息失败");
+        }
+    }
+
+    private void OnConversationRead(ConversationReadEvent e)
+    {
+        if (CurrConversationId is null || !string.Equals(e.ConversationId, CurrConversationId, StringComparison.Ordinal))
+            return;
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            foreach (var m in Messages)
+            {
+                if (m.IsSentByMe && m.Status == MessageStatus.Sent)
+                    m.Status = MessageStatus.Read;
+            }
+        });
+    }
+
+    private void OnConversationUpdated(ConversationUpdatedEvent e)
+    {
+        if (CurrConversationId is null || !string.Equals(e.Conversation.ConversationId, CurrConversationId, StringComparison.Ordinal))
+            return;
+
+        // 当前会话打开时未读数清零由 ChatViewModel.FriendListState 处理；此处暂无额外 UI 操作，保留订阅以便未来扩展。
+    }
+
+    private async Task MarkCurrentConversationReadAsync()
+    {
+        if (CurrConversationId is null || CurrFriend is null)
+            return;
+        try
+        {
+            var lastMessage = Messages.LastOrDefault();
+            await _messageStore.MarkConversationReadAndNotifyAsync(
+                CurrConversationId,
+                lastMessage?.MessageId,
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "标记会话已读失败 ConversationId={ConversationId}", CurrConversationId);
+        }
+    }
+
+    /// <summary>向上加载更早的历史消息。返回是否还有更多。</summary>
+    public async Task<bool> LoadOlderHistoryAsync(CancellationToken ct = default)
+    {
+        if (CurrConversationId is null || Messages.Count == 0)
+            return false;
+
+        var oldest = Messages.First();
+        if (string.IsNullOrWhiteSpace(oldest.MessageId))
+            return false;
+
+        try
+        {
+            var older = await _messageStore.FetchAndPersistHistoryAsync(
+                CurrConversationId,
+                limit: 50,
+                beforeReceivedAtMs: null,
+                beforeMessageId: oldest.MessageId,
+                ct: ct);
+
+            if (older.Count == 0)
+                return false;
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                for (var i = older.Count - 1; i >= 0; i--)
+                {
+                    var uiMsg = ToUiMessage(older[i]);
+                    if (uiMsg is not null)
+                        Messages.Insert(0, uiMsg);
+                }
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "加载更早历史失败");
+            return false;
         }
     }
 
@@ -780,30 +870,32 @@ public class MessageViewModel : ViewModelBase, IDisposable
             }
             : null;
 
-        string clientMessageId;
-        byte outboxStatus;
-        byte messageStatus;
+        var clientMessageId = Guid.CreateVersion7().ToString("N");
+        OutboxStatus outboxStatus;
+        MessageStatus messageStatus;
 
         try
         {
-            clientMessageId = await _chatSession.SendChatMessageAsync(
+            var returnedId = await _chatSession.SendChatMessageAsync(
                     CurrFriend.FriendId,
                     text,
                     attachmentIds,
                     replyMessageId,
                     replySenderId,
                     replyPreview,
-                    ct: ct)
+                    null, null, null,
+                    clientMessageId,
+                    ct)
                 .ConfigureAwait(true);
-            outboxStatus = 2;
-            messageStatus = 2;
+            clientMessageId = returnedId;
+            outboxStatus = OutboxStatus.Sent;
+            messageStatus = MessageStatus.Sent;
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "发送消息失败，已入 Outbox 等待重试");
-            clientMessageId = Guid.CreateVersion7().ToString("N");
-            outboxStatus = 3;
-            messageStatus = 4;
+            Log.Warning(ex, "发送消息失败，已入 Outbox 等待重试 ClientMessageId={ClientMessageId}", clientMessageId);
+            outboxStatus = OutboxStatus.Failed;
+            messageStatus = MessageStatus.Failed;
             _notificationService.ShowError($"消息发送失败，已保存可重试: {ex.Message}");
         }
 
@@ -820,7 +912,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ReplyToPreview = replyPreview,
             Status = outboxStatus,
             QueuedAt = nowUtc,
-            SentAt = outboxStatus == 2 ? nowUtc : null
+            SentAt = outboxStatus == OutboxStatus.Sent ? nowUtc : null
         };
         try
         {
@@ -938,7 +1030,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 forwardedFromMessageId: source.MessageId,
                 forwardedFromSenderUserId: forwardSenderId,
                 forwardedFromPreview: forwardPreview,
-                ct)
+                ct: ct)
             .ConfigureAwait(true);
 
         return new Message

@@ -335,7 +335,7 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         await db.SaveChangesAsync(None);
     }
 
-    public async Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, byte status, string? failureReason = null)
+    public async Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId);
@@ -351,20 +351,30 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         {
             return;
         }
-        await query.ExecuteUpdateAsync(m
-            => m.SetProperty(x => x.Status, status)
-                .SetProperty(x => x.FailureReason, failureReason)
-                .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        if (!string.IsNullOrEmpty(ackServerMessageId))
+        {
+            await query.ExecuteUpdateAsync(m
+                => m.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.FailureReason, failureReason)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow)
+                    .SetProperty(x => x.MessageId, ackServerMessageId), None);
+        }
+        else
+        {
+            await query.ExecuteUpdateAsync(m
+                => m.SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.FailureReason, failureReason)
+                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        }
     }
 
     public async Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs)
     {
-        const byte Recalled = 5;
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await db.Messages
             .Where(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId)
             .ExecuteUpdateAsync(m
-                => m.SetProperty(x => x.Status, Recalled)
+                => m.SetProperty(x => x.Status, MessageStatus.Recalled)
                     .SetProperty(x => x.RecalledAtMs, recalledAtMs)
                     .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
     }
@@ -418,13 +428,13 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         // Status: 0=Queued, 3=Failed；按下次重试时间（或入队时间）升序处理。
         return await db.OutboxMessages
             .AsNoTracking()
-            .Where(o => o.OwnerUserId == ownerUserId && (o.Status == 0 || o.Status == 3))
+            .Where(o => o.OwnerUserId == ownerUserId && (o.Status == OutboxStatus.Queued || o.Status == OutboxStatus.Failed))
             .OrderBy(o => o.NextRetryAt ?? o.QueuedAt)
             .Take(limit)
             .ToListAsync(None);
     }
 
-    public async Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, byte status, string? messageId = null, string? failureReason = null)
+    public async Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.OutboxMessages
@@ -487,6 +497,15 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         await db.SaveChangesAsync(None);
     }
 
+    public async Task<List<LocalSyncCursor>> GetAllSyncCursorsAsync(long ownerUserId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.SyncCursors
+            .AsNoTracking()
+            .Where(c => c.OwnerUserId == ownerUserId)
+            .ToListAsync(None);
+    }
+
     // ---- 会话已读状态（P0-6）----
 
     public async Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId)
@@ -514,5 +533,20 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             await db.ConversationReadStates.AddAsync(readState, None);
         }
         await db.SaveChangesAsync(None);
+    }
+
+    public async Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId
+                                         && m.ConversationId == conversationId
+                                         && m.Status != MessageStatus.Recalled);
+        if (beforeReceivedAtMs.HasValue)
+            query = query.Where(m => m.ReceivedAtMs <= beforeReceivedAtMs.Value);
+
+        await query.ExecuteUpdateAsync(s => s
+            .SetProperty(m => m.Status, MessageStatus.Read)
+            .SetProperty(m => m.ReadAtMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            .SetProperty(m => m.UpdatedAt, DateTime.UtcNow), None);
     }
 }
