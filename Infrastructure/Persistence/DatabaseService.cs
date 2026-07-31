@@ -639,7 +639,7 @@ public class DatabaseService(
             }
         }
 
-        // ---- Upsert LocalConversation 会话摘要 + 未读数（镜像 UpdateConversationSummaryAsync 的读-改-写逻辑）----
+        // ---- Upsert LocalConversation 会话摘要 + 未读数（ApplyIncomingMessageAsync 事务内的读-改-写逻辑）----
         if (conversationUpdate is not null)
         {
             var existingConversation = await db.Conversations
@@ -877,8 +877,9 @@ public class DatabaseService(
         if (status == OutboxStatus.Failed)
         {
             existing.RetryCount++;
-            // 指数退避：min(2^retryCount * 2, 300) 秒 + 0~2s 随机 jitter
-            var delaySec = Math.Min(Math.Pow(2, existing.RetryCount) * 2, 300);
+            // 指数退避：min(2^retryCount * 2, MaxBackoffSec) 秒 + 0~2s 随机 jitter
+            const int maxBackoffSec = 300;
+            var delaySec = Math.Min(Math.Pow(2, existing.RetryCount) * 2, maxBackoffSec);
             var jitterSec = Random.Shared.NextDouble() * 2;
             existing.NextRetryAt = now.AddSeconds(delaySec + jitterSec);
         }

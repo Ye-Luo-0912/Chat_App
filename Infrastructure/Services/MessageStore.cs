@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Chat_App.Infrastructure.Persistence;
 using Infrastructure.Events;
 using Core.Helpers;
@@ -63,7 +62,7 @@ public sealed class MessageStore : IMessageStore
             RecalledAtMs = null,
             EditVersion = 1,
             EditedAtMs = null,
-            AttachmentsJson = SerializeAttachments(dto.Attachments),
+            AttachmentsJson = AttachmentJson.Serialize(dto.Attachments),
             ReplyToMessageId = dto.ReplyToMessageId,
             ReplyToSenderUserId = dto.ReplyToSenderUserId,
             ReplyToPreview = dto.ReplyToPreview,
@@ -103,7 +102,7 @@ public sealed class MessageStore : IMessageStore
             }
         }
 
-        // 构建会话摘要更新（镜像原 UpdateConversationSummaryAsync 的字段逻辑），
+        // 构建会话摘要更新（字段逻辑与 ApplyIncomingMessageAsync 事务内的读-改-写一致），
         // 由 ApplyIncomingMessageAsync 在事务内完成读-改-写 + 未读数递增。
         var existingConversation = await _db.GetConversationAsync(owner, conversationId);
         var isNewConversation = existingConversation is null;
@@ -160,7 +159,7 @@ public sealed class MessageStore : IMessageStore
                 RecalledAtMs = item.RecalledAtMs,
                 EditVersion = item.EditVersion <= 0 ? 1 : item.EditVersion,
                 EditedAtMs = item.EditedAtMs,
-                AttachmentsJson = SerializeAttachments(item.Attachments),
+                AttachmentsJson = AttachmentJson.Serialize(item.Attachments),
                 ReplyToMessageId = item.ReplyToMessageId,
                 ReplyToSenderUserId = item.ReplyToSenderUserId,
                 ReplyToPreview = item.ReplyToPreview,
@@ -369,7 +368,6 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    /// <inheritdoc />
     public async Task HandleReceiptAsync(MessageReceiptDto dto, CancellationToken ct = default)
     {
         var owner = _currentUserContext.RequireUserId();
@@ -467,49 +465,6 @@ public sealed class MessageStore : IMessageStore
         // 无内存状态需清理；DB 数据按 OwnerUserId 隔离，登出时不删除。
     }
 
-    private async Task<bool> UpdateConversationSummaryAsync(
-        long owner, string conversationId, string? messageId, string content, long receivedAtMs, long senderUserId)
-    {
-        var conv = await _db.GetConversationAsync(owner, conversationId);
-        if (conv is null)
-        {
-            conv = new LocalConversation
-            {
-                OwnerUserId = owner,
-                ConversationId = conversationId,
-                Type = ConversationTypeDirect,
-                PeerUserId = ConversationId.TryGetPeerUserId(conversationId, owner),
-                LastMessageId = messageId,
-                LastMessagePreview = BuildPreview(content),
-                LastMessageAtMs = receivedAtMs,
-                LastSenderUserId = senderUserId,
-                UnreadCount = senderUserId == owner ? 0 : 1,
-                LastReadMessageId = null,
-                LastReadAtMs = null,
-                IsPinned = false,
-                PinnedAtMs = null,
-                IsMuted = false,
-                MutedUntilMs = null,
-                LastSynced = DateTime.UtcNow
-            };
-            await _db.UpsertConversationAsync(conv);
-            return true;
-        }
-
-        if (receivedAtMs > (conv.LastMessageAtMs ?? 0))
-        {
-            conv.LastMessageId = messageId;
-            conv.LastMessagePreview = BuildPreview(content);
-            conv.LastMessageAtMs = receivedAtMs;
-            conv.LastSenderUserId = senderUserId;
-            if (senderUserId != owner && (conv.LastReadAtMs is null || conv.LastReadAtMs < receivedAtMs))
-                conv.UnreadCount = conv.UnreadCount + 1;
-        }
-        conv.LastSynced = DateTime.UtcNow;
-        await _db.UpsertConversationAsync(conv);
-        return false;
-    }
-
     private static string? ResolveConversationId(string? explicitId, long selfId, long partyA, long partyB)
     {
         if (!string.IsNullOrWhiteSpace(explicitId))
@@ -532,7 +487,4 @@ public sealed class MessageStore : IMessageStore
         var kind = utc.Kind == DateTimeKind.Utc ? utc : DateTime.SpecifyKind(utc, DateTimeKind.Utc);
         return new DateTimeOffset(kind).ToUnixTimeMilliseconds();
     }
-
-    private static string? SerializeAttachments(IReadOnlyList<AttachmentRefDto>? attachments)
-        => attachments is null || attachments.Count == 0 ? null : JsonSerializer.Serialize(attachments, ChatJsonContext.Default.Options);
 }

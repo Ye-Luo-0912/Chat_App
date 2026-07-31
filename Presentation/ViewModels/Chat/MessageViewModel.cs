@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
@@ -389,10 +388,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.Message.ConversationId != CurrConversationId)
             return;
-        var generation = _conversationGeneration;
-        Dispatcher.UIThread.Post(() =>
+        PostIfCurrent(() =>
         {
-            if (generation != _conversationGeneration) return;
             var msg = e.Message;
             var existing = FindMessage(msg.MessageId, msg.ClientMessageId);
             if (existing is not null) return;
@@ -405,10 +402,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
-        var generation = _conversationGeneration;
-        Dispatcher.UIThread.Post(() =>
+        PostIfCurrent(() =>
         {
-            if (generation != _conversationGeneration) return;
             var local = FindMessage(e.MessageId, e.ClientMessageId);
             if (local is null) return;
             local.Status = e.NewStatus;
@@ -419,10 +414,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (string.IsNullOrWhiteSpace(e.ClientMessageId))
             return;
-        var generation = _conversationGeneration;
-        Dispatcher.UIThread.Post(() =>
+        PostIfCurrent(() =>
         {
-            if (generation != _conversationGeneration) return;
             var local = FindMessage(null, e.ClientMessageId);
             if (local is null) return;
             local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
@@ -440,23 +433,27 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
-        var generation = _conversationGeneration;
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (generation != _conversationGeneration) return;
-            ApplyRecalled(e.MessageId);
-        });
+        PostIfCurrent(() => ApplyRecalled(e.MessageId));
     }
 
     private void OnMessageEditedPersisted(MessageEditedEvent e)
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
+        PostIfCurrent(() => ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs));
+    }
+
+    /// <summary>
+    /// 在 UI 线程执行 action，回调真正执行时会话可能已切换，必须再次校验代际（七）。
+    /// 统一 6 处领域事件订阅器的 generation 捕获 + Dispatcher.UIThread.Post + 代际复核模式（P0-代码复用）。
+    /// </summary>
+    private void PostIfCurrent(Action action)
+    {
         var generation = _conversationGeneration;
         Dispatcher.UIThread.Post(() =>
         {
             if (generation != _conversationGeneration) return;
-            ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs);
+            action();
         });
     }
 
@@ -762,12 +759,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (CurrConversationId is null || !string.Equals(e.ConversationId, CurrConversationId, StringComparison.Ordinal))
             return;
 
-        var generation = _conversationGeneration;
-        Dispatcher.UIThread.Post(() =>
+        PostIfCurrent(() =>
         {
-            // 回调真正执行时会话可能已切换，必须再次校验代际（七）。
-            if (generation != _conversationGeneration)
-                return;
             foreach (var m in Messages)
             {
                 if (m.IsSentByMe && m.Status == MessageStatus.Sent)
@@ -855,18 +848,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ? DateTimeOffset.FromUnixTimeMilliseconds(lm.ReceivedAtMs).LocalDateTime
             : DateTime.UtcNow;
 
-        IReadOnlyList<AttachmentRefDto>? attachments = null;
-        if (!string.IsNullOrWhiteSpace(lm.AttachmentsJson))
-        {
-            try
-            {
-                attachments = JsonSerializer.Deserialize<List<AttachmentRefDto>>(lm.AttachmentsJson, ChatJsonContext.Default.Options);
-            }
-            catch (Exception ex)
-            {
-                Log.Debug(ex, "反序列化附件 JSON 失败");
-            }
-        }
+        IReadOnlyList<AttachmentRefDto>? attachments = AttachmentJson.Deserialize(lm.AttachmentsJson);
 
         var msg = new Message
         {
@@ -908,10 +890,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         var peerId = CurrFriend.FriendId;
         var selfId = _chatSession.CurrentUserId;
-        var knownIds = new HashSet<string>(
-            Messages.Where(m => !string.IsNullOrWhiteSpace(m.MessageId)).Select(m => m.MessageId!),
-            StringComparer.Ordinal);
 
+        // 去重依赖 FindMessage 的 _messagesByServerId 索引：已存在则更新，本次循环新追加的也会被后续 FindMessage 命中。
+        // 避免每次构建 knownIds HashSet 的 O(Messages) 分配（P0-热路径分配优化）。
         foreach (var item in items.OrderBy(i => i.ReceivedAtMs).ThenBy(i => i.MessageId, StringComparer.Ordinal))
         {
             if (item.SenderUserId != peerId && item.ReceiverUserId != peerId)
@@ -933,9 +914,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
                             item.EditedAtMs ?? 0);
                     continue;
                 }
-
-                if (!knownIds.Add(item.MessageId))
-                    continue;
             }
 
             var message = new Message
@@ -974,47 +952,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (fresh.Count == 0)
             return;
 
-        var freshById = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
-        var freshByClientId = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
+        // 单循环：用已有 _messagesByServerId/_messagesByClientId 索引 O(1) 查找，
+        // 命中则就地更新（保留 UI 容器），未命中则追加。避免每次构建临时字典（P0-热路径分配优化）。
         foreach (var lm in fresh)
         {
-            if (!string.IsNullOrWhiteSpace(lm.MessageId))
-                freshById[lm.MessageId!] = lm;
-            if (!string.IsNullOrWhiteSpace(lm.ClientMessageId))
-                freshByClientId[lm.ClientMessageId!] = lm;
-        }
-
-        // 1. 就地更新已存在消息的字段（状态/撤回/编辑），保留 UI 容器
-        foreach (var existing in Messages)
-        {
-            LocalMessage? src = null;
-            var mid = existing.MessageId;
-            if (!string.IsNullOrWhiteSpace(mid) && freshById.TryGetValue(mid!, out src))
+            var existing = FindMessage(lm.MessageId, lm.ClientMessageId);
+            if (existing is not null)
             {
-                // matched by server id
-            }
-            else if (!string.IsNullOrWhiteSpace(existing.ClientMessageId)
-                     && freshByClientId.TryGetValue(existing.ClientMessageId!, out src))
-            {
-                // matched by client id
-            }
-
-            if (src is not null)
-                ApplyDbStateToMessage(existing, src);
-        }
-
-        // 2. 追加尚未展示的新消息（fresh 已按时间正序，直接追加保持顺序）
-        foreach (var lm in fresh)
-        {
-            if (!string.IsNullOrWhiteSpace(lm.MessageId))
-            {
-                if (_messagesByServerId.ContainsKey(lm.MessageId!))
-                    continue;
-            }
-            else if (!string.IsNullOrWhiteSpace(lm.ClientMessageId))
-            {
-                if (_messagesByClientId.ContainsKey(lm.ClientMessageId!))
-                    continue;
+                ApplyDbStateToMessage(existing, lm);
+                continue;
             }
 
             var ui = ToUiMessage(lm);
@@ -1118,12 +1064,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var nowUtc = DateTime.UtcNow;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        var attachmentIdsJson = hasAttachments
-            ? JsonSerializer.Serialize(attachmentIds, ChatJsonContext.Default.Options)
-            : null;
-        var attachmentsJson = hasAttachments
-            ? JsonSerializer.Serialize(attachments, ChatJsonContext.Default.Options)
-            : null;
+        var attachmentIdsJson = hasAttachments ? AttachmentJson.SerializeIds(attachmentIds) : null;
+        var attachmentsJson = hasAttachments ? AttachmentJson.Serialize(attachments) : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
         var targetUserId = CurrFriend.FriendId;

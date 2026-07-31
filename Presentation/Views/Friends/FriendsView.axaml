@@ -219,12 +219,29 @@
                              Padding="14 0"/>
                 </StackPanel>
 
-                <!-- 好友列表 -->
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-
-                    <ItemsControl ItemsSource="{Binding FilteredFriends}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="models:LocalFriend">
+                <!-- 好友列表（虚拟化 ListBox，避免大列表全量渲染 item container） -->
+                <ListBox Grid.Row="1"
+                         ItemsSource="{Binding FilteredFriends}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.Styles>
+                        <Style Selector="ListBoxItem">
+                            <Setter Property="Background" Value="Transparent"/>
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="Margin" Value="0"/>
+                            <Setter Property="Focusable" Value="False"/>
+                        </Style>
+                    </ListBox.Styles>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="models:LocalFriend">
                                 <Border Classes="card">
                                     <Grid ColumnDefinitions="Auto,*,Auto">
                                         <!-- 头像 -->
@@ -275,9 +292,8 @@
                                     </Grid>
                                 </Border>
                             </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
 
                 <!-- 空状态 -->
                 <StackPanel Grid.Row="1"
@@ -328,13 +344,28 @@
                     </StackPanel>
                 </Border>
 
-                <!-- 收到的申请列表 -->
-                <ScrollViewer Grid.Row="2"
-                              IsVisible="{Binding ShowIncoming}"
-                              VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <ItemsControl ItemsSource="{Binding IncomingRequests}">
-                            <ItemsControl.ItemTemplate>
+                <!-- 收到的申请列表（虚拟化 ListBox + 空状态叠加） -->
+                <Grid Grid.Row="2" IsVisible="{Binding ShowIncoming}">
+                    <ListBox ItemsSource="{Binding IncomingRequests}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             Padding="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.Styles>
+                            <Style Selector="ListBoxItem">
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0"/>
+                                <Setter Property="Focusable" Value="False"/>
+                            </Style>
+                        </ListBox.Styles>
+                        <ListBox.ItemTemplate>
                                 <DataTemplate x:DataType="models:LocalFriendRequest">
                                     <Border Classes="card">
                                         <Grid ColumnDefinitions="Auto,*,Auto">
@@ -390,8 +421,8 @@
                                         </Grid>
                                     </Border>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
 
                         <!-- 空状态（收到） -->
                         <StackPanel IsVisible="{Binding !IncomingRequests.Count}"
@@ -407,16 +438,30 @@
                                        Foreground="#C08098"
                                        HorizontalAlignment="Center"/>
                         </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
+                    </Grid>
 
-                <!-- 发出的申请列表 -->
-                <ScrollViewer Grid.Row="2"
-                              IsVisible="{Binding ShowOutgoing}"
-                              VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <ItemsControl ItemsSource="{Binding OutgoingRequests}">
-                            <ItemsControl.ItemTemplate>
+                <!-- 发出的申请列表（虚拟化 ListBox + 空状态叠加） -->
+                <Grid Grid.Row="2" IsVisible="{Binding ShowOutgoing}">
+                    <ListBox ItemsSource="{Binding OutgoingRequests}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             Padding="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.Styles>
+                            <Style Selector="ListBoxItem">
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0"/>
+                                <Setter Property="Focusable" Value="False"/>
+                            </Style>
+                        </ListBox.Styles>
+                        <ListBox.ItemTemplate>
                                 <DataTemplate x:DataType="models:LocalFriendRequest">
                                     <Border Classes="card">
                                         <Grid ColumnDefinitions="Auto,*,Auto">
@@ -464,8 +509,8 @@
                                         </Grid>
                                     </Border>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
 
                         <!-- 空状态（发出） -->
                         <StackPanel IsVisible="{Binding !OutgoingRequests.Count}"
@@ -481,8 +526,7 @@
                                        Foreground="#C08098"
                                        HorizontalAlignment="Center"/>
                         </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
+                    </Grid>
 
             </Grid>
 
@@ -501,10 +545,27 @@
                                Foreground="#B08090"/>
                 </StackPanel>
 
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <ItemsControl ItemsSource="{Binding BlockedUsers}">
-                            <ItemsControl.ItemTemplate>
+                <Grid Grid.Row="1">
+                    <ListBox ItemsSource="{Binding BlockedUsers}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             Padding="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.Styles>
+                            <Style Selector="ListBoxItem">
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0"/>
+                                <Setter Property="Focusable" Value="False"/>
+                            </Style>
+                        </ListBox.Styles>
+                        <ListBox.ItemTemplate>
                                 <DataTemplate x:DataType="models:LocalBlockedUser">
                                     <Border Classes="card">
                                         <Grid ColumnDefinitions="Auto,*,Auto">
@@ -543,8 +604,8 @@
                                         </Grid>
                                     </Border>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
 
                         <!-- 空状态 -->
                         <StackPanel IsVisible="{Binding !BlockedUsers.Count}"
@@ -560,8 +621,7 @@
                                        Foreground="#C08098"
                                        HorizontalAlignment="Center"/>
                         </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
+                    </Grid>
 
             </Grid>
 

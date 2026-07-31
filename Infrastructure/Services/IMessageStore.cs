@@ -42,7 +42,6 @@ public interface IMessageStore
     /// <summary>获取当前账户所有会话的同步水位（用于 SyncBootstrap 请求的 watermarks）。</summary>
     Task<IReadOnlyList<ConversationSyncWatermarkDto>> GetSyncWatermarksAsync(CancellationToken ct = default);
 
-    /// <summary>登出时清空当前账户的内存状态（不删 DB 数据）。</summary>
     /// <summary>处理对端已读回执（103）：更新本地消息状态为 Read。</summary>
     Task HandleReceiptAsync(MessageReceiptDto dto, CancellationToken ct = default);
 

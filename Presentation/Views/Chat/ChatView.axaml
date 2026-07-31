@@ -89,6 +89,11 @@
                          Background="White"
                          Padding="4"
                          BorderThickness="0">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel/>
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="models:LocalFriend">
                             <controls:FriendsItemControl Margin="0 1">

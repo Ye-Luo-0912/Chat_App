@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
@@ -8,6 +7,7 @@ using Infrastructure.Events;
 using Core.Interfaces;
 using Core.Models;
 using Infrastructure.Models;
+using Infrastructure.Serialization;
 using Serilog;
 
 namespace Infrastructure.Services;
@@ -20,6 +20,13 @@ namespace Infrastructure.Services;
 /// </summary>
 public sealed class OutboxProcessor : IDisposable
 {
+    /// <summary>轮询 Outbox 的周期间隔（秒）。</summary>
+    private const int DrainIntervalSec = 5;
+    /// <summary>单条 Outbox 最大重试次数，超过即放弃（避免无限重试占用资源）。</summary>
+    private const int MaxRetryCount = 10;
+    /// <summary>停止处理器时等待循环退出的超时（秒）。</summary>
+    private const int StopTimeoutSec = 2;
+
     private readonly IDatabaseService _db;
     private readonly IChatSessionClient _chatSession;
     private readonly ICurrentUserContext _currentUserContext;
@@ -127,18 +134,7 @@ public sealed class OutboxProcessor : IDisposable
                     continue;
                 }
 
-                IReadOnlyList<string>? attachmentIds = null;
-                if (!string.IsNullOrWhiteSpace(entry.AttachmentIdsJson))
-                {
-                    try
-                    {
-                        attachmentIds = JsonSerializer.Deserialize<List<string>>(entry.AttachmentIdsJson);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "反序列化 Outbox AttachmentIdsJson 失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
-                    }
-                }
+                IReadOnlyList<string>? attachmentIds = AttachmentJson.DeserializeIds(entry.AttachmentIdsJson);
 
                 try
                 {
@@ -194,7 +190,7 @@ public sealed class OutboxProcessor : IDisposable
         _cts.Cancel();
         try
         {
-            _loopTask?.Wait(TimeSpan.FromSeconds(2));
+            _loopTask?.Wait(TimeSpan.FromSeconds(StopTimeoutSec));
         }
         catch
         {
