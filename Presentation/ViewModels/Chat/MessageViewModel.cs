@@ -1315,6 +1315,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _notificationService.ShowError($"File too large (max {MaxAttachmentSize / 1024 / 1024}MB).");
             return;
         }
+
+        // 文件类型限制：拦截可执行文件、脚本等高风险类型（附件安全策略）
+        var pickedExtension = Path.GetExtension(picked.FileName).ToLowerInvariant();
+        if (BlockedExtensions.Contains(pickedExtension))
+        {
+            _notificationService.ShowError($"不支持此文件类型: {pickedExtension}");
+            return;
+        }
+
         var availableSpace = _storage.GetAvailableDiskSpace();
         if (availableSpace.HasValue && availableSpace.Value < picked.ContentLength * 2)
         {
@@ -1608,6 +1617,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Log.Warning(ex, "更新附件缓存路径失败");
         }
     }
+
+    /// <summary>不允许上传的高风险文件扩展名黑名单（可执行文件、脚本、系统文件）。</summary>
+    private static readonly HashSet<string> BlockedExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1", ".vbs", ".js", ".jar",
+        ".app", ".dll", ".sys", ".drv", ".reg", ".inf", ".lnk", ".sh", ".deb", ".rpm"
+    };
 
     private static string GuessContentTypeFromName(string fileName)
     {
