@@ -17,9 +17,14 @@ namespace Chat_App.Infrastructure.Persistence;
 /// 通过 <see cref="IDbContextFactory{ClientDbContext}"/> 为每个操作创建独立的、短生命周期的 DbContext，
 /// 避免单个非线程安全 DbContext 被多线程共享（P0-4）。
 /// </summary>
-public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) : IDatabaseService
+public class DatabaseService(
+    IDbContextFactory<ClientDbContext> contextFactory,
+    IDatabaseWriteQueue? writeQueue = null) : IDatabaseService
 {
     private static readonly CancellationToken None = CancellationToken.None;
+
+    /// <summary>单写入队列（可选）：高频写入路径可通过此队列串行化，消除 SQLITE_BUSY 并发冲突。</summary>
+    public IDatabaseWriteQueue? WriteQueue => writeQueue;
 
     /// <summary>
     /// 判断 DbUpdateException 是否由 SQLite 唯一约束冲突引起（SQLITE_CONSTRAINT = 19）。
