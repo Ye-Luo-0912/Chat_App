@@ -33,10 +33,8 @@ namespace Chat_App;
 /// </summary>
 public partial class App : Application
 {
-    /// <summary>
-    /// 全局服务提供者，用于获取依赖注入的服务实例。
-    /// </summary>
-    public static IServiceProvider Services { get; private set; } = null!;
+    /// <summary>DI 服务提供者（私有实例字段，避免全局服务定位器反模式）。</summary>
+    private IServiceProvider _services = null!;
 
     public override void Initialize()
     {
@@ -138,7 +136,7 @@ public partial class App : Application
             })
             .AddHttpMessageHandler<AuthInterceptor>();
 
-        Services = services.BuildServiceProvider(new ServiceProviderOptions
+        _services = services.BuildServiceProvider(new ServiceProviderOptions
         {
             ValidateScopes = true,
             ValidateOnBuild = true
@@ -158,7 +156,7 @@ public partial class App : Application
     {
         // 确保数据库表已创建，并应用所有待执行的迁移
         // P0-2: 迁移失败必须终止启动，否则后续会得到大量误导性的"表不存在"错误
-        var dbFactory = Services.GetRequiredService<IDbContextFactory<ClientDbContext>>();
+        var dbFactory = _services.GetRequiredService<IDbContextFactory<ClientDbContext>>();
         using (var db = dbFactory.CreateDbContext())
         {
             try
@@ -179,22 +177,22 @@ public partial class App : Application
         }
 
         // 实例化协调器，开始订阅网络事件进行持久化
-        Services.GetRequiredService<ChatMessageCoordinator>();
+        _services.GetRequiredService<ChatMessageCoordinator>();
 
         // 启动 Outbox 排空处理器（P0-4 事务化 Outbox）
-        var outboxProcessor = Services.GetRequiredService<OutboxProcessor>();
+        var outboxProcessor = _services.GetRequiredService<OutboxProcessor>();
         outboxProcessor.Start();
 
         // 实例化附件恢复服务以注册鉴权事件订阅（九1）：恢复任务在 Authenticated 事件触发，
         // 不再依赖启动固定延迟，未登录会在鉴权成功时自动重试。若当前已鉴权则立即尝试一次。
-        var attachmentRecovery = Services.GetRequiredService<AttachmentRecoveryService>();
+        var attachmentRecovery = _services.GetRequiredService<AttachmentRecoveryService>();
         _ = attachmentRecovery.RecoverFailedUploadsAsync();
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.MainWindow = new MainWindow
             {
-                DataContext = Services.GetRequiredService<MainWindowViewModel>()
+                DataContext = _services.GetRequiredService<MainWindowViewModel>()
             };
         }
 
