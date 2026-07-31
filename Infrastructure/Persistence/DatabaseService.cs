@@ -27,6 +27,24 @@ public class DatabaseService(
     public IDatabaseWriteQueue? WriteQueue => writeQueue;
 
     /// <summary>
+    /// 路由写入操作：注册了单写入队列则串行化执行（消除 SQLITE_BUSY），否则直接执行。
+    /// 委托为自包含操作，内部自行管理 DbContext 与 SaveChangesAsync。
+    /// </summary>
+    private Task WriteAsync(Func<Task> impl, CancellationToken ct = default)
+    {
+        if (writeQueue is null)
+            return impl();
+        return writeQueue.EnqueueAsync(_ => impl(), ct);
+    }
+
+    private Task<T> WriteAsync<T>(Func<Task<T>> impl, CancellationToken ct = default)
+    {
+        if (writeQueue is null)
+            return impl();
+        return writeQueue.EnqueueAsync(_ => impl(), ct);
+    }
+
+    /// <summary>
     /// 判断 DbUpdateException 是否由 SQLite 唯一约束冲突引起（SQLITE_CONSTRAINT = 19）。
     /// 用于 upsert 的幂等处理：并发写入导致唯一索引冲突时视为成功（行已存在）（六1）。
     /// </summary>
@@ -273,7 +291,9 @@ public class DatabaseService(
             .FirstOrDefaultAsync(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId, None);
     }
 
-    public async Task UpsertConversationAsync(LocalConversation conversation)
+    public Task UpsertConversationAsync(LocalConversation conversation) => WriteAsync(() => UpsertConversationAsyncImpl(conversation));
+
+    private async Task UpsertConversationAsyncImpl(LocalConversation conversation)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var existing = await db.Conversations
@@ -305,7 +325,9 @@ public class DatabaseService(
     }
 
     /// <summary>仅更新会话草稿，避免切换会话时全字段 Upsert 的开销。</summary>
-    public async Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft)
+    public Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft) => WriteAsync(() => UpdateConversationDraftAsyncImpl(ownerUserId, conversationId, draft));
+
+    private async Task UpdateConversationDraftAsyncImpl(long ownerUserId, string conversationId, string? draft)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await db.Conversations
@@ -368,7 +390,9 @@ public class DatabaseService(
             .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId && m.ClientMessageId == clientMessageId, None);
     }
 
-    public async Task UpsertMessageAsync(LocalMessage message)
+    public Task UpsertMessageAsync(LocalMessage message) => WriteAsync(() => UpsertMessageAsyncImpl(message));
+
+    private async Task UpsertMessageAsyncImpl(LocalMessage message)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 空串归一化为 NULL：唯一索引下 NULL 互异、空串会冲突（六1）。
@@ -428,7 +452,9 @@ public class DatabaseService(
         }
     }
 
-    public async Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null)
+    public Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null) => WriteAsync(() => UpdateMessageStatusAsyncImpl(ownerUserId, messageId, clientMessageId, status, failureReason, ackServerMessageId));
+
+    private async Task UpdateMessageStatusAsyncImpl(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId);
@@ -461,7 +487,9 @@ public class DatabaseService(
         }
     }
 
-    public async Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs)
+    public Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs) => WriteAsync(() => MarkMessageRecalledAsyncImpl(ownerUserId, messageId, recalledAtMs));
+
+    private async Task MarkMessageRecalledAsyncImpl(long ownerUserId, string messageId, long recalledAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 撤回具有最高优先级。仅当尚未撤回，或入站 RecalledAtMs 更新时才写入（六2）。
@@ -475,7 +503,9 @@ public class DatabaseService(
                     .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
     }
 
-    public async Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
+    public Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs) => WriteAsync(() => ApplyMessageEditAsyncImpl(ownerUserId, messageId, content, editVersion, editedAtMs));
+
+    private async Task ApplyMessageEditAsyncImpl(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 编辑版本单调递增：仅当入站 EditVersion 严格大于已存版本、且消息未撤回时才应用（六2）。
@@ -508,7 +538,9 @@ public class DatabaseService(
     /// 事务性应用入站消息（P0-6）：在单个 DbContext + 单个事务内完成
     /// 消息 upsert + 附件批量 upsert + 会话摘要原子更新 + 未读数递增，保证原子性。
     /// </summary>
-    public async Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate)
+    public Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate) => WriteAsync(() => ApplyIncomingMessageAsyncImpl(message, attachments, conversationUpdate));
+
+    private async Task ApplyIncomingMessageAsyncImpl(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await using var transaction = await db.Database.BeginTransactionAsync(None);
@@ -673,7 +705,9 @@ public class DatabaseService(
 
     // ---- Outbox（P0-6）----
 
-    public async Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox)
+    public Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox) => WriteAsync(() => EnqueueOutboxAsyncImpl(outbox));
+
+    private async Task<long> EnqueueOutboxAsyncImpl(LocalOutboxMessage outbox)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await db.OutboxMessages.AddAsync(outbox, None);
@@ -701,7 +735,9 @@ public class DatabaseService(
             .ToListAsync(None);
     }
 
-    public async Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
+    public Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null) => WriteAsync(() => UpdateOutboxStatusAsyncImpl(ownerUserId, clientMessageId, status, messageId, failureReason));
+
+    private async Task UpdateOutboxStatusAsyncImpl(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.OutboxMessages
@@ -740,7 +776,9 @@ public class DatabaseService(
     /// 事务性写入 Outbox + LocalMessage（P0-4 事务化 Outbox）。
     /// 在单个 DbContext + 单个事务内完成两表 upsert，保证原子性。
     /// </summary>
-    public async Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message)
+    public Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message) => WriteAsync(() => EnqueueOutboxWithMessageAsyncImpl(outbox, message));
+
+    private async Task EnqueueOutboxWithMessageAsyncImpl(LocalOutboxMessage outbox, LocalMessage message)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await using var transaction = await db.Database.BeginTransactionAsync(None);
@@ -817,7 +855,9 @@ public class DatabaseService(
     /// 更新 Outbox 状态并推进重试元数据（P0-4）。
     /// 仅当 status == Failed 时递增 RetryCount 并设置 NextRetryAt（指数退避 + jitter）。
     /// </summary>
-    public async Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
+    public Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null) => WriteAsync(() => UpdateOutboxStatusWithRetryAsyncImpl(ownerUserId, clientMessageId, status, messageId, failureReason));
+
+    private async Task UpdateOutboxStatusWithRetryAsyncImpl(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var existing = await db.OutboxMessages
@@ -860,7 +900,9 @@ public class DatabaseService(
             .FirstOrDefaultAsync(s => s.OwnerUserId == ownerUserId && s.ConversationId == conversationId, None);
     }
 
-    public async Task UpsertSyncCursorAsync(LocalSyncCursor cursor)
+    public Task UpsertSyncCursorAsync(LocalSyncCursor cursor) => WriteAsync(() => UpsertSyncCursorAsyncImpl(cursor));
+
+    private async Task UpsertSyncCursorAsyncImpl(LocalSyncCursor cursor)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var existing = await db.SyncCursors
@@ -901,7 +943,9 @@ public class DatabaseService(
             .FirstOrDefaultAsync(r => r.OwnerUserId == ownerUserId && r.ConversationId == conversationId, None);
     }
 
-    public async Task UpsertReadStateAsync(LocalConversationReadState readState)
+    public Task UpsertReadStateAsync(LocalConversationReadState readState) => WriteAsync(() => UpsertReadStateAsyncImpl(readState));
+
+    private async Task UpsertReadStateAsyncImpl(LocalConversationReadState readState)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var existing = await db.ConversationReadStates
@@ -920,7 +964,9 @@ public class DatabaseService(
         await db.SaveChangesAsync(None);
     }
 
-    public async Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs)
+    public Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs) => WriteAsync(() => MarkConversationMessagesReadAsyncImpl(ownerUserId, conversationId, beforeReceivedAtMs));
+
+    private async Task MarkConversationMessagesReadAsyncImpl(long ownerUserId, string conversationId, long? beforeReceivedAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 仅标记自己发出的消息为已读（对端已读回执表示对方读了我的消息）；
@@ -977,7 +1023,9 @@ public class DatabaseService(
             .OrderByDescending(a => a.Status == 1 ? 1 : 0)
             .FirstOrDefaultAsync(None);
     }
-    public async Task UpsertAttachmentAsync(LocalAttachment attachment)
+    public Task UpsertAttachmentAsync(LocalAttachment attachment) => WriteAsync(() => UpsertAttachmentAsyncImpl(attachment));
+
+    private async Task UpsertAttachmentAsyncImpl(LocalAttachment attachment)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 空串归一化为 NULL：唯一索引下 NULL 互异、空串会冲突（六1）。
@@ -1030,7 +1078,9 @@ public class DatabaseService(
             // 幂等：并发写入导致唯一索引冲突，行已存在，忽略。
         }
     }
-    public async Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null)
+    public Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null) => WriteAsync(() => UpdateAttachmentStatusAsyncImpl(ownerUserId, attachmentId, clientAttachmentId, status, downloadPath, failureReason));
+
+    private async Task UpdateAttachmentStatusAsyncImpl(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.Attachments.Where(a => a.OwnerUserId == ownerUserId);
@@ -1064,7 +1114,9 @@ public class DatabaseService(
     }
 
     /// <summary>更新附件本地上传路径与重试次数。localUploadingPath 传 null 清空该字段；retryCount 传 null 不修改。</summary>
-    public async Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null)
+    public Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null) => WriteAsync(() => UpdateAttachmentUploadPathAsyncImpl(ownerUserId, clientAttachmentId, localUploadingPath, retryCount));
+
+    private async Task UpdateAttachmentUploadPathAsyncImpl(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null)
     {
         if (string.IsNullOrEmpty(clientAttachmentId))
             return;

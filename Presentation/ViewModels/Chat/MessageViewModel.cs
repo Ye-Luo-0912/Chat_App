@@ -730,20 +730,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 if (generation != _conversationGeneration)
                     return;
-                // 仅追加本地尚未展示的新消息，避免重复
-                var existingIds = new HashSet<string>(Messages
-                    .Where(m => !string.IsNullOrWhiteSpace(m.MessageId))
-                    .Select(m => m.MessageId!), StringComparer.Ordinal);
-                foreach (var lm in fresh)
-                {
-                    if (string.IsNullOrWhiteSpace(lm.MessageId))
-                        continue;
-                    if (existingIds.Contains(lm.MessageId))
-                        continue;
-                    var ui = ToUiMessage(lm);
-                    if (ui is not null)
-                        AddMessage(ui);
-                }
+                // 增量 diff：就地更新已存在消息（状态/撤回/编辑），仅追加尚未展示的新消息
+                ApplyHistoryDiff(fresh);
             });
         }
         catch (OperationCanceledException)
@@ -974,6 +962,85 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 message.IsEdited = true;
             AddMessage(message);
         }
+    }
+
+    /// <summary>
+    /// 将 DB 加载的最新页增量合并进当前会话：就地更新已存在消息的字段（状态/撤回/编辑），
+    /// 仅追加尚未展示的新消息。不删除已有消息——fresh 仅为最新页，向上分页加载的更早消息不在其中。
+    /// 保留已存在消息的对象引用与 UI 容器，避免 Clear+Add 重建（P0-UI 热路径优化）。
+    /// </summary>
+    private void ApplyHistoryDiff(IReadOnlyList<LocalMessage> fresh)
+    {
+        if (fresh.Count == 0)
+            return;
+
+        var freshById = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
+        var freshByClientId = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
+        foreach (var lm in fresh)
+        {
+            if (!string.IsNullOrWhiteSpace(lm.MessageId))
+                freshById[lm.MessageId!] = lm;
+            if (!string.IsNullOrWhiteSpace(lm.ClientMessageId))
+                freshByClientId[lm.ClientMessageId!] = lm;
+        }
+
+        // 1. 就地更新已存在消息的字段（状态/撤回/编辑），保留 UI 容器
+        foreach (var existing in Messages)
+        {
+            LocalMessage? src = null;
+            var mid = existing.MessageId;
+            if (!string.IsNullOrWhiteSpace(mid) && freshById.TryGetValue(mid!, out src))
+            {
+                // matched by server id
+            }
+            else if (!string.IsNullOrWhiteSpace(existing.ClientMessageId)
+                     && freshByClientId.TryGetValue(existing.ClientMessageId!, out src))
+            {
+                // matched by client id
+            }
+
+            if (src is not null)
+                ApplyDbStateToMessage(existing, src);
+        }
+
+        // 2. 追加尚未展示的新消息（fresh 已按时间正序，直接追加保持顺序）
+        foreach (var lm in fresh)
+        {
+            if (!string.IsNullOrWhiteSpace(lm.MessageId))
+            {
+                if (_messagesByServerId.ContainsKey(lm.MessageId!))
+                    continue;
+            }
+            else if (!string.IsNullOrWhiteSpace(lm.ClientMessageId))
+            {
+                if (_messagesByClientId.ContainsKey(lm.ClientMessageId!))
+                    continue;
+            }
+
+            var ui = ToUiMessage(lm);
+            if (ui is not null)
+                AddMessage(ui);
+        }
+    }
+
+    /// <summary>将 DB 最新状态同步到已存在的 UI 消息（状态/撤回/编辑单调推进，不回退）。</summary>
+    private static void ApplyDbStateToMessage(Message target, LocalMessage src)
+    {
+        // 撤回具有最高优先级（六2）
+        if ((src.RecalledAtMs is > 0 || src.Status == MessageStatus.Recalled) && !target.IsRecalled)
+        {
+            target.ApplyRecalled();
+            return;
+        }
+
+        // 状态单调推进：仅当 DB 状态数值更大时才更新（Queued<Sent<Delivered<Read<Failed<Recalled）
+        if (src.Status != target.Status && (byte)src.Status > (byte)target.Status)
+            target.Status = src.Status;
+
+        // 编辑版本单调递增：仅当 DB 编辑版本更新时应用（六2）
+        var dbEditVersion = src.EditVersion > 0 ? src.EditVersion : 1;
+        if (dbEditVersion > target.EditVersion)
+            target.ApplyEdited(src.Content ?? string.Empty, dbEditVersion, src.EditedAtMs ?? 0);
     }
 
     private async Task SendMessage(CancellationToken ct)

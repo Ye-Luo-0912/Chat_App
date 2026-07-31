@@ -54,15 +54,54 @@ public sealed class ChatFriendListState : IDisposable
 
     public void ReplaceFriends(IEnumerable<LocalFriend> friends)
     {
-        _friends.Clear();
-        _friendsById.Clear();
-        foreach (var friend in friends)
+        // 增量同步 _friends：按 FriendId 对比，删除消失项、就地更新已有项字段、追加新增项。
+        // 保留已有对象引用，避免 Clear+Add 重建全部 item container 并丢失会话派生状态（置顶/免打扰/预览/在线）。
+        var incoming = friends as IList<LocalFriend> ?? friends.ToList();
+        var incomingById = new Dictionary<long, LocalFriend>(incoming.Count);
+        foreach (var f in incoming)
+            incomingById[f.FriendId] = f;
+
+        // 1. 从后往前删除新列表中不存在的项
+        for (var i = _friends.Count - 1; i >= 0; i--)
         {
-            _friends.Add(friend);
-            _friendsById[friend.FriendId] = friend;
+            if (!incomingById.ContainsKey(_friends[i].FriendId))
+            {
+                _friendsById.Remove(_friends[i].FriendId);
+                _friends.RemoveAt(i);
+            }
+        }
+
+        // 2. 就地更新已有项的好友表字段（保留 target 的会话派生字段 IsPinned/IsMuted/LastMessagePreview/IsOnline）
+        for (var i = 0; i < _friends.Count; i++)
+        {
+            if (incomingById.TryGetValue(_friends[i].FriendId, out var src))
+                CopyFriendTableFields(_friends[i], src);
+        }
+
+        // 3. 追加新增项（顺序按 incoming；_friends 顺序不影响 UI，排序由 ApplyFilter 统一处理）
+        foreach (var f in incoming)
+        {
+            if (_friendsById.TryAdd(f.FriendId, f))
+                _friends.Add(f);
         }
 
         ApplyFilter();
+    }
+
+    /// <summary>
+    /// 将 src 的好友表字段复制到 target（保留 target 的会话派生状态：置顶/免打扰/预览/在线）。
+    /// DisplayName 按 Note→FriendName 规则重算，与服务端 DTO 转换（FriendDtoExtensions.ToLocalFriend）保持一致。
+    /// </summary>
+    private static void CopyFriendTableFields(LocalFriend target, LocalFriend src)
+    {
+        target.FriendName = src.FriendName;
+        target.AvatarUrl = src.AvatarUrl;
+        target.Note = src.Note;
+        target.Status = src.Status;
+        target.LastSynced = src.LastSynced;
+        target.DisplayName = string.IsNullOrWhiteSpace(src.Note)
+            ? (src.FriendName ?? string.Empty)
+            : src.Note;
     }
 
     public void ApplyConversationPrefs(IReadOnlyList<ConversationListItemDto> items, long selfUserId)
