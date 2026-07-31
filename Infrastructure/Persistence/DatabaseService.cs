@@ -52,20 +52,34 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             }).ToListAsync(None);
     }
 
-    public async Task AddFriendAsync(List<LocalFriend> friend)
+    public async Task AddFriendAsync(List<LocalFriend> friends)
     {
+        if (friends.Count == 0) return;
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        foreach (var f in friend)
+
+        // 批量查询已存在记录：按 OwnerUserId 分组，每组用 FriendId 列表一次性查询，
+        // 将 N 次 FirstOrDefaultAsync 减少为 OwnerUserId 数量次查询（通常仅 1 次）。
+        var existingMap = new Dictionary<(long OwnerUserId, long FriendId), LocalFriend>();
+        foreach (var group in friends.GroupBy(f => f.OwnerUserId))
         {
-            var existing = await db.Friends.FirstOrDefaultAsync(
-                x => x.OwnerUserId == f.OwnerUserId && x.FriendId == f.FriendId, None);
-            if (existing != null)
+            var friendIds = group.Select(g => g.FriendId).ToList();
+            await foreach (var ent in db.Friends
+                .Where(f => f.OwnerUserId == group.Key && friendIds.Contains(f.FriendId))
+                .AsAsyncEnumerable().WithCancellation(None))
             {
-                existing.FriendName = f.FriendName;
-                existing.Note = f.Note;
-                existing.Status = f.Status;
-                existing.AvatarUrl = f.AvatarUrl;
-                existing.LastSynced = DateTime.UtcNow;
+                existingMap[(ent.OwnerUserId, ent.FriendId)] = ent;
+            }
+        }
+
+        foreach (var f in friends)
+        {
+            if (existingMap.TryGetValue((f.OwnerUserId, f.FriendId), out var ent))
+            {
+                ent.FriendName = f.FriendName;
+                ent.Note = f.Note;
+                ent.Status = f.Status;
+                ent.AvatarUrl = f.AvatarUrl;
+                ent.LastSynced = DateTime.UtcNow;
             }
             else
             {
@@ -84,19 +98,18 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task UpdateFriendAsync(LocalFriend updatedFriend)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        var friend = await db.Friends.FirstOrDefaultAsync(f => f.Id == updatedFriend.Id, None);
-        if (friend != null)
-        {
-            friend.FriendId = updatedFriend.FriendId;
-            friend.OwnerUserId = updatedFriend.OwnerUserId;
-            friend.FriendName = updatedFriend.FriendName;
-            friend.Note = updatedFriend.Note;
-            friend.Status = updatedFriend.Status;
-            friend.AvatarUrl = updatedFriend.AvatarUrl;
-            friend.IsOnline = updatedFriend.IsOnline;
-            friend.LastSynced = DateTime.UtcNow;
-            await db.SaveChangesAsync(None);
-        }
+        // ExecuteUpdateAsync 直接生成 UPDATE SQL，消除先查再改的往返（P0-数据库优化）。
+        await db.Friends
+            .Where(f => f.Id == updatedFriend.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(f => f.FriendId, updatedFriend.FriendId)
+                .SetProperty(f => f.OwnerUserId, updatedFriend.OwnerUserId)
+                .SetProperty(f => f.FriendName, updatedFriend.FriendName)
+                .SetProperty(f => f.Note, updatedFriend.Note)
+                .SetProperty(f => f.Status, updatedFriend.Status)
+                .SetProperty(f => f.AvatarUrl, updatedFriend.AvatarUrl)
+                .SetProperty(f => f.IsOnline, updatedFriend.IsOnline)
+                .SetProperty(f => f.LastSynced, DateTime.UtcNow), None);
     }
 
     public async Task DeleteFriendAsync(long id)
