@@ -176,19 +176,10 @@ public partial class App : Application
         var outboxProcessor = Services.GetRequiredService<OutboxProcessor>();
         outboxProcessor.Start();
 
-        // Recover failed attachment uploads (fire-and-forget, delayed for auth)
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(3000, CancellationToken.None);
-                await Services.GetRequiredService<AttachmentRecoveryService>().RecoverFailedUploadsAsync();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "附件恢复任务失败");
-            }
-        });
+        // 实例化附件恢复服务以注册鉴权事件订阅（九1）：恢复任务在 Authenticated 事件触发，
+        // 不再依赖启动固定延迟，未登录会在鉴权成功时自动重试。若当前已鉴权则立即尝试一次。
+        var attachmentRecovery = Services.GetRequiredService<AttachmentRecoveryService>();
+        _ = attachmentRecovery.RecoverFailedUploadsAsync();
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

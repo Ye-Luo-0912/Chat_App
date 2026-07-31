@@ -1296,20 +1296,26 @@ public class MessageViewModel : ViewModelBase, IDisposable
         string? uploadingRelativePath = null;
         try
         {
+            // 九3: 复制到临时文件时同步增量计算 SHA-256，源流仅读取一次（避免先算hash再复制的重复IO）。
             string? sha256 = null;
+            clientAttachmentId = Guid.NewGuid().ToString("N");
             try
             {
-                await using (var hashStream = picked.OpenRead())
+                await using (var sourceStream = picked.OpenRead())
                 {
-                    var hashProgress = new Progress<long>(_ => { });
-                    sha256 = await FileHasher.ComputeSha256Async(hashStream, hashProgress, ct).ConfigureAwait(true);
+                    var (relPath, hash) = await _storage.WriteToUploadingWithHashAsync(sourceStream, picked.FileName, ct).ConfigureAwait(true);
+                    uploadingRelativePath = relPath;
+                    sha256 = hash;
                 }
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "Hash computation failed, continuing without dedup");
-                sha256 = null;
+                Log.Warning(ex, "Failed to write local temp file");
+                _notificationService.ShowError("Failed to save attachment temp file.");
+                return;
             }
+
+            // 去重检查
             if (sha256 is not null)
             {
                 try
@@ -1317,6 +1323,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     var existing = await _dbService.GetAttachmentBySha256Async(_currentUserContext.RequireUserId(), sha256).ConfigureAwait(true);
                     if (existing is not null && !string.IsNullOrWhiteSpace(existing.AttachmentId))
                     {
+                        // 命中去重，删除刚创建的临时文件
+                        _storage.DeleteUploadingFile(uploadingRelativePath);
+                        uploadingRelativePath = null;
                         AddPendingAttachment(new PendingAttachment
                         {
                             AttachmentId = existing.AttachmentId,
@@ -1333,21 +1342,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 {
                     Log.Warning(ex, "Local dedup query failed");
                 }
-            }
-
-            clientAttachmentId = Guid.NewGuid().ToString("N");
-            try
-            {
-                await using (var sourceStream = picked.OpenRead())
-                {
-                    uploadingRelativePath = await _storage.WriteToUploadingAsync(sourceStream, picked.FileName, ct).ConfigureAwait(true);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to write local temp file");
-                _notificationService.ShowError("Failed to save attachment temp file.");
-                return;
             }
             var owner = _currentUserContext.RequireUserId();
             try
@@ -1394,6 +1388,19 @@ public class MessageViewModel : ViewModelBase, IDisposable
             UploadProgress = 100;
             _notificationService.ShowSuccess($"Attachment ready: {result.OriginalName ?? picked.FileName}");
 
+            // 九2: 上传成功后将临时文件转为下载缓存，避免自己刚上传的文件再次打开仍需网络下载。
+            string? localCachePath = null;
+            try
+            {
+                localCachePath = _storage.MoveToDownloads(uploadingRelativePath, result.AttachmentId, result.OriginalName ?? picked.FileName);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to move uploaded file to downloads cache");
+                _storage.DeleteUploadingFile(uploadingRelativePath);
+            }
+            uploadingRelativePath = null;
+
             try
             {
                 await _dbService.UpsertAttachmentAsync(new LocalAttachment
@@ -1407,6 +1414,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     Sha256 = sha256,
                     DownloadPath = result.DownloadPath,
                     ObjectKey = result.ObjectKey,
+                    LocalCachePath = localCachePath,
                     Status = 1,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
@@ -1417,9 +1425,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 Log.Warning(ex, "Failed to update attachment metadata to Available");
             }
-
-            _storage.DeleteUploadingFile(uploadingRelativePath);
-            uploadingRelativePath = null;
         }
         catch (OperationCanceledException)
         {

@@ -31,6 +31,12 @@ public interface IAttachmentStorageService
     /// <summary>将源流写入上传临时目录，返回相对路径（仅文件名）。</summary>
     Task<string> WriteToUploadingAsync(Stream content, string fileName, CancellationToken ct = default);
 
+    /// <summary>
+    /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256（九3）。
+    /// 返回 (相对路径, sha256 十六进制小写)。源流仅读取一次，避免重复 IO。
+    /// </summary>
+    Task<(string relativePath, string sha256)> WriteToUploadingWithHashAsync(Stream content, string fileName, CancellationToken ct = default);
+
     /// <summary>根据相对路径获取完整路径。</summary>
     string ResolvePath(string relativePath);
 

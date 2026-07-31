@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Core.Contracts.Attachments;
 using Core.Interfaces;
+using Infrastructure.Networking;
 using Serilog;
 
 namespace Chat_App.Services;
@@ -74,6 +75,26 @@ public sealed class AttachmentApiService : IAttachmentClientService
         if (contentLength > 0)
             streamContent.Headers.ContentLength = contentLength;
 
+        // 九5: 流式上传内容不可自动缓冲重放。为 401 重试提供请求体重建工厂：
+        // 重置底层 seekable 流位置，重新包装 ProgressReadStream + StreamContent。
+        Func<CancellationToken, Task<HttpContent?>> replayFactory = _ =>
+        {
+            if (content.CanSeek)
+                content.Position = 0;
+            var ps = new ProgressReadStream(content, contentLength, bytes => progress?.Report(new AttachmentUploadProgress
+            {
+                AttachmentId = ticket.AttachmentId,
+                BytesTransferred = bytes,
+                TotalBytes = contentLength
+            }));
+            var sc = new StreamContent(ps);
+            sc.Headers.ContentType = new MediaTypeHeaderValue(
+                string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType);
+            if (contentLength > 0)
+                sc.Headers.ContentLength = contentLength;
+            return Task.FromResult<HttpContent?>(sc);
+        };
+
         HttpResponseMessage response;
         if (Uri.TryCreate(ticket.UploadUrl, UriKind.Absolute, out var absolute)
             && (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
@@ -90,8 +111,13 @@ public sealed class AttachmentApiService : IAttachmentClientService
             if (Uri.TryCreate(ticket.UploadUrl, UriKind.Absolute, out var absApi))
                 relative = absApi.PathAndQuery;
 
+            using var putRequest = new HttpRequestMessage(HttpMethod.Put, relative);
+            putRequest.Content = streamContent;
+            // 九5: 提供请求体重建工厂，流式上传遇 401 时由拦截器重建流而非发送空 body。
+            putRequest.Options.Set(RequestOptionKeys.ReplayFactory, replayFactory);
+
             response = await _httpClient
-                .PutAsync(relative, streamContent, ct)
+                .SendAsync(putRequest, ct)
                 .ConfigureAwait(false);
         }
 
