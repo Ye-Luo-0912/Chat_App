@@ -1,3 +1,4 @@
+using Chat_App.Infrastructure.Persistence;
 using Infrastructure.Models.Context;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
@@ -8,17 +9,11 @@ public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<ClientDbCo
 {
     public ClientDbContext CreateDbContext(string[] args)
     {
-        var dbDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ChatApp",
-            "Data");
-        Directory.CreateDirectory(dbDir);
-        var dbPath = Path.Combine(dbDir, "ChatApp.db");
-        var connectionString = $"Data Source={dbPath};Cache=Shared;Journal Mode=WAL;Synchronous=NORMAL;Busy Timeout=5000;Foreign Keys=ON;";
+        // 复用共享连接字符串构造器（P0-2），避免与运行时漂移
+        var connectionString = DbPathProvider.BuildConnectionString();
 
         var optionsBuilder = new DbContextOptionsBuilder<ClientDbContext>();
-        optionsBuilder.UseSqlite(connectionString); // 设计时使用与运行时一致的用户数据目录
+        optionsBuilder.UseSqlite(connectionString);
         return new ClientDbContext(optionsBuilder.Options);
     }
-    
 }

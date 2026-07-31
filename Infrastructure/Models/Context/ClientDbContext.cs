@@ -1,11 +1,15 @@
 using Microsoft.EntityFrameworkCore;
 using Core.Models;
 using Infrastructure.Data;
+using Chat_App.Infrastructure.Persistence;
 
 namespace Infrastructure.Models.Context;
 
 public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbContext(options)
 {
+    /// <summary>当前数据库文件路径（用于日志/错误提示）。</summary>
+    public string DbPath => DbPathProvider.DbPath;
+
     public DbSet<LocalUser> Users { get; set; }
     public DbSet<ServerEndpoint> Servers { get; set; }
     public DbSet<AuthToken> Tokens { get; set; }
@@ -20,6 +24,9 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
 
     // ---- 阶段 3 附件元数据 ----
     public DbSet<LocalAttachment> Attachments => Set<LocalAttachment>();
+
+    // PRAGMA 通过 SqlitePragmaInterceptor 在每次连接打开时执行（P0-2），不在此处调用 ExecuteSqlRaw。
+    // OnConfiguring 由池化工厂在租用上下文时调用一次，不适合做 PRAGMA。
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

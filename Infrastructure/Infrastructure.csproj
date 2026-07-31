@@ -37,6 +37,7 @@
       <Compile Include="..\Core\Services\MessageStore.cs" />
       <Compile Include="..\Core\Services\ChatMessageCoordinator.cs" />
       <Compile Include="..\Core\Services\AttachmentRecoveryService.cs" />
+      <Compile Include="..\Core\Services\OutboxProcessor.cs" />
     </ItemGroup>
 
 </Project>

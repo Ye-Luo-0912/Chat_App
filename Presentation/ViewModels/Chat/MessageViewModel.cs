@@ -897,57 +897,22 @@ public class MessageViewModel : ViewModelBase, IDisposable
             : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
-        OutboxStatus outboxStatus;
-        MessageStatus messageStatus;
-
-        try
-        {
-            var returnedId = await _chatSession.SendChatMessageAsync(
-                    CurrFriend.FriendId,
-                    text,
-                    attachmentIds,
-                    replyMessageId,
-                    replySenderId,
-                    replyPreview,
-                    null, null, null,
-                    clientMessageId,
-                    ct)
-                .ConfigureAwait(true);
-            clientMessageId = returnedId;
-            outboxStatus = OutboxStatus.Sent;
-            messageStatus = MessageStatus.Sent;
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "发送消息失败，已入 Outbox 等待重试 ClientMessageId={ClientMessageId}", clientMessageId);
-            outboxStatus = OutboxStatus.Failed;
-            messageStatus = MessageStatus.Failed;
-            _notificationService.ShowError($"消息发送失败，已保存可重试: {ex.Message}");
-        }
+        var targetUserId = CurrFriend.FriendId;
 
         var outbox = new LocalOutboxMessage
         {
             OwnerUserId = selfId,
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
-            TargetUserId = CurrFriend.FriendId,
+            TargetUserId = targetUserId,
             Content = text,
             AttachmentIdsJson = attachmentIdsJson,
             ReplyToMessageId = replyMessageId,
             ReplyToSenderUserId = replySenderId,
             ReplyToPreview = replyPreview,
-            Status = outboxStatus,
-            QueuedAt = nowUtc,
-            SentAt = outboxStatus == OutboxStatus.Sent ? nowUtc : null
+            Status = OutboxStatus.Queued,
+            QueuedAt = nowUtc
         };
-        try
-        {
-            await _dbService.EnqueueOutboxAsync(outbox).ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Outbox 入库失败 ClientMessageId={ClientMessageId}", clientMessageId);
-        }
 
         var localMessage = new LocalMessage
         {
@@ -955,24 +920,28 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
             SenderUserId = selfId,
-            ReceiverUserId = CurrFriend.FriendId,
+            ReceiverUserId = targetUserId,
             Content = text ?? string.Empty,
             ReceivedAtMs = nowMs,
             AttachmentsJson = attachmentsJson,
             ReplyToMessageId = replyMessageId,
             ReplyToSenderUserId = replySenderId,
             ReplyToPreview = replyPreview,
-            Status = messageStatus,
+            Status = MessageStatus.Queued,
             CreatedAt = nowUtc,
             UpdatedAt = nowUtc
         };
+
+        // 单事务写入 Outbox + LocalMessage（P0-4 事务化 Outbox）：先持久化再发送
         try
         {
-            await _dbService.UpsertMessageAsync(localMessage).ConfigureAwait(true);
+            await _dbService.EnqueueOutboxWithMessageAsync(outbox, localMessage).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "LocalMessage 入库失败 ClientMessageId={ClientMessageId}", clientMessageId);
+            Log.Error(ex, "事务性写入 Outbox+Message 失败 ClientMessageId={ClientMessageId}", clientMessageId);
+            _notificationService.ShowError($"消息保存失败: {ex.Message}");
+            return;
         }
 
         AddMessage(new Message
@@ -981,7 +950,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Content = text ?? string.Empty,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
-            Status = messageStatus,
+            Status = MessageStatus.Queued,
             Sender = EmptyUser,
             Attachments = attachments,
             ReplyToMessageId = replyMessageId,
@@ -993,6 +962,34 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ClearPendingAttachment();
         ClearReplyDraft();
         _ = StopTypingAsync();
+
+        // 持久化完成后才尝试网络发送；失败由 OutboxProcessor 重试
+        try
+        {
+            await _chatSession.SendChatMessageAsync(
+                    targetUserId,
+                    text,
+                    attachmentIds,
+                    replyMessageId,
+                    replySenderId,
+                    replyPreview,
+                    null, null, null,
+                    clientMessageId,
+                    ct)
+                .ConfigureAwait(true);
+            // 发送已上行成功，标记 Sending；后续 MessageAck 会推进到 Sent
+            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Sending)
+                .ConfigureAwait(true);
+            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Sending, null));
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "发送消息失败，OutboxProcessor 将重试 ClientMessageId={ClientMessageId}", clientMessageId);
+            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Failed, null, ex.Message)
+                .ConfigureAwait(true);
+            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Failed, null));
+            _notificationService.ShowError($"消息发送失败，已保存可重试: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -1046,18 +1043,83 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ? (source.HasAttachments ? TruncatePreview(source.AttachmentSummary) : "原消息")
             : TruncatePreview(source.Content);
 
-        var clientMessageId = await _chatSession.SendChatMessageAsync(
-                target.FriendId,
-                content,
-                attachmentIds: null,
-                replyToMessageId: null,
-                replyToSenderUserId: null,
-                replyToPreview: null,
-                forwardedFromMessageId: source.MessageId,
-                forwardedFromSenderUserId: forwardSenderId,
-                forwardedFromPreview: forwardPreview,
-                ct: ct)
-            .ConfigureAwait(true);
+        var selfId = _currentUserContext.RequireUserId();
+        var conversationId = ConversationId.CreateDirect(selfId, target.FriendId);
+        var nowUtc = DateTime.UtcNow;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientMessageId = Guid.CreateVersion7().ToString("N");
+
+        var outbox = new LocalOutboxMessage
+        {
+            OwnerUserId = selfId,
+            ClientMessageId = clientMessageId,
+            ConversationId = conversationId,
+            TargetUserId = target.FriendId,
+            Content = content,
+            ForwardedFromMessageId = source.MessageId,
+            ForwardedFromSenderUserId = forwardSenderId,
+            ForwardedFromPreview = forwardPreview,
+            Status = OutboxStatus.Queued,
+            QueuedAt = nowUtc
+        };
+
+        var localMessage = new LocalMessage
+        {
+            OwnerUserId = selfId,
+            ClientMessageId = clientMessageId,
+            ConversationId = conversationId,
+            SenderUserId = selfId,
+            ReceiverUserId = target.FriendId,
+            Content = content,
+            ReceivedAtMs = nowMs,
+            ForwardedFromMessageId = source.MessageId,
+            ForwardedFromSenderUserId = forwardSenderId,
+            ForwardedFromPreview = forwardPreview,
+            Status = MessageStatus.Queued,
+            CreatedAt = nowUtc,
+            UpdatedAt = nowUtc
+        };
+
+        // 单事务写入 Outbox + LocalMessage（P0-4 事务化 Outbox）：先持久化再发送
+        try
+        {
+            await _dbService.EnqueueOutboxWithMessageAsync(outbox, localMessage).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "事务性写入转发 Outbox+Message 失败 ClientMessageId={ClientMessageId}", clientMessageId);
+            _notificationService.ShowError($"转发消息保存失败: {ex.Message}");
+            return null;
+        }
+
+        var bubbleStatus = MessageStatus.Queued;
+        try
+        {
+            await _chatSession.SendChatMessageAsync(
+                    target.FriendId,
+                    content,
+                    attachmentIds: null,
+                    replyToMessageId: null,
+                    replyToSenderUserId: null,
+                    replyToPreview: null,
+                    forwardedFromMessageId: source.MessageId,
+                    forwardedFromSenderUserId: forwardSenderId,
+                    forwardedFromPreview: forwardPreview,
+                    clientMessageId: clientMessageId,
+                    ct: ct)
+                .ConfigureAwait(true);
+            // 发送已上行成功，标记 Sending；后续 MessageAck 会推进到 Sent
+            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Sending)
+                .ConfigureAwait(true);
+            bubbleStatus = MessageStatus.Sending;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "转发消息发送失败，OutboxProcessor 将重试 ClientMessageId={ClientMessageId}", clientMessageId);
+            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Failed, null, ex.Message)
+                .ConfigureAwait(true);
+            bubbleStatus = MessageStatus.Failed;
+        }
 
         return new Message
         {
@@ -1065,6 +1127,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Content = content,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
+            Status = bubbleStatus,
             Sender = EmptyUser,
             ForwardedFromMessageId = source.MessageId,
             ForwardedFromSenderUserId = forwardSenderId,

@@ -18,6 +18,7 @@
       <Compile Remove="Services\MessageStore.cs" />
       <Compile Remove="Services\ChatMessageCoordinator.cs" />
       <Compile Remove="Services\AttachmentRecoveryService.cs" />
+      <Compile Remove="Services\OutboxProcessor.cs" />
     </ItemGroup>
 
     <!-- UI/ViewModels should reference Core directly -->

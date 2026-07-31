@@ -30,7 +30,7 @@ public class TcpClientExample : ITcpClient, IDisposable
 
     private readonly Lock _syncRoot = new();
 
-    // 连接代际：每次 ConnectAsync 递增。接收循环只有在自己所属代际等于当前代际时，
+    // 连接代际：每次 ConnectAsync 递增。收发循环只有在自己所属代际等于当前代际时，
     // 才允许修改全局连接状态（如触发 Disconnect），避免旧循环误关新连接（P0-3）。
     private int _connectionGeneration;
 
@@ -81,9 +81,10 @@ public class TcpClientExample : ITcpClient, IDisposable
             OnPropertyChanged(nameof(IsConnected));
             ConnectionStatusChanged?.Invoke(this, "Connected");
 
-            // 收发循环各自捕获本次连接的代际与 CTS，任务保存以便 Dispose 时等待（不再 fire-and-forget）。
+            // 收发循环各自捕获本次连接的代际、CTS 与 Socket。
+            // 发送循环也绑定代际与本次 Socket，不再每帧读取全局 _tcpClient（P0-3）。
             _receiveTask = ReceiveDataAsync(receiveCts.Token, generation, clientSocket);
-            _sendTask = SendLoopAsync(sendCts.Token);
+            _sendTask = SendLoopAsync(sendCts.Token, generation, clientSocket);
         }
         catch (Exception)
         {
@@ -137,26 +138,26 @@ public class TcpClientExample : ITcpClient, IDisposable
 
     /// <summary>
     /// 独占发送循环：从队列逐帧完整发送，保证帧边界原子性（P0-2）。
+    /// P0-3 修复：发送循环绑定本次连接的 generation 和 socket，
+    /// 不再每帧读取全局 _tcpClient；旧发送循环不会把帧发到新 Socket，
+    /// 旧发送循环异常不会关闭新连接。
     /// </summary>
-    private async Task SendLoopAsync(CancellationToken token)
+    private async Task SendLoopAsync(CancellationToken token, int generation, Socket socket)
     {
         try
         {
             await foreach (var frame in _sendChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
             {
+                // 旧代际的发送循环不应处理新连接的帧：如果代际已变，退出。
+                if (!IsCurrentGeneration(generation))
+                {
+                    frame.Tcs.TrySetException(
+                        new InvalidOperationException("连接已切换，旧发送循环退出"));
+                    return;
+                }
+
                 try
                 {
-                    Socket? socket;
-                    lock (_syncRoot)
-                    {
-                        socket = _tcpClient;
-                    }
-                    if (socket is null)
-                    {
-                        frame.Tcs.TrySetException(new InvalidOperationException("连接已关闭"));
-                        continue;
-                    }
-
                     var data = frame.Data;
                     var totalSent = 0;
                     while (totalSent < data.Length)
@@ -172,7 +173,9 @@ public class TcpClientExample : ITcpClient, IDisposable
                 {
                     frame.Tcs.TrySetException(ex);
                     DrainSendChannel(ex);
-                    Disconnect("Connection lost during send");
+                    // 只有当前代际的发送循环才允许触发 Disconnect，避免旧循环误关新连接（P0-3）。
+                    if (IsCurrentGeneration(generation))
+                        Disconnect("Connection lost during send");
                     return;
                 }
             }
@@ -184,7 +187,9 @@ public class TcpClientExample : ITcpClient, IDisposable
         catch (Exception ex)
         {
             DrainSendChannel(ex);
-            Disconnect($"Send loop error: {ex.Message}");
+            // 只有当前代际的发送循环才允许触发 Disconnect（P0-3）。
+            if (IsCurrentGeneration(generation))
+                Disconnect($"Send loop error: {ex.Message}");
         }
     }
 

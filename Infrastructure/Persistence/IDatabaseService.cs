@@ -48,12 +48,30 @@ public interface IDatabaseService
     Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs);
     Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100);
 
+    /// <summary>
+    /// 事务性应用入站消息（P0-6）：在单个 DbContext + 单个事务内完成
+    /// 消息 upsert + 附件批量 upsert + 会话摘要原子更新 + 未读数递增。
+    /// </summary>
+    Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate);
+
     // ---- Outbox（P0-6）----
     Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox);
     Task<LocalOutboxMessage?> GetOutboxByClientIdAsync(long ownerUserId, string clientMessageId);
     Task<List<LocalOutboxMessage>> GetPendingOutboxAsync(long ownerUserId, int limit = 50);
     Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
     Task DeleteOutboxAsync(long ownerUserId, string clientMessageId);
+
+    /// <summary>
+    /// 事务性写入 Outbox + LocalMessage（P0-4 事务化 Outbox）。
+    /// 在单个 DbContext + 单个事务内完成两表 upsert，保证原子性。
+    /// </summary>
+    Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message);
+
+    /// <summary>
+    /// 更新 Outbox 状态并推进重试元数据（P0-4）。
+    /// 仅当 status == Failed 时递增 RetryCount 并设置 NextRetryAt（指数退避 + jitter）。
+    /// </summary>
+    Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
 
     // ---- 同步水位（P0-6）----
     Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId);

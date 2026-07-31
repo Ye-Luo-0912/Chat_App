@@ -427,6 +427,155 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             .ToListAsync(None);
     }
 
+    /// <summary>
+    /// 事务性应用入站消息（P0-6）：在单个 DbContext + 单个事务内完成
+    /// 消息 upsert + 附件批量 upsert + 会话摘要原子更新 + 未读数递增，保证原子性。
+    /// </summary>
+    public async Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        // ---- Upsert LocalMessage（镜像 UpsertMessageAsync：先 OwnerUserId + MessageId，回退 OwnerUserId + ClientMessageId）----
+        LocalMessage? existingMessage = null;
+        if (!string.IsNullOrEmpty(message.MessageId))
+        {
+            existingMessage = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.MessageId == message.MessageId, None);
+        }
+        if (existingMessage is null && !string.IsNullOrEmpty(message.ClientMessageId))
+        {
+            existingMessage = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.ClientMessageId == message.ClientMessageId, None);
+        }
+        if (existingMessage is not null)
+        {
+            existingMessage.Content         = message.Content;
+            existingMessage.ReceivedAtMs    = message.ReceivedAtMs;
+            existingMessage.DeliveredAtMs   = message.DeliveredAtMs;
+            existingMessage.ReadAtMs        = message.ReadAtMs;
+            existingMessage.RecalledAtMs    = message.RecalledAtMs;
+            existingMessage.EditVersion     = message.EditVersion;
+            existingMessage.EditedAtMs      = message.EditedAtMs;
+            existingMessage.AttachmentsJson = message.AttachmentsJson;
+            existingMessage.Status          = message.Status;
+            existingMessage.FailureReason   = message.FailureReason;
+            existingMessage.UpdatedAt       = message.UpdatedAt;
+            // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
+            if (string.IsNullOrEmpty(existingMessage.MessageId) && !string.IsNullOrEmpty(message.MessageId))
+            {
+                existingMessage.MessageId = message.MessageId;
+            }
+        }
+        else
+        {
+            await db.Messages.AddAsync(message, None);
+        }
+
+        // ---- Upsert LocalAttachment 批量（镜像 UpsertAttachmentAsync：按 OwnerUserId + AttachmentId，回退 ClientAttachmentId）----
+        if (attachments is { Count: > 0 })
+        {
+            foreach (var attachment in attachments)
+            {
+                LocalAttachment? existingAttachment = null;
+                if (!string.IsNullOrEmpty(attachment.AttachmentId))
+                {
+                    existingAttachment = await db.Attachments
+                        .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
+                                              && a.AttachmentId == attachment.AttachmentId, None);
+                }
+                if (existingAttachment is null && !string.IsNullOrEmpty(attachment.ClientAttachmentId))
+                {
+                    existingAttachment = await db.Attachments
+                        .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
+                                              && a.ClientAttachmentId == attachment.ClientAttachmentId, None);
+                }
+                if (existingAttachment is not null)
+                {
+                    existingAttachment.AttachmentId       = attachment.AttachmentId ?? existingAttachment.AttachmentId;
+                    existingAttachment.ClientAttachmentId = attachment.ClientAttachmentId ?? existingAttachment.ClientAttachmentId;
+                    existingAttachment.MessageId          = attachment.MessageId ?? existingAttachment.MessageId;
+                    existingAttachment.ConversationId     = attachment.ConversationId ?? existingAttachment.ConversationId;
+                    existingAttachment.FileName           = attachment.FileName ?? existingAttachment.FileName;
+                    existingAttachment.ContentType        = attachment.ContentType;
+                    existingAttachment.SizeBytes          = attachment.SizeBytes;
+                    existingAttachment.Sha256             = attachment.Sha256 ?? existingAttachment.Sha256;
+                    existingAttachment.DownloadPath       = attachment.DownloadPath ?? existingAttachment.DownloadPath;
+                    existingAttachment.ObjectKey          = attachment.ObjectKey ?? existingAttachment.ObjectKey;
+                    existingAttachment.ThumbnailPath      = attachment.ThumbnailPath ?? existingAttachment.ThumbnailPath;
+                    existingAttachment.LocalCachePath     = attachment.LocalCachePath ?? existingAttachment.LocalCachePath;
+                    existingAttachment.LocalThumbnailPath = attachment.LocalThumbnailPath ?? existingAttachment.LocalThumbnailPath;
+                    existingAttachment.LocalUploadingPath = attachment.LocalUploadingPath ?? existingAttachment.LocalUploadingPath;
+                    existingAttachment.RetryCount         = attachment.RetryCount;
+                    existingAttachment.Status             = attachment.Status;
+                    existingAttachment.FailureReason      = attachment.FailureReason ?? existingAttachment.FailureReason;
+                    existingAttachment.UpdatedAt          = DateTime.UtcNow;
+                }
+                else
+                {
+                    await db.Attachments.AddAsync(attachment, None);
+                }
+            }
+        }
+
+        // ---- Upsert LocalConversation 会话摘要 + 未读数（镜像 UpdateConversationSummaryAsync 的读-改-写逻辑）----
+        if (conversationUpdate is not null)
+        {
+            var existingConversation = await db.Conversations
+                .FirstOrDefaultAsync(c => c.OwnerUserId == conversationUpdate.OwnerUserId
+                                       && c.ConversationId == conversationUpdate.ConversationId, None);
+            if (existingConversation is null)
+            {
+                // 新建会话：conversationUpdate.UnreadCount（0 或 1）直接作为绝对值。
+                await db.Conversations.AddAsync(new LocalConversation
+                {
+                    OwnerUserId        = conversationUpdate.OwnerUserId,
+                    ConversationId     = conversationUpdate.ConversationId,
+                    Type               = conversationUpdate.Type,
+                    PeerUserId         = conversationUpdate.PeerUserId,
+                    LastMessageId      = conversationUpdate.LastMessageId,
+                    LastMessagePreview = conversationUpdate.LastMessagePreview,
+                    LastMessageAtMs    = conversationUpdate.LastMessageAtMs,
+                    LastSenderUserId   = conversationUpdate.LastSenderUserId,
+                    UnreadCount        = conversationUpdate.UnreadCount,
+                    LastReadMessageId  = null,
+                    LastReadAtMs       = null,
+                    IsPinned           = false,
+                    PinnedAtMs         = null,
+                    IsMuted            = false,
+                    MutedUntilMs       = null,
+                    LastSynced         = conversationUpdate.LastSynced
+                }, None);
+            }
+            else
+            {
+                // 仅当新消息时间戳晚于会话最近消息时更新摘要，避免乱序消息回退最近消息。
+                if (conversationUpdate.LastMessageAtMs is long newAtMs
+                    && newAtMs > (existingConversation.LastMessageAtMs ?? 0))
+                {
+                    existingConversation.LastMessageId      = conversationUpdate.LastMessageId;
+                    existingConversation.LastMessagePreview = conversationUpdate.LastMessagePreview;
+                    existingConversation.LastMessageAtMs    = newAtMs;
+                    existingConversation.LastSenderUserId   = conversationUpdate.LastSenderUserId;
+                    // conversationUpdate.UnreadCount 为增量（发送方非自己时为 1）；
+                    // 仅当会话已读水位早于该消息时才递增，避免对已读消息重复计数。
+                    if (conversationUpdate.UnreadCount > 0
+                        && (existingConversation.LastReadAtMs is null
+                            || existingConversation.LastReadAtMs < newAtMs))
+                    {
+                        existingConversation.UnreadCount += conversationUpdate.UnreadCount;
+                    }
+                }
+                existingConversation.LastSynced = DateTime.UtcNow;
+            }
+        }
+
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+    }
+
     // ---- Outbox（P0-6）----
 
     public async Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox)
@@ -490,6 +639,120 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         await db.OutboxMessages
             .Where(o => o.OwnerUserId == ownerUserId && o.ClientMessageId == clientMessageId)
             .ExecuteDeleteAsync(None);
+    }
+
+    /// <summary>
+    /// 事务性写入 Outbox + LocalMessage（P0-4 事务化 Outbox）。
+    /// 在单个 DbContext + 单个事务内完成两表 upsert，保证原子性。
+    /// </summary>
+    public async Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        // Upsert LocalOutboxMessage（按 OwnerUserId + ClientMessageId）
+        var existingOutbox = await db.OutboxMessages
+            .FirstOrDefaultAsync(o => o.OwnerUserId == outbox.OwnerUserId
+                                   && o.ClientMessageId == outbox.ClientMessageId, None);
+        if (existingOutbox is not null)
+        {
+            existingOutbox.MessageId                 = outbox.MessageId;
+            existingOutbox.ConversationId            = outbox.ConversationId;
+            existingOutbox.TargetUserId              = outbox.TargetUserId;
+            existingOutbox.Content                   = outbox.Content;
+            existingOutbox.AttachmentIdsJson         = outbox.AttachmentIdsJson;
+            existingOutbox.ReplyToMessageId          = outbox.ReplyToMessageId;
+            existingOutbox.ReplyToSenderUserId       = outbox.ReplyToSenderUserId;
+            existingOutbox.ReplyToPreview            = outbox.ReplyToPreview;
+            existingOutbox.ForwardedFromMessageId    = outbox.ForwardedFromMessageId;
+            existingOutbox.ForwardedFromSenderUserId = outbox.ForwardedFromSenderUserId;
+            existingOutbox.ForwardedFromPreview      = outbox.ForwardedFromPreview;
+            existingOutbox.Status                    = outbox.Status;
+            existingOutbox.FailureReason             = outbox.FailureReason;
+            existingOutbox.QueuedAt                  = outbox.QueuedAt;
+            existingOutbox.SentAt                    = outbox.SentAt;
+            existingOutbox.NextRetryAt               = outbox.NextRetryAt;
+        }
+        else
+        {
+            await db.OutboxMessages.AddAsync(outbox, None);
+        }
+
+        // Upsert LocalMessage（先按 OwnerUserId + MessageId，回退 OwnerUserId + ClientMessageId）
+        LocalMessage? existingMessage = null;
+        if (!string.IsNullOrEmpty(message.MessageId))
+        {
+            existingMessage = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.MessageId == message.MessageId, None);
+        }
+        if (existingMessage is null && !string.IsNullOrEmpty(message.ClientMessageId))
+        {
+            existingMessage = await db.Messages
+                .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
+                                       && m.ClientMessageId == message.ClientMessageId, None);
+        }
+        if (existingMessage is not null)
+        {
+            existingMessage.Content         = message.Content;
+            existingMessage.ReceivedAtMs    = message.ReceivedAtMs;
+            existingMessage.DeliveredAtMs   = message.DeliveredAtMs;
+            existingMessage.ReadAtMs        = message.ReadAtMs;
+            existingMessage.RecalledAtMs    = message.RecalledAtMs;
+            existingMessage.EditVersion     = message.EditVersion;
+            existingMessage.EditedAtMs      = message.EditedAtMs;
+            existingMessage.AttachmentsJson = message.AttachmentsJson;
+            existingMessage.Status          = message.Status;
+            existingMessage.FailureReason   = message.FailureReason;
+            existingMessage.UpdatedAt       = message.UpdatedAt;
+            // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
+            if (string.IsNullOrEmpty(existingMessage.MessageId) && !string.IsNullOrEmpty(message.MessageId))
+                existingMessage.MessageId = message.MessageId;
+        }
+        else
+        {
+            await db.Messages.AddAsync(message, None);
+        }
+
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+    }
+
+    /// <summary>
+    /// 更新 Outbox 状态并推进重试元数据（P0-4）。
+    /// 仅当 status == Failed 时递增 RetryCount 并设置 NextRetryAt（指数退避 + jitter）。
+    /// </summary>
+    public async Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.OutboxMessages
+            .FirstOrDefaultAsync(o => o.OwnerUserId == ownerUserId
+                                   && o.ClientMessageId == clientMessageId, None);
+        if (existing is null)
+            return;
+
+        var now = DateTime.UtcNow;
+        existing.Status        = status;
+        existing.FailureReason = failureReason;
+        if (!string.IsNullOrEmpty(messageId))
+            existing.MessageId = messageId;
+        if (status != OutboxStatus.Failed)
+            existing.SentAt = now;
+
+        if (status == OutboxStatus.Failed)
+        {
+            existing.RetryCount++;
+            // 指数退避：min(2^retryCount * 2, 300) 秒 + 0~2s 随机 jitter
+            var delaySec = Math.Min(Math.Pow(2, existing.RetryCount) * 2, 300);
+            var jitterSec = Random.Shared.NextDouble() * 2;
+            existing.NextRetryAt = now.AddSeconds(delaySec + jitterSec);
+        }
+        else if (status == OutboxStatus.Sent)
+        {
+            existing.NextRetryAt = null;
+        }
+
+        await db.SaveChangesAsync(None);
     }
 
     // ---- 同步水位（P0-6）----

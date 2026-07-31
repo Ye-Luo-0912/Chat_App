@@ -77,16 +77,15 @@ public sealed class MessageStore : IMessageStore
             UpdatedAt = DateTime.UtcNow
         };
 
-        await _db.UpsertMessageAsync(message);
-
-        // 阶段 3：同时持久化附件元数据到 LocalAttachment 表
+        // 阶段 3：构建附件元数据列表（与消息在单个事务内原子写入 LocalAttachment 表）
+        var attachments = new List<LocalAttachment>();
         if (dto.Attachments is { Count: > 0 })
         {
             foreach (var att in dto.Attachments)
             {
                 if (string.IsNullOrWhiteSpace(att.AttachmentId))
                     continue;
-                var localAtt = new LocalAttachment
+                attachments.Add(new LocalAttachment
                 {
                     OwnerUserId = owner,
                     AttachmentId = att.AttachmentId,
@@ -100,13 +99,31 @@ public sealed class MessageStore : IMessageStore
                     Status = (byte)(att.Status == 1 ? 1 : 0),
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
-                };
-                await _db.UpsertAttachmentAsync(localAtt);
+                });
             }
         }
 
-        var isNewConversation = await UpdateConversationSummaryAsync(
-            owner, conversationId, message.MessageId, content, receivedAtMs, dto.SenderUserId);
+        // 构建会话摘要更新（镜像原 UpdateConversationSummaryAsync 的字段逻辑），
+        // 由 ApplyIncomingMessageAsync 在事务内完成读-改-写 + 未读数递增。
+        var existingConversation = await _db.GetConversationAsync(owner, conversationId);
+        var isNewConversation = existingConversation is null;
+        var conversationUpdate = new LocalConversation
+        {
+            OwnerUserId = owner,
+            ConversationId = conversationId,
+            Type = ConversationTypeDirect,
+            PeerUserId = ConversationId.TryGetPeerUserId(conversationId, owner),
+            LastMessageId = message.MessageId,
+            LastMessagePreview = BuildPreview(content),
+            LastMessageAtMs = receivedAtMs,
+            LastSenderUserId = dto.SenderUserId,
+            // 发送方为自己时不递增未读；非自己时为增量 1（仅对未读消息生效，由事务内逻辑判定）。
+            UnreadCount = dto.SenderUserId == owner ? 0 : 1,
+            LastSynced = DateTime.UtcNow
+        };
+
+        // 单事务原子写入：消息 + 附件 + 会话摘要（P0-6 持久化层事务边界）
+        await _db.ApplyIncomingMessageAsync(message, attachments, conversationUpdate);
 
         _eventBus.Publish(new MessagePersistedEvent(message, isNewConversation));
         return true;
