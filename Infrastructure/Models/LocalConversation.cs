@@ -73,6 +73,9 @@ public class LocalConversation : INotifyPropertyChanged
 
     public long? MutedUntilMs { get; set; }
 
+    /// <summary>会话输入框草稿（未发送的文本），持久化到 DB，切换会话后恢复。</summary>
+    public string? Draft { get; set; }
+
     public DateTime LastSynced { get; set; }
 
     public bool HasUnread => UnreadCount > 0;

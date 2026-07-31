@@ -589,6 +589,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     public void Init(LocalFriend selectedFriend)
     {
+        // 保存上一会话草稿到 DB（fire-and-forget，不阻塞切换）
+        if (CurrConversationId is not null && _currentUserContext.HasUserId)
+        {
+            var prevConv = CurrConversationId;
+            var prevOwner = _currentUserContext.UserId!.Value;
+            var prevDraft = _newMessage;
+            _ = Task.Run(() => _dbService.UpdateConversationDraftAsync(prevOwner, prevConv, prevDraft));
+        }
+
         var previousPeerId = CurrFriend?.FriendId ?? 0;
         if (previousPeerId > 0 && previousPeerId != selectedFriend.FriendId)
             _ = UnwatchPeerPresenceAsync(previousPeerId);
@@ -613,11 +622,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IsPeerTyping = false;
         CancelPeerTypingClear();
         ClearMessages();
-        if (_newMessage.Length > 0)
-        {
-            _newMessage = string.Empty;
-            OnPropertyChanged(nameof(NewMessage));
-        }
+        // 加载新会话草稿（从 DB 恢复上次未发送的输入）
+        _ = LoadDraftAsync(CurrConversationId, generation, ct);
         ClearPendingAttachment();
         ClearReplyDraft();
         ClearEditDraft();
@@ -631,6 +637,31 @@ public class MessageViewModel : ViewModelBase, IDisposable
         // 顺序：加载本地最新页 → 渲染 → 标记实际最后可见消息已读 → 后台同步缺失消息（七）。
         // 全程校验代际，代际不匹配即放弃，避免快速切换 A→B 时 A 的结果污染 B。
         _ = InitializeConversationAsync(CurrConversationId, generation, ct);
+    }
+
+    /// <summary>
+    /// 从 DB 加载会话草稿并设置到 NewMessage。校验代际，避免快速切换 A→B 时 A 的草稿覆盖 B。
+    /// </summary>
+    private async Task LoadDraftAsync(string? conversationId, long generation, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(conversationId) || !_currentUserContext.HasUserId)
+        {
+            _newMessage = string.Empty;
+            OnPropertyChanged(nameof(NewMessage));
+            return;
+        }
+        try
+        {
+            var conv = await _dbService.GetConversationAsync(_currentUserContext.UserId!.Value, conversationId).ConfigureAwait(true);
+            if (generation != _conversationGeneration) return;
+            _newMessage = conv?.Draft ?? string.Empty;
+            OnPropertyChanged(nameof(NewMessage));
+        }
+        catch
+        {
+            _newMessage = string.Empty;
+            OnPropertyChanged(nameof(NewMessage));
+        }
     }
 
     private async Task InitializeConversationAsync(string? conversationId, long generation, CancellationToken ct)

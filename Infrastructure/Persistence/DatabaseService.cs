@@ -276,6 +276,7 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             existing.PinnedAtMs         = conversation.PinnedAtMs;
             existing.IsMuted            = conversation.IsMuted;
             existing.MutedUntilMs       = conversation.MutedUntilMs;
+            existing.Draft              = conversation.Draft;
             existing.LastSynced         = conversation.LastSynced;
         }
         else
@@ -283,6 +284,15 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             await db.Conversations.AddAsync(conversation, None);
         }
         await db.SaveChangesAsync(None);
+    }
+
+    /// <summary>仅更新会话草稿，避免切换会话时全字段 Upsert 的开销。</summary>
+    public async Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Conversations
+            .Where(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.Draft, draft), None);
     }
 
     public async Task DeleteConversationAsync(long ownerUserId, string conversationId)

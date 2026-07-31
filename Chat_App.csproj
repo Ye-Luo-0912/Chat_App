@@ -66,8 +66,8 @@
       <Compile Remove="UnitTests\**" />
       <Compile Remove="IntegrationTests\**" />
       <Compile Remove="Benchmarks\**" />
-      <Compile Remove="Tool\AuthInterceptor.cs" />
-      <Compile Remove="Tool\RequestOptionKeys.cs" />
+  
+  
       <None Remove="Core\**" />
       <None Remove="Infrastructure\**" />
       <None Remove="Protocol.Tests\**" />

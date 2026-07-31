@@ -38,6 +38,9 @@ public interface IDatabaseService
     Task UpsertConversationAsync(LocalConversation conversation);
     Task DeleteConversationAsync(long ownerUserId, string conversationId);
 
+    /// <summary>仅更新会话草稿（轻量写入，切换会话时保存输入框文本）。</summary>
+    Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft);
+
     // ---- 消息（P0-6）----
     Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null);
     Task<LocalMessage?> GetMessageByServerIdAsync(long ownerUserId, string messageId);

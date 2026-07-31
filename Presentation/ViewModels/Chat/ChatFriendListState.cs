@@ -14,6 +14,7 @@ namespace Chat_App.Presentation.ViewModels.Chat;
 public sealed class ChatFriendListState : IDisposable
 {
     private readonly ObservableCollection<LocalFriend> _friends;
+    private readonly Dictionary<long, LocalFriend> _friendsById = new();
     private readonly ObservableCollection<LocalFriend> _filteredFriends;
     private string _searchText = string.Empty;
     private LocalFriend? _selectedFriend;
@@ -54,8 +55,12 @@ public sealed class ChatFriendListState : IDisposable
     public void ReplaceFriends(IEnumerable<LocalFriend> friends)
     {
         _friends.Clear();
+        _friendsById.Clear();
         foreach (var friend in friends)
+        {
             _friends.Add(friend);
+            _friendsById[friend.FriendId] = friend;
+        }
 
         ApplyFilter();
     }
@@ -69,7 +74,7 @@ public sealed class ChatFriendListState : IDisposable
             if (peerId is not long friendId)
                 continue;
 
-            var friend = _friends.FirstOrDefault(f => f.FriendId == friendId);
+            _friendsById.TryGetValue(friendId, out var friend);
             if (friend is null)
                 continue;
 
@@ -91,7 +96,7 @@ public sealed class ChatFriendListState : IDisposable
         if (peerId is not long friendId)
             return;
 
-        var friend = _friends.FirstOrDefault(f => f.FriendId == friendId);
+        _friendsById.TryGetValue(friendId, out var friend);
         if (friend is null)
             return;
 
