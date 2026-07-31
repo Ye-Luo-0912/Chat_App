@@ -1,7 +1,9 @@
+using Core.Buffers;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Diagnostics;
@@ -727,25 +729,41 @@ namespace Core.Services
         /// <returns></returns>
         private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct)
         {
-            ReadOnlyMemory<byte> bodyBytes = default;
-            if (payload is not null)
-                bodyBytes = _bodySerializer.Serialize(payload);
-
-            var bodyLen = bodyBytes.Length;
-            var packet = new MessagePacket(
-                command,
-                bodyBytes.IsEmpty ? ReadOnlySequence<byte>.Empty : new ReadOnlySequence<byte>(bodyBytes));
-
-            // 借用内存池写入包头+包体
-            var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyLen);
-
-            if (_codec.TryWrite(packet, writer, out _))
+            // P0-十 热路径：池化出站帧缓冲，JSON 直写同一缓冲，无中间 byte[] 分配，
+            // 传输层接管所有权发送完成后归还 ArrayPool，无 ToArray 复制。
+            var frameWriter = new PooledBufferWriter(MessagePacket.HeaderSize + 64);
+            try
             {
-                await _tcpClient.SendAsync(writer.WrittenMemory, ct);
+                // 预留 10 字节帧头：先写 magic + command，length 待 body 写完后回填。
+                var headerSpan = frameWriter.GetSpan(MessagePacket.HeaderSize);
+                BinaryPrimitives.WriteUInt32LittleEndian(headerSpan, MessagePacket.MagicNumber);
+                BinaryPrimitives.WriteUInt16LittleEndian(headerSpan.Slice(MessagePacket.CommandOffset), (ushort)command);
+                BinaryPrimitives.WriteInt32LittleEndian(headerSpan.Slice(MessagePacket.LengthOffset), 0);
+                frameWriter.Advance(MessagePacket.HeaderSize);
+
+                // JSON 直接写入同一缓冲（帧头之后），无 SerializeToUtf8Bytes 的中间 byte[]
+                var bodyStart = frameWriter.WrittenCount;
+                if (payload is not null)
+                    _bodySerializer.Serialize(frameWriter, payload);
+
+                var bodyLen = frameWriter.WrittenCount - bodyStart;
+                if (bodyLen > MessagePacket.MaxBodySize)
+                    throw new InvalidOperationException($"Body 过大 ({bodyLen} > {MessagePacket.MaxBodySize}): {command}");
+
+                // 回填 body 长度到帧头 offset 6（需可写切片，因 JSON 写入后才知 body 长度）
+                BinaryPrimitives.WriteInt32LittleEndian(
+                    frameWriter.GetWritableSlice(MessagePacket.LengthOffset, 4), bodyLen);
+
+                // 所有权在此点转移给传输层：标记已转移，finally 不再释放。
+                // SendAsync(IMemoryOwner) 契约：无论成功/失败/取消都会 Dispose owner。
+                var toSend = frameWriter;
+                frameWriter = null!;
+                await _tcpClient.SendAsync(toSend, ct).ConfigureAwait(false);
             }
-            else
+            finally
             {
-                throw new InvalidOperationException($"帧编码失败: {command}");
+                // 仅在所有权转移前抛出（构造/编码阶段异常）时释放
+                frameWriter?.Dispose();
             }
         }
 

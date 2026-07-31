@@ -8,6 +8,10 @@ namespace Benchmarks;
 /// <summary>
 /// 协议编解码基准：测量帧编码/解码热路径耗时与分配。
 /// 目标：p95 滚动帧耗时低于 16.7ms（60fps）的预算内。
+/// 回归阈值（见 BenchmarkResults.md）：
+/// - 编码单帧 0B: ≤ 30 ns, ≤ 80 B
+/// - 解码单帧 0B: ≤ 150 ns, ≤ 320 B
+/// - 解码1000帧 0B: ≤ 35 us, ≤ 17 KB
 /// </summary>
 [MemoryDiagnoser]
 [SimpleJob(warmupCount: 3, iterationCount: 5)]

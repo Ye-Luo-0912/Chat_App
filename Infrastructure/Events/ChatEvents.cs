@@ -1,7 +1,7 @@
 using Core.Models;
 using Infrastructure.Models;
 
-namespace Core.Events;
+namespace Infrastructure.Events;
 
 /// <summary>新消息已持久化到本地 DB。</summary>
 public record MessagePersistedEvent(LocalMessage Message, bool IsNewConversation);

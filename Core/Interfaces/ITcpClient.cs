@@ -1,3 +1,4 @@
+using System.Buffers;
 using Core.Models;
 
 namespace Core.Interfaces;
@@ -28,6 +29,23 @@ public interface ITcpClient : IDisposable
     /// <param name="token"></param>
     /// <returns></returns>
     Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token = default);
+
+    /// <summary>
+    /// P0-十 零拷贝出站重载：传输层直接消费 owner.Memory 并在发送完成后 Dispose，
+    /// 避免旧 SendAsync(ReadOnlyMemory) 内部 data.ToArray() 的完整帧复制。
+    /// 默认实现回退到复制路径以兼容测试用 mock（未实现此方法的 mock 走 DIM）。
+    /// 调用方一旦调用此方法即转移所有权，不得再使用/释放 owner。
+    /// </summary>
+    Task SendAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
+    {
+        // 默认：复制到独立内存后走旧路径，并释放 owner。
+        // 旧 SendAsync(ReadOnlyMemory) 在返回 Task 前同步完成 ToArray 复制，
+        // 因此在 Dispose 前数据已被独立拷出，安全。
+        using (owner)
+        {
+            return SendAsync(owner.Memory, token);
+        }
+    }
 
     /// <summary>
     /// 发送数据的方法，接受一个 ReadOnlyMemory<byte> 参数 data，表示要发送的数据块，以及一个可选的 CancellationToken 参数 token 用于取消发送操作。该方法是异步的，返回一个 Task，表示发送操作的完成状态。通过这个方法，客户端可以将数据发送到服务器，并在发送完成后继续执行其他操作。

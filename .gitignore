@@ -9,3 +9,6 @@ riderModule.iml
 .vs/
 .vscode/
 *.user
+
+# BenchmarkDotNet generated output (keep BenchmarkResults.md)
+BenchmarkDotNet.Artifacts/

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Core.Interfaces;
+namespace Infrastructure.Services;
 
 /// <summary>
 /// 消息持久化服务：网络消息 → 去重 → 本地事务持久化 → 发布领域事件 → UI 增量更新。

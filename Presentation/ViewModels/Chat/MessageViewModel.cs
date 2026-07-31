@@ -13,13 +13,14 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Contracts.Attachments;
-using Core.Events;
+using Infrastructure.Events;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using Infrastructure.Models;
 using Infrastructure.Serialization;
+using Infrastructure.Services;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Chat;

@@ -1,117 +1,132 @@
 using Core.Interfaces;
 using Core.Models;
 using System.Buffers;
-using System.Diagnostics;
 
 namespace Core.Protocol
 {
+    /// <summary>
+    /// 基于 growable buffer + ReadOnlySequence 的消息包编解码器（P0-十 热路径优化）。
+    ///
+    /// 入站路径改进：
+    /// - 使用 byte[] + offset/count 替代手写 Array.Resize + Buffer.BlockCopy 前移。
+    /// - 仅在容量不足时 compact（将未消费数据前移），而非每帧前移，避免 O(n²) 复制。
+    /// - 使用 ReadOnlySequence&lt;byte&gt; + SequenceReader&lt;byte&gt; 进行帧解析和坏帧重同步。
+    /// - body 仍复制到独立内存（CopyBodyToOwnedMemory），保证返回的 packet.Body
+    ///   在后续 Append/读取后仍然有效（数据完整性契约）。
+    /// </summary>
     public class MessagePacketCodec : IMessagePacketCodec
     {
-        private const int DefaultBufferSize = 8192;
-        private byte[] _buffer = new byte[DefaultBufferSize];
-        private int _bufferedLength = 0;
-
+        private byte[] _buffer = Array.Empty<byte>();
+        private int _offset;  // 未消费数据起始位置
+        private int _count;   // 未消费数据长度
 
         /// <summary>
-        /// 将新的数据块追加到内部缓冲区中，以便后续的读取操作可以从中提取完整的消息包。
+        /// 将新数据块追加到缓冲区末尾。容量不足时先 compact（前移未消费数据），再按需扩容。
+        /// compact 仅在容量不足时触发，而非每帧，避免 O(n²) 复制。
         /// </summary>
-        /// <param name="chunk"></param>
         public void Append(ReadOnlyMemory<byte> chunk)
         {
-            if (chunk.IsEmpty)
-                return;
-
-            // 检查缓冲区是否有足够的空间来容纳新的数据块，如果没有，则扩展缓冲区
-            if (_bufferedLength +  chunk.Length > _buffer.Length)
-            {
-                int newSize = Math.Max(_buffer.Length * 2, _bufferedLength + chunk.Length);
-                Array.Resize(ref _buffer, newSize);
-            }
-
-            // 将新的数据块复制到缓冲区中，并更新读取位置
-            chunk.CopyTo(_buffer.AsMemory(_bufferedLength));
-            _bufferedLength += chunk.Length;
+            if (chunk.IsEmpty) return;
+            EnsureCapacity(chunk.Length);
+            chunk.Span.CopyTo(_buffer.AsSpan(_offset + _count));
+            _count += chunk.Length;
         }
 
-        /// <summary>
-        /// 重新同步缓冲区：搜索下一个帧头魔数，丢弃其前的字节；找不到则保留末尾 magic.Length-1 字节防止跨 chunk。
-        /// </summary>
-        private void ResyncToNextMagic()
+        private void EnsureCapacity(int additional)
         {
-            var magic = MessagePacket.MagicBytes;
-            if (_bufferedLength < magic.Length)
-                return;
+            var required = _offset + _count + additional;
+            if (required <= _buffer.Length) return;
 
-            // 跳过位置 0（坏帧开头），从位置 1 起搜索下一个魔数
-            var span = _buffer.AsSpan(1, _bufferedLength - 1);
-            var idx = span.IndexOf(magic);
-            if (idx >= 0)
+            // Compact: 将未消费数据前移到 buffer 起点，回收已消费空间
+            if (_offset > 0)
             {
-                var discardCount = idx + 1;
-                _buffer.AsSpan(discardCount, _bufferedLength - discardCount).CopyTo(_buffer);
-                _bufferedLength -= discardCount;
+                if (_count > 0)
+                    Array.Copy(_buffer, _offset, _buffer, 0, _count);
+                _offset = 0;
+                required = _count + additional;
             }
-            else
+
+            // 扩容（翻倍策略，保证摊还 O(1)）
+            if (required > _buffer.Length)
             {
-                var keep = magic.Length - 1;
-                if (_bufferedLength > keep)
-                {
-                    _buffer.AsSpan(_bufferedLength - keep, keep).CopyTo(_buffer);
-                    _bufferedLength = keep;
-                }
+                var newSize = _buffer.Length == 0 ? 256 : _buffer.Length;
+                while (newSize < required)
+                    newSize *= 2;
+                Array.Resize(ref _buffer, newSize);
             }
         }
 
         public void Reset()
         {
-           _bufferedLength = 0;
+            _offset = 0;
+            _count = 0;
         }
 
         public bool TryRead(out MessagePacket packet)
         {
-            // 将当前缓冲区里的有效数据包装成 ReadOnlySequence，喂给 Packet 去解析。
-            // 注意：MessagePacket.TryDeserialize 返回的 Body 是对该 sequence 的切片，
-            // 直接指向 _buffer 内部；后续 Buffer.BlockCopy 前移剩余数据时会覆盖该区域。
-            // 因此必须在 BlockCopy 之前把当前帧 Body 复制到独立内存（P0-1 数据完整性修复）。
-            var sequence = new ReadOnlySequence<byte>(_buffer, 0, _bufferedLength);
-            var originalLength = (int)sequence.Length;
-
-            if (MessagePacket.TryDeserialize(ref sequence, out var parsed, out var result))
-            {
-                var consumedBytes = originalLength - (int)sequence.Length;
-                var remainingBytes = _bufferedLength - consumedBytes;
-
-                // 在移动缓冲区前，把当前帧 body 复制到独立内存，
-                // 避免返回给调用方的 packet.Body 引用被后续 BlockCopy 覆盖。
-                packet = CopyBodyToOwnedMemory(parsed);
-
-                if (remainingBytes > 0)
-                {
-                    // 将剩余的数据移动到缓冲区的起始位置
-                    Buffer.BlockCopy(_buffer, consumedBytes, _buffer, 0, remainingBytes);
-                }
-
-                _bufferedLength = remainingBytes;
-                return true;
-            }
-
             packet = default;
 
-            // 解析失败但数据格式错误（坏帧）：丢弃坏帧并重新同步到下一个魔数，避免单个坏帧终止整个连接。
-            if (result == PacketParseResult.InvalidPacket)
+            while (_count >= MessagePacket.HeaderSize)
             {
-                Debug.WriteLine("丢弃损坏帧，尝试重新同步到下一个魔数");
-                ResyncToNextMagic();
-                return false;
+                var seq = new ReadOnlySequence<byte>(_buffer, _offset, _count);
+                var originalLen = seq.Length;
+
+                if (MessagePacket.TryDeserialize(ref seq, out var parsed, out var result))
+                {
+                    // 成功解析一帧：推进 offset，回收已消费空间
+                    var consumed = originalLen - seq.Length;
+                    _offset += (int)consumed;
+                    _count -= (int)consumed;
+                    packet = CopyBodyToOwnedMemory(parsed);
+                    return true;
+                }
+
+                if (result == PacketParseResult.NeedMoreData)
+                    return false; // 数据不足，等待下一次 Append
+
+                // InvalidPacket：坏帧重同步到下一个魔数
+                seq = new ReadOnlySequence<byte>(_buffer, _offset, _count);
+                var beforeResync = seq.Length;
+                Resync(ref seq);
+                var skipped = beforeResync - seq.Length;
+                if (skipped == 0)
+                    return false;
+                _offset += (int)skipped;
+                _count -= (int)skipped;
+                // 继续循环，从重同步位置重新解析
             }
 
-            // 解析失败但数据不足，等待更多数据到来
             return false;
         }
 
         /// <summary>
+        /// 坏帧重同步：跳过当前位置 1 字节，用 SequenceReader 向后搜索下一个魔数；
+        /// 找到则定位到魔数起点；找不到则保留末尾 magic.Length-1 字节防止跨 chunk 边界漏匹配。
+        /// </summary>
+        private static void Resync(ref ReadOnlySequence<byte> buffer)
+        {
+            var magic = MessagePacket.MagicBytes;
+            if (buffer.Length < magic.Length)
+                return;
+
+            // 跳过位置 0（坏帧开头），从位置 1 起搜索下一个魔数
+            var reader = new SequenceReader<byte>(buffer.Slice(1));
+            if (reader.TryReadTo(out ReadOnlySequence<byte> _, (ReadOnlySpan<byte>)magic, advancePastDelimiter: false))
+            {
+                // reader 现定位在魔数起点；UnreadSequence 从魔数开始
+                buffer = reader.UnreadSequence;
+                return;
+            }
+
+            // 保留末尾 magic.Length-1 字节，等待后续 chunk 拼出完整魔数
+            var keep = magic.Length - 1;
+            if (buffer.Length > keep)
+                buffer = buffer.Slice(buffer.Length - keep);
+        }
+
+        /// <summary>
         /// 将 packet.Body 复制到独立内存，返回引用该内存的新 packet。
-        /// 避免调用方持有的 Body 切片被内部缓冲区的后续重用/前移覆盖。
+        /// 保证调用方持有的 Body 切片不受后续 Append/compact 影响。
         /// </summary>
         private static MessagePacket CopyBodyToOwnedMemory(MessagePacket packet)
         {
@@ -123,34 +138,22 @@ namespace Core.Protocol
             return new MessagePacket(packet.Command, new ReadOnlySequence<byte>(bodyCopy));
         }
 
-
         /// <summary>
-        /// 将一个 MessagePacket 对象序列化并写入到提供的 IBufferWriter<byte> 中。
-        /// 这个方法会尝试将整个消息包写入缓冲区，如果成功则返回 true，并通过 out 参数 written 返回实际写入的字节数；
-        /// 如果缓冲区空间不足以容纳整个消息包，则返回 false，表示需要更多空间来完成写入操作。
+        /// 将一个 MessagePacket 序列化写入 IBufferWriter（出站编码，供测试/旧路径使用）。
+        /// 生产出站路径在 ChatSessionClient.SendPacketAsync 中直接构建帧，不经此方法。
         /// </summary>
-        /// <param name="packet"></param>
-        /// <param name="writer"></param>
-        /// <param name="written"></param>
-        /// <returns></returns>
         public bool TryWrite(MessagePacket packet, IBufferWriter<byte> writer, out int written)
         {
-            // 计算整个消息包的总大小（头部 + 消息体），以便请求足够的缓冲区空间
             var totalSize = MessagePacket.HeaderSize + (int)packet.Body.Length;
-
-            // 获取一个足够大的 span 来写入整个消息包
             var span = writer.GetSpan(totalSize);
 
-            // 尝试将消息包序列化到提供的 span 中，如果成功则 advance 写入的字节数
             if (packet.TrySerialize(ref span, out written))
             {
                 writer.Advance(written);
                 return true;
             }
 
-            // 如果序列化失败，通常是因为提供的 span 不够大，返回 false 表示需要更多空间
             return false;
-
         }
     }
 }

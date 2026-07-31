@@ -6,7 +6,7 @@ using System.Buffers;
 namespace Benchmarks;
 
 /// <summary>
-/// 序列化基准：source-generated JSON vs 反射 JSON 的吞吐与分配对比。
+/// 序列化基准：source-generated JSON 直写 IBufferWriter 的吞吐与分配对比。
 /// 验收：搜索和输入 p95 响应低于 50ms 的预算内。
 /// </summary>
 [MemoryDiagnoser]
@@ -15,7 +15,8 @@ public class SerializationBenchmarks
 {
     private JsonPacketBodySerializer _serializer = null!;
     private ChatMessageDto _dto = null!;
-    private ReadOnlyMemory<byte> _serialized;
+    private ArrayBufferWriter<byte> _writer = null!;
+    private byte[] _serialized = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -35,13 +36,20 @@ public class SerializationBenchmarks
             ForwardedFromPreview = null,
             AttachmentIds = null
         };
-        _serialized = _serializer.Serialize(_dto);
+        _writer = new ArrayBufferWriter<byte>(256);
+        _serializer.Serialize(_writer, _dto);
+        _serialized = _writer.WrittenSpan.ToArray();
     }
 
-    [Benchmark(Description = "序列化 ChatMessageDto")]
-    public ReadOnlyMemory<byte> Serialize() => _serializer.Serialize(_dto);
+    [Benchmark(Description = "序列化 ChatMessageDto (直写 IBufferWriter)")]
+    public int Serialize()
+    {
+        _writer.Clear();
+        _serializer.Serialize(_writer, _dto);
+        return _writer.WrittenCount;
+    }
 
-    [Benchmark(Description = "反序列化 ChatMessageDto (单段)")]
+    [Benchmark(Description = "反序列化 ChatMessageDto (单段 span)")]
     public ChatMessageDto? DeserializeSingleSegment()
     {
         var seq = new ReadOnlySequence<byte>(_serialized);
@@ -51,7 +59,8 @@ public class SerializationBenchmarks
     [Benchmark(Description = "序列化+反序列化往返")]
     public ChatMessageDto? RoundTrip()
     {
-        var bytes = _serializer.Serialize(_dto);
-        return _serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(bytes));
+        _writer.Clear();
+        _serializer.Serialize(_writer, _dto);
+        return _serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(_writer.WrittenSpan.ToArray()));
     }
 }

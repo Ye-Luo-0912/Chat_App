@@ -3,7 +3,7 @@ using Core.Interfaces;
 using Core.Models.DTO;
 using Serilog;
 
-namespace Core.Services;
+namespace Infrastructure.Services;
 
 /// <summary>
 /// 网络事件 → 持久化 桥接协调器。

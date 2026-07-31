@@ -1,6 +1,6 @@
 using System.Text.Json;
 using Chat_App.Infrastructure.Persistence;
-using Core.Events;
+using Infrastructure.Events;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
@@ -8,7 +8,7 @@ using Core.Models.DTO;
 using Infrastructure.Models;
 using Infrastructure.Serialization;
 
-namespace Core.Services;
+namespace Infrastructure.Services;
 
 /// <summary>
 /// 消息持久化服务：网络消息 → 去重 → 本地持久化 → 发布领域事件。

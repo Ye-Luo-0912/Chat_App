@@ -170,7 +170,7 @@ public partial class App : Application
         }
 
         // 实例化协调器，开始订阅网络事件进行持久化
-        Services.GetRequiredService<Core.Services.ChatMessageCoordinator>();
+        Services.GetRequiredService<ChatMessageCoordinator>();
 
         // 启动 Outbox 排空处理器（P0-4 事务化 Outbox）
         var outboxProcessor = Services.GetRequiredService<OutboxProcessor>();

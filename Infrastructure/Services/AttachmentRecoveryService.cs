@@ -8,7 +8,7 @@ using Core.Interfaces;
 using Infrastructure.Models;
 using Serilog;
 
-namespace Core.Services;
+namespace Infrastructure.Services;
 
 /// <summary>
 /// Recovers failed attachment uploads on app startup and whenever authentication succeeds.

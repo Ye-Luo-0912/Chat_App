@@ -10,17 +10,6 @@
       <Folder Include="tools\" />
     </ItemGroup>
 
-
-    <!-- 这三个文件依赖 Infrastructure（IDatabaseService / Infrastructure.Models），改由 Infrastructure.csproj 编译，避免循环依赖。 -->
-    <ItemGroup>
-      <Compile Remove="Events\ChatEvents.cs" />
-      <Compile Remove="Interfaces\IMessageStore.cs" />
-      <Compile Remove="Services\MessageStore.cs" />
-      <Compile Remove="Services\ChatMessageCoordinator.cs" />
-      <Compile Remove="Services\AttachmentRecoveryService.cs" />
-      <Compile Remove="Services\OutboxProcessor.cs" />
-    </ItemGroup>
-
     <!-- UI/ViewModels should reference Core directly -->
 
 </Project>

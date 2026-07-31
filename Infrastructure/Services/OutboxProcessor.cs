@@ -4,13 +4,13 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
-using Core.Events;
+using Infrastructure.Events;
 using Core.Interfaces;
 using Core.Models;
 using Infrastructure.Models;
 using Serilog;
 
-namespace Core.Services;
+namespace Infrastructure.Services;
 
 /// <summary>
 /// 后台排空 Outbox 的处理器（P0-4 事务化 Outbox）。

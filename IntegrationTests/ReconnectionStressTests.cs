@@ -81,12 +81,15 @@ public class ReconnectionStressTests
         PacketCommand command,
         T? payload)
     {
-        var body = serializer.Serialize(payload);
+        // P0-十: 序列化器直写 IBufferWriter，不再返回独立 byte[]
+        var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + 64);
+        serializer.Serialize(writer, payload);
+        var bodyLen = writer.WrittenCount;
         var packet = new MessagePacket(command,
-            body.IsEmpty ? ReadOnlySequence<byte>.Empty : new ReadOnlySequence<byte>(body));
-        var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + (int)packet.Body.Length);
-        new MessagePacketCodec().TryWrite(packet, writer, out _);
-        tcp.InjectData(writer.WrittenMemory);
+            bodyLen == 0 ? ReadOnlySequence<byte>.Empty : new ReadOnlySequence<byte>(writer.WrittenSpan.ToArray()));
+        var frameWriter = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyLen);
+        new MessagePacketCodec().TryWrite(packet, frameWriter, out _);
+        tcp.InjectData(frameWriter.WrittenMemory);
     }
 
     /// <summary>

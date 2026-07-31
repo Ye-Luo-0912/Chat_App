@@ -121,7 +121,7 @@ public class TcpClientExample : ITcpClient, IDisposable
         // 入队前复制数据到独立内存：调用方持有的 buffer 可能在入队后被重用/释放。
         var owned = data.ToArray();
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var frame = new OutboundFrame(owned, tcs);
+        var frame = new OutboundFrame(owned, owner: null, tcs);
 
         try
         {
@@ -133,6 +133,39 @@ public class TcpClientExample : ITcpClient, IDisposable
         }
 
         // 等待独占发送循环完成本帧，传播其异常。
+        await tcs.Task.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// P0-十 零拷贝出站：直接接管 owner 的池化内存入队，发送完成后由发送循环 Dispose。
+    /// 不产生 data.ToArray() 的完整帧复制。调用方转移所有权后不得再使用 owner。
+    /// </summary>
+    public async Task SendAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        lock (_syncRoot)
+        {
+            if (!_isConnected || _tcpClient is null)
+            {
+                owner.Dispose();
+                throw new InvalidOperationException("Not connected to server");
+            }
+        }
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var frame = new OutboundFrame(owner.Memory, owner, tcs);
+
+        try
+        {
+            await _sendChannel.Writer.WriteAsync(frame, token).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException ex)
+        {
+            owner.Dispose();
+            throw new InvalidOperationException("连接已关闭，无法发送", ex);
+        }
+
+        // 等待独占发送循环完成本帧（循环负责 Dispose owner），传播其异常。
         await tcs.Task.ConfigureAwait(false);
     }
 
@@ -172,11 +205,18 @@ public class TcpClientExample : ITcpClient, IDisposable
                 catch (Exception ex)
                 {
                     frame.Tcs.TrySetException(ex);
+                    frame.Owner?.Dispose();
                     DrainSendChannel(ex);
                     // 只有当前代际的发送循环才允许触发 Disconnect，避免旧循环误关新连接（P0-3）。
                     if (IsCurrentGeneration(generation))
                         Disconnect("Connection lost during send");
                     return;
+                }
+                finally
+                {
+                    // P0-十: 发送完成（成功）后归还池化内存。失败路径在上面已 Dispose。
+                    if (frame.Tcs.Task.IsCompletedSuccessfully)
+                        frame.Owner?.Dispose();
                 }
             }
         }
@@ -194,13 +234,14 @@ public class TcpClientExample : ITcpClient, IDisposable
     }
 
     /// <summary>
-    /// 排空发送队列，将所有待发帧标记为失败。
+    /// 排空发送队列，将所有待发帧标记为失败，并归还其池化内存（P0-十）。
     /// </summary>
     private void DrainSendChannel(Exception ex)
     {
         while (_sendChannel.Reader.TryRead(out var frame))
         {
             frame.Tcs.TrySetException(ex);
+            frame.Owner?.Dispose();
         }
     }
 
@@ -356,12 +397,18 @@ public class TcpClientExample : ITcpClient, IDisposable
 
     private readonly struct OutboundFrame
     {
-        public OutboundFrame(ReadOnlyMemory<byte> data, TaskCompletionSource<bool> tcs)
+        public OutboundFrame(ReadOnlyMemory<byte> data, IMemoryOwner<byte>? owner, TaskCompletionSource<bool> tcs)
         {
             Data = data;
+            Owner = owner;
             Tcs = tcs;
         }
         public ReadOnlyMemory<byte> Data { get; }
+        /// <summary>
+        /// P0-十: 池化内存所有权。非 null 时表示帧数据来自 owner.Memory，
+        /// 发送完成后必须 Dispose 以归还 ArrayPool；null 表示 Data 是独立 ToArray 副本（旧路径）。
+        /// </summary>
+        public IMemoryOwner<byte>? Owner { get; }
         public TaskCompletionSource<bool> Tcs { get; }
     }
 }
