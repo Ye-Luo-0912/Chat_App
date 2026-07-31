@@ -31,7 +31,7 @@ public interface IMessageStore
     Task HandleConversationChangedAsync(ConversationChangedDto dto, CancellationToken ct = default);
 
     /// <summary>从本地 DB 加载会话历史消息（按时间正序）。</summary>
-    Task<List<LocalMessage>> LoadHistoryAsync(string conversationId, int limit = 100, long? beforeReceivedAtMs = null, CancellationToken ct = default);
+    Task<List<LocalMessage>> LoadHistoryAsync(string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default);
 
     /// <summary>标记会话已读：清零未读数、记录已读水位。</summary>
     Task MarkConversationReadAsync(string conversationId, string? lastReadMessageId, CancellationToken ct = default);

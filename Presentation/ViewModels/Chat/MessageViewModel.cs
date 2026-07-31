@@ -42,6 +42,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private LocalFriend? CurrFriend { get; set; }
     private string? CurrConversationId { get; set; }
 
+    // 会话切换代际与取消令牌：防止快速切换 A→B 时 A 的异步历史/已读任务污染 B（七）。
+    // 每次切换生成新代际，所有历史加载/附件加载/已读请求/Dispatcher 回调必须校验代际。
+    private long _conversationGeneration;
+    private CancellationTokenSource _conversationCts = new();
+
     private string _peerTitle = string.Empty;
     public string PeerTitle
     {
@@ -383,8 +388,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.Message.ConversationId != CurrConversationId)
             return;
+        var generation = _conversationGeneration;
         Dispatcher.UIThread.Post(() =>
         {
+            if (generation != _conversationGeneration) return;
             var msg = e.Message;
             var existing = FindMessage(msg.MessageId, msg.ClientMessageId);
             if (existing is not null) return;
@@ -397,8 +404,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
+        var generation = _conversationGeneration;
         Dispatcher.UIThread.Post(() =>
         {
+            if (generation != _conversationGeneration) return;
             var local = FindMessage(e.MessageId, e.ClientMessageId);
             if (local is null) return;
             local.Status = e.NewStatus;
@@ -409,8 +418,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (string.IsNullOrWhiteSpace(e.ClientMessageId))
             return;
+        var generation = _conversationGeneration;
         Dispatcher.UIThread.Post(() =>
         {
+            if (generation != _conversationGeneration) return;
             var local = FindMessage(null, e.ClientMessageId);
             if (local is null) return;
             local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
@@ -428,14 +439,24 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
-        Dispatcher.UIThread.Post(() => ApplyRecalled(e.MessageId));
+        var generation = _conversationGeneration;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (generation != _conversationGeneration) return;
+            ApplyRecalled(e.MessageId);
+        });
     }
 
     private void OnMessageEditedPersisted(MessageEditedEvent e)
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
-        Dispatcher.UIThread.Post(() => ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs));
+        var generation = _conversationGeneration;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (generation != _conversationGeneration) return;
+            ApplyEdited(e.MessageId, e.Content, e.EditVersion, e.EditedAtMs);
+        });
     }
 
     private static MessageStatus MapOutboxStatusToMessageStatus(OutboxStatus os) => os switch
@@ -460,6 +481,16 @@ public class MessageViewModel : ViewModelBase, IDisposable
     internal void AddMessage(Message msg)
     {
         Messages.Add(msg);
+        if (!string.IsNullOrWhiteSpace(msg.MessageId))
+            _messagesByServerId[msg.MessageId] = msg;
+        if (!string.IsNullOrWhiteSpace(msg.ClientMessageId))
+            _messagesByClientId[msg.ClientMessageId] = msg;
+    }
+
+    // 插入旧历史时同步维护两个索引，确保后续编辑/撤回/去重能定位到这些消息（六4）。
+    internal void InsertMessage(int index, Message msg)
+    {
+        Messages.Insert(index, msg);
         if (!string.IsNullOrWhiteSpace(msg.MessageId))
             _messagesByServerId[msg.MessageId] = msg;
         if (!string.IsNullOrWhiteSpace(msg.ClientMessageId))
@@ -561,6 +592,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (previousPeerId > 0 && previousPeerId != selectedFriend.FriendId)
             _ = UnwatchPeerPresenceAsync(previousPeerId);
 
+        // 取消上一会话所有进行中的加载/已读/同步任务，并提升代际（七）。
+        CancelConversationOperations();
+        var generation = ++_conversationGeneration;
+        var ct = _conversationCts.Token;
+
         CurrFriend = selectedFriend;
         try
         {
@@ -590,21 +626,29 @@ public class MessageViewModel : ViewModelBase, IDisposable
         AttachFileCommand.RaiseCanExecuteChanged();
         Log.Debug("MessageView 初始化: 好友={FriendName}", selectedFriend.FriendName);
         _ = RefreshPeerPresenceAsync(selectedFriend.FriendId);
-        _ = LoadHistoryAsync();
-        _ = MarkCurrentConversationReadAsync();
+
+        // 顺序：加载本地最新页 → 渲染 → 标记实际最后可见消息已读 → 后台同步缺失消息（七）。
+        // 全程校验代际，代际不匹配即放弃，避免快速切换 A→B 时 A 的结果污染 B。
+        _ = InitializeConversationAsync(CurrConversationId, generation, ct);
     }
 
-    private async Task LoadHistoryAsync()
+    private async Task InitializeConversationAsync(string? conversationId, long generation, CancellationToken ct)
     {
-        if (CurrFriend is null || CurrConversationId is null)
+        if (string.IsNullOrEmpty(conversationId))
             return;
 
+        // 1. 加载本地最新页并渲染
         try
         {
-            var history = await _messageStore.LoadHistoryAsync(CurrConversationId, limit: 100)
+            var history = await _messageStore.LoadHistoryAsync(conversationId, limit: 100, ct: ct)
                 .ConfigureAwait(true);
+            if (generation != _conversationGeneration || ct.IsCancellationRequested)
+                return;
+
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
+                if (generation != _conversationGeneration)
+                    return;
                 foreach (var lm in history)
                 {
                     var ui = ToUiMessage(lm);
@@ -613,10 +657,84 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 }
             });
         }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         catch (Exception ex)
         {
             Log.Warning(ex, "加载历史消息失败");
         }
+
+        if (generation != _conversationGeneration)
+            return;
+
+        // 2. 渲染完成后，标记实际最后可见消息已读（不再读取空集合）（七）
+        await MarkCurrentConversationReadAsync(generation, ct);
+
+        if (generation != _conversationGeneration)
+            return;
+
+        // 3. 后台同步缺失消息（catch-up），不阻塞 UI
+        _ = SyncMissingHistoryAsync(conversationId, generation, ct);
+    }
+
+    private async Task SyncMissingHistoryAsync(string conversationId, long generation, CancellationToken ct)
+    {
+        try
+        {
+            await _messageStore.FetchAndPersistHistoryAsync(conversationId, limit: 50, ct: ct)
+                .ConfigureAwait(true);
+            if (generation != _conversationGeneration)
+                return;
+
+            // 同步拉取的新消息补充到 UI（仅当仍是当前会话）
+            var fresh = await _messageStore.LoadHistoryAsync(conversationId, limit: 100, ct: ct)
+                .ConfigureAwait(true);
+            if (generation != _conversationGeneration)
+                return;
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (generation != _conversationGeneration)
+                    return;
+                // 仅追加本地尚未展示的新消息，避免重复
+                var existingIds = new HashSet<string>(Messages
+                    .Where(m => !string.IsNullOrWhiteSpace(m.MessageId))
+                    .Select(m => m.MessageId!), StringComparer.Ordinal);
+                foreach (var lm in fresh)
+                {
+                    if (string.IsNullOrWhiteSpace(lm.MessageId))
+                        continue;
+                    if (existingIds.Contains(lm.MessageId))
+                        continue;
+                    var ui = ToUiMessage(lm);
+                    if (ui is not null)
+                        AddMessage(ui);
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // 切换会话时正常取消
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "后台同步缺失消息失败 ConversationId={ConversationId}", conversationId);
+        }
+    }
+
+    private void CancelConversationOperations()
+    {
+        try
+        {
+            _conversationCts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 已释放，忽略
+        }
+        _conversationCts = new CancellationTokenSource();
     }
 
     private void OnConversationRead(ConversationReadEvent e)
@@ -624,8 +742,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (CurrConversationId is null || !string.Equals(e.ConversationId, CurrConversationId, StringComparison.Ordinal))
             return;
 
+        var generation = _conversationGeneration;
         Dispatcher.UIThread.Post(() =>
         {
+            // 回调真正执行时会话可能已切换，必须再次校验代际（七）。
+            if (generation != _conversationGeneration)
+                return;
             foreach (var m in Messages)
             {
                 if (m.IsSentByMe && m.Status == MessageStatus.Sent)
@@ -642,17 +764,23 @@ public class MessageViewModel : ViewModelBase, IDisposable
         // 当前会话打开时未读数清零由 ChatViewModel.FriendListState 处理；此处暂无额外 UI 操作，保留订阅以便未来扩展。
     }
 
-    private async Task MarkCurrentConversationReadAsync()
+    private async Task MarkCurrentConversationReadAsync(long generation, CancellationToken ct)
     {
         if (CurrConversationId is null || CurrFriend is null)
             return;
         try
         {
             var lastMessage = Messages.LastOrDefault();
+            if (generation != _conversationGeneration)
+                return;
             await _messageStore.MarkConversationReadAndNotifyAsync(
                 CurrConversationId,
                 lastMessage?.MessageId,
-                CancellationToken.None);
+                ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // 切换会话时正常取消
         }
         catch (Exception ex)
         {
@@ -675,7 +803,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             var older = await _messageStore.FetchAndPersistHistoryAsync(
                 CurrConversationId,
                 limit: 50,
-                beforeReceivedAtMs: null,
+                beforeReceivedAtMs: oldest.ReceivedAtMs,
                 beforeMessageId: oldest.MessageId,
                 ct: ct);
 
@@ -688,7 +816,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 {
                     var uiMsg = ToUiMessage(older[i]);
                     if (uiMsg is not null)
-                        Messages.Insert(0, uiMsg);
+                        InsertMessage(0, uiMsg);
                 }
             });
             return true;
@@ -726,6 +854,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = lm.ClientMessageId,
             Content = lm.Content ?? string.Empty,
             Timestamp = ts,
+            ReceivedAtMs = lm.ReceivedAtMs,
             IsSentByMe = lm.SenderUserId == selfId,
             Status = lm.Status,
             Sender = EmptyUser,
@@ -794,6 +923,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 MessageId = item.MessageId,
                 Content = item.Content?.Trim() ?? string.Empty,
                 Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(item.ReceivedAtMs).LocalDateTime,
+                ReceivedAtMs = item.ReceivedAtMs,
                 IsSentByMe = item.SenderUserId == selfId,
                 Sender = EmptyUser,
                 Attachments = item.Attachments,
@@ -1512,6 +1642,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (peerId > 0)
             _ = UnwatchPeerPresenceAsync(peerId);
 
+        CancelConversationOperations();
         CurrFriend = null;
         CurrConversationId = null;
         PeerTitle = string.Empty;
@@ -1532,6 +1663,16 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var peerId = CurrFriend?.FriendId ?? 0;
         if (peerId > 0)
             _ = UnwatchPeerPresenceAsync(peerId);
+
+        try
+        {
+            _conversationCts.Cancel();
+            _conversationCts.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 已释放，忽略
+        }
 
         _chatSession.MessageRecalled -= OnMessageRecalled;
         _chatSession.MessageEdited -= OnMessageEdited;

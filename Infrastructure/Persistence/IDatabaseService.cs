@@ -39,7 +39,7 @@ public interface IDatabaseService
     Task DeleteConversationAsync(long ownerUserId, string conversationId);
 
     // ---- 消息（P0-6）----
-    Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null);
+    Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null);
     Task<LocalMessage?> GetMessageByServerIdAsync(long ownerUserId, string messageId);
     Task<LocalMessage?> GetMessageByClientIdAsync(long ownerUserId, string clientMessageId);
     Task UpsertMessageAsync(LocalMessage message);

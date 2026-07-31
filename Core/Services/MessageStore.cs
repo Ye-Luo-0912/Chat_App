@@ -186,10 +186,15 @@ public sealed class MessageStore : IMessageStore
 
         var cursor = await _db.GetSyncCursorAsync(owner, conversationId)
             ?? new LocalSyncCursor { OwnerUserId = owner, ConversationId = conversationId };
-        cursor.AfterReceivedAtMs = maxItem.ReceivedAtMs;
-        cursor.AfterMessageId = maxItem.MessageId;
-        cursor.UpdatedAt = DateTime.UtcNow;
-        await _db.UpsertSyncCursorAsync(cursor);
+        // 仅当前向 catch-up（批次最大时间戳超过已存水位）时才推进游标；
+        // 向后拉取更早历史时不得回退水位（六3）。
+        if (maxItem.ReceivedAtMs > cursor.AfterReceivedAtMs)
+        {
+            cursor.AfterReceivedAtMs = maxItem.ReceivedAtMs;
+            cursor.AfterMessageId = maxItem.MessageId;
+            cursor.UpdatedAt = DateTime.UtcNow;
+            await _db.UpsertSyncCursorAsync(cursor);
+        }
     }
 
     /// <inheritdoc />
@@ -307,10 +312,10 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public Task<List<LocalMessage>> LoadHistoryAsync(string conversationId, int limit = 100, long? beforeReceivedAtMs = null, CancellationToken ct = default)
+    public Task<List<LocalMessage>> LoadHistoryAsync(string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
     {
         var owner = _currentUserContext.RequireUserId();
-        return _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs);
+        return _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs, beforeMessageId);
     }
 
     /// <inheritdoc />
@@ -441,7 +446,7 @@ public sealed class MessageStore : IMessageStore
         var response = await _chatSession.QueryMessageHistoryAsync(conversationId, limit, beforeReceivedAtMs, beforeMessageId, ct);
         if (response.Items is { Count: > 0 })
             await PersistHistoryAsync(conversationId, response.Items, ct);
-        return await _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs);
+        return await _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs, beforeMessageId);
     }
 
     /// <inheritdoc />

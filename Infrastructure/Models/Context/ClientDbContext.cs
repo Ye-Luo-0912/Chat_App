@@ -59,10 +59,16 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
             .HasKey(x => x.Id);
         modelBuilder.Entity<LocalMessage>()
             .HasIndex(x => new { x.OwnerUserId, x.ConversationId });
+        // 服务端消息 Id 唯一：同一账户内同一 MessageId 仅允许一行。
+        // SQLite 中 NULL 视为互不相同，因此未 ack 的出站消息（MessageId 为 NULL）不会冲突（六1）。
         modelBuilder.Entity<LocalMessage>()
-            .HasIndex(x => new { x.OwnerUserId, x.MessageId });
+            .HasIndex(x => new { x.OwnerUserId, x.MessageId })
+            .IsUnique();
+        // 客户端消息 Id 唯一：同一账户内同一 ClientMessageId 仅允许一行。
+        // SQLite 中 NULL 视为互不相同，因此入站消息（ClientMessageId 为 NULL）不会冲突（六1）。
         modelBuilder.Entity<LocalMessage>()
-            .HasIndex(x => new { x.OwnerUserId, x.ClientMessageId });
+            .HasIndex(x => new { x.OwnerUserId, x.ClientMessageId })
+            .IsUnique();
         // 游标分页查询覆盖索引：按会话+时间倒序取一页
         modelBuilder.Entity<LocalMessage>()
             .HasIndex(x => new { x.OwnerUserId, x.ConversationId, x.ReceivedAtMs })
@@ -116,7 +122,9 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         entity.Property(e => e.RetryCount);
         entity.Property(e => e.FailureReason).HasMaxLength(1024);
         entity.HasIndex(e => new { e.OwnerUserId, e.AttachmentId }).IsUnique().HasDatabaseName("ix_attachments_owner_attid");
-        entity.HasIndex(e => new { e.OwnerUserId, e.ClientAttachmentId }).HasDatabaseName("ix_attachments_owner_clientattid");
+        // 客户端附件 Id 唯一：同一账户内同一 ClientAttachmentId 仅允许一行。
+        // SQLite 中 NULL 视为互不相同，因此服务端来源附件（ClientAttachmentId 为 NULL）不会冲突（六1）。
+        entity.HasIndex(e => new { e.OwnerUserId, e.ClientAttachmentId }).IsUnique().HasDatabaseName("ix_attachments_owner_clientattid");
         entity.HasIndex(e => new { e.OwnerUserId, e.MessageId }).HasDatabaseName("ix_attachments_owner_msgid");
         entity.HasIndex(e => new { e.OwnerUserId, e.Sha256 }).HasDatabaseName("ix_attachments_owner_sha256");
 

@@ -21,6 +21,20 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
 {
     private static readonly CancellationToken None = CancellationToken.None;
 
+    /// <summary>
+    /// 判断 DbUpdateException 是否由 SQLite 唯一约束冲突引起（SQLITE_CONSTRAINT = 19）。
+    /// 用于 upsert 的幂等处理：并发写入导致唯一索引冲突时视为成功（行已存在）（六1）。
+    /// </summary>
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is Microsoft.Data.Sqlite.SqliteException sqlEx && sqlEx.SqliteErrorCode == 19)
+                return true;
+        }
+        return false;
+    }
+
     public async Task<List<LocalFriend>> GetFriendsAsync(long ownerUserId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
@@ -281,7 +295,7 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
 
     // ---- 消息（P0-6）----
 
-    public async Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null)
+    public async Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.Messages
@@ -289,11 +303,21 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             .Where(m => m.OwnerUserId == ownerUserId && m.ConversationId == conversationId);
         if (beforeReceivedAtMs is long beforeMs)
         {
-            query = query.Where(m => m.ReceivedAtMs < beforeMs);
+            if (!string.IsNullOrEmpty(beforeMessageId))
+            {
+                // 复合游标：(ReceivedAtMs, MessageId) 字典序严格小于游标，避免同时间戳分页遗漏/重复（六4）。
+                query = query.Where(m => m.ReceivedAtMs < beforeMs
+                                      || (m.ReceivedAtMs == beforeMs && string.Compare(m.MessageId, beforeMessageId) < 0));
+            }
+            else
+            {
+                query = query.Where(m => m.ReceivedAtMs < beforeMs);
+            }
         }
-        // 游标分页：按 ReceivedAtMs 倒序取一页，再反转为时间正序，便于 UI 直接追加。
+        // 游标分页：按 (ReceivedAtMs, MessageId) 倒序取一页，再反转为时间正序，便于 UI 直接追加（六4 tiebreaker）。
         var page = await query
             .OrderByDescending(m => m.ReceivedAtMs)
+            .ThenByDescending(m => m.MessageId)
             .Take(limit)
             .ToListAsync(None);
         page.Reverse();
@@ -319,14 +343,18 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task UpsertMessageAsync(LocalMessage message)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 空串归一化为 NULL：唯一索引下 NULL 互异、空串会冲突（六1）。
+        message.MessageId = string.IsNullOrEmpty(message.MessageId) ? null : message.MessageId;
+        message.ClientMessageId = string.IsNullOrEmpty(message.ClientMessageId) ? null : message.ClientMessageId;
+
         LocalMessage? existing = null;
-        if (!string.IsNullOrEmpty(message.MessageId))
+        if (message.MessageId is not null)
         {
             existing = await db.Messages
                 .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
                                        && m.MessageId == message.MessageId, None);
         }
-        if (existing is null && !string.IsNullOrEmpty(message.ClientMessageId))
+        if (existing is null && message.ClientMessageId is not null)
         {
             existing = await db.Messages
                 .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
@@ -334,19 +362,25 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         }
         if (existing is not null)
         {
-            existing.Content         = message.Content;
             existing.ReceivedAtMs    = message.ReceivedAtMs;
             existing.DeliveredAtMs   = message.DeliveredAtMs;
             existing.ReadAtMs        = message.ReadAtMs;
             existing.RecalledAtMs    = message.RecalledAtMs;
-            existing.EditVersion     = message.EditVersion;
-            existing.EditedAtMs      = message.EditedAtMs;
             existing.AttachmentsJson = message.AttachmentsJson;
-            existing.Status          = message.Status;
             existing.FailureReason   = message.FailureReason;
             existing.UpdatedAt       = message.UpdatedAt;
+            // 撤回具有最高优先级，不可被历史同步覆盖（六2）。
+            if (existing.Status != MessageStatus.Recalled)
+                existing.Status = message.Status;
+            // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间（六2）。
+            if (message.EditVersion > existing.EditVersion)
+            {
+                existing.EditVersion = message.EditVersion;
+                existing.EditedAtMs  = message.EditedAtMs;
+                existing.Content     = message.Content;
+            }
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
-            if (string.IsNullOrEmpty(existing.MessageId) && !string.IsNullOrEmpty(message.MessageId))
+            if (string.IsNullOrEmpty(existing.MessageId) && message.MessageId is not null)
             {
                 existing.MessageId = message.MessageId;
             }
@@ -355,7 +389,15 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         {
             await db.Messages.AddAsync(message, None);
         }
-        await db.SaveChangesAsync(None);
+        // 唯一索引冲突视为幂等成功（行已存在）（六1）。
+        try
+        {
+            await db.SaveChangesAsync(None);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // 幂等：并发写入导致唯一索引冲突，行已存在，忽略。
+        }
     }
 
     public async Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null)
@@ -394,8 +436,11 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 撤回具有最高优先级。仅当尚未撤回，或入站 RecalledAtMs 更新时才写入（六2）。
         await db.Messages
-            .Where(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId)
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.MessageId == messageId
+                     && (m.RecalledAtMs == null || m.RecalledAtMs < recalledAtMs))
             .ExecuteUpdateAsync(m
                 => m.SetProperty(x => x.Status, MessageStatus.Recalled)
                     .SetProperty(x => x.RecalledAtMs, recalledAtMs)
@@ -405,8 +450,12 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 编辑版本单调递增：仅当入站 EditVersion 严格大于已存版本、且消息未撤回时才应用（六2）。
         await db.Messages
-            .Where(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId)
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.MessageId == messageId
+                     && m.EditVersion < editVersion
+                     && m.Status != MessageStatus.Recalled)
             .ExecuteUpdateAsync(m
                 => m.SetProperty(x => x.Content, content)
                     .SetProperty(x => x.EditVersion, editVersion)
@@ -437,14 +486,18 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         await using var transaction = await db.Database.BeginTransactionAsync(None);
 
         // ---- Upsert LocalMessage（镜像 UpsertMessageAsync：先 OwnerUserId + MessageId，回退 OwnerUserId + ClientMessageId）----
+        // 空串归一化为 NULL：唯一索引下 NULL 互异、空串会冲突（六1）。
+        message.MessageId = string.IsNullOrEmpty(message.MessageId) ? null : message.MessageId;
+        message.ClientMessageId = string.IsNullOrEmpty(message.ClientMessageId) ? null : message.ClientMessageId;
+
         LocalMessage? existingMessage = null;
-        if (!string.IsNullOrEmpty(message.MessageId))
+        if (message.MessageId is not null)
         {
             existingMessage = await db.Messages
                 .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
                                        && m.MessageId == message.MessageId, None);
         }
-        if (existingMessage is null && !string.IsNullOrEmpty(message.ClientMessageId))
+        if (existingMessage is null && message.ClientMessageId is not null)
         {
             existingMessage = await db.Messages
                 .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
@@ -452,19 +505,25 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         }
         if (existingMessage is not null)
         {
-            existingMessage.Content         = message.Content;
             existingMessage.ReceivedAtMs    = message.ReceivedAtMs;
             existingMessage.DeliveredAtMs   = message.DeliveredAtMs;
             existingMessage.ReadAtMs        = message.ReadAtMs;
             existingMessage.RecalledAtMs    = message.RecalledAtMs;
-            existingMessage.EditVersion     = message.EditVersion;
-            existingMessage.EditedAtMs      = message.EditedAtMs;
             existingMessage.AttachmentsJson = message.AttachmentsJson;
-            existingMessage.Status          = message.Status;
             existingMessage.FailureReason   = message.FailureReason;
             existingMessage.UpdatedAt       = message.UpdatedAt;
+            // 撤回具有最高优先级，不可被历史同步覆盖（六2）。
+            if (existingMessage.Status != MessageStatus.Recalled)
+                existingMessage.Status = message.Status;
+            // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间（六2）。
+            if (message.EditVersion > existingMessage.EditVersion)
+            {
+                existingMessage.EditVersion = message.EditVersion;
+                existingMessage.EditedAtMs  = message.EditedAtMs;
+                existingMessage.Content     = message.Content;
+            }
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
-            if (string.IsNullOrEmpty(existingMessage.MessageId) && !string.IsNullOrEmpty(message.MessageId))
+            if (string.IsNullOrEmpty(existingMessage.MessageId) && message.MessageId is not null)
             {
                 existingMessage.MessageId = message.MessageId;
             }
@@ -572,8 +631,16 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             }
         }
 
-        await db.SaveChangesAsync(None);
-        await transaction.CommitAsync(None);
+        // 唯一索引冲突视为幂等成功（消息已存在）（六1）。
+        try
+        {
+            await db.SaveChangesAsync(None);
+            await transaction.CommitAsync(None);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // 幂等：并发写入导致唯一索引冲突，行已存在，忽略（事务自动回滚）。
+        }
     }
 
     // ---- Outbox（P0-6）----
@@ -772,9 +839,13 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
             .FirstOrDefaultAsync(s => s.OwnerUserId == cursor.OwnerUserId && s.ConversationId == cursor.ConversationId, None);
         if (existing is not null)
         {
-            existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
-            existing.AfterMessageId    = cursor.AfterMessageId;
-            existing.UpdatedAt         = cursor.UpdatedAt;
+            // 单调高水位：仅向前推进，绝不回退（六3）。
+            if (cursor.AfterReceivedAtMs > existing.AfterReceivedAtMs)
+            {
+                existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
+                existing.AfterMessageId    = cursor.AfterMessageId;
+            }
+            existing.UpdatedAt = cursor.UpdatedAt;
         }
         else
         {
@@ -824,9 +895,14 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task MarkConversationMessagesReadAsync(long ownerUserId, string conversationId, long? beforeReceivedAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 仅标记自己发出的消息为已读（对端已读回执表示对方读了我的消息）；
+        // 不覆盖已读、不标记撤回/失败消息（六5）。
         var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId
                                          && m.ConversationId == conversationId
-                                         && m.Status != MessageStatus.Recalled);
+                                         && m.SenderUserId == ownerUserId
+                                         && m.Status != MessageStatus.Recalled
+                                         && m.Status != MessageStatus.Failed
+                                         && m.Status != MessageStatus.Read);
         if (beforeReceivedAtMs.HasValue)
             query = query.Where(m => m.ReceivedAtMs <= beforeReceivedAtMs.Value);
 
@@ -876,14 +952,17 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
     public async Task UpsertAttachmentAsync(LocalAttachment attachment)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 空串归一化为 NULL：唯一索引下 NULL 互异、空串会冲突（六1）。
+        attachment.AttachmentId = string.IsNullOrEmpty(attachment.AttachmentId) ? null : attachment.AttachmentId;
+        attachment.ClientAttachmentId = string.IsNullOrEmpty(attachment.ClientAttachmentId) ? null : attachment.ClientAttachmentId;
         LocalAttachment? existing = null;
-        if (!string.IsNullOrEmpty(attachment.AttachmentId))
+        if (attachment.AttachmentId is not null)
         {
             existing = await db.Attachments
                 .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
                                       && a.AttachmentId == attachment.AttachmentId, None);
         }
-        if (existing is null && !string.IsNullOrEmpty(attachment.ClientAttachmentId))
+        if (existing is null && attachment.ClientAttachmentId is not null)
         {
             existing = await db.Attachments
                 .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
@@ -913,7 +992,15 @@ public class DatabaseService(IDbContextFactory<ClientDbContext> contextFactory) 
         {
             await db.Attachments.AddAsync(attachment, None);
         }
-        await db.SaveChangesAsync(None);
+        // 唯一索引冲突视为幂等成功（附件已存在）（六1）。
+        try
+        {
+            await db.SaveChangesAsync(None);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // 幂等：并发写入导致唯一索引冲突，行已存在，忽略。
+        }
     }
     public async Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null)
     {
