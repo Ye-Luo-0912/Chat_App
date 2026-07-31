@@ -138,9 +138,74 @@ public sealed class ChatFriendListState : IDisposable
             .ThenBy(f => f.DisplayName ?? f.FriendName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        _filteredFriends.Clear();
-        foreach (var friend in ordered)
-            _filteredFriends.Add(friend);
+        // 增量 diff：只更新变化的部分，避免 Clear+Add 导致 UI 重建所有 item container
+        ApplyIncrementalDiff(ordered);
+    }
+
+    /// <summary>
+    /// 增量更新 _filteredFriends：删除不再匹配的项，插入新增的项，移动顺序变化的项。
+    /// 保留未变化项的 item container，避免 UI 重建（P0-UI 热路径优化）。
+    /// </summary>
+    private void ApplyIncrementalDiff(List<LocalFriend> source)
+    {
+        if (_filteredFriends.Count == 0)
+        {
+            foreach (var item in source)
+                _filteredFriends.Add(item);
+            return;
+        }
+
+        if (source.Count == 0)
+        {
+            _filteredFriends.Clear();
+            return;
+        }
+
+        // 构建新列表的 FriendId → index 映射
+        var sourceIds = new Dictionary<long, int>(source.Count);
+        for (var i = 0; i < source.Count; i++)
+            sourceIds[source[i].FriendId] = i;
+
+        // 从后往前删除不在新列表中的项
+        for (var i = _filteredFriends.Count - 1; i >= 0; i--)
+        {
+            if (!sourceIds.ContainsKey(_filteredFriends[i].FriendId))
+                _filteredFriends.RemoveAt(i);
+        }
+
+        // 从前往后遍历，移动或插入到正确位置
+        for (int srcIdx = 0, tgtIdx = 0; srcIdx < source.Count; srcIdx++)
+        {
+            var srcItem = source[srcIdx];
+            if (tgtIdx < _filteredFriends.Count && _filteredFriends[tgtIdx].FriendId == srcItem.FriendId)
+            {
+                // 位置正确，跳过
+                tgtIdx++;
+                continue;
+            }
+
+            // 查找该项是否已在列表后续位置（需要移动）
+            var found = -1;
+            for (var j = tgtIdx; j < _filteredFriends.Count; j++)
+            {
+                if (_filteredFriends[j].FriendId == srcItem.FriendId)
+                {
+                    found = j;
+                    break;
+                }
+            }
+
+            if (found >= 0)
+            {
+                _filteredFriends.Move(found, tgtIdx);
+                tgtIdx++;
+            }
+            else
+            {
+                _filteredFriends.Insert(tgtIdx, srcItem);
+                tgtIdx++;
+            }
+        }
     }
 
     public void Dispose()
