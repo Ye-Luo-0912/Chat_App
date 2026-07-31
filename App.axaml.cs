@@ -43,14 +43,22 @@ public partial class App : Application
         AvaloniaXamlLoader.Load(this);
 
         // ——— 初始化 Serilog 日志框架 ———
+        // 日志写入用户应用数据目录（与 DB/device.id 复用同一根目录），避免只读安装目录。
+        // File sink 通过 Async 异步写入，避免日志 IO 阻塞 UI 线程。
+        // Release 配置降级为 Information，减少生产环境日志量。
+        var logDir = Path.Combine(Infrastructure.Persistence.DbPathProvider.GetAppDataDir(), "logs");
+#if DEBUG
+        var minLevel = Serilog.Events.LogEventLevel.Debug;
+#else
+        var minLevel = Serilog.Events.LogEventLevel.Information;
+#endif
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
-            .WriteTo.Console()
-            .WriteTo.File(
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs", "app-.log"),
+            .MinimumLevel.Is(minLevel)
+            .WriteTo.Async(a => a.File(
+                Path.Combine(logDir, "app-.log"),
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 30,
-                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}"))
             .CreateLogger();
 
         Log.Information("应用程序启动");

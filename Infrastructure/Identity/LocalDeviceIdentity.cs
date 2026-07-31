@@ -8,7 +8,7 @@ using Serilog;
 namespace Chat_App.Infrastructure.Identity;
 
 /// <summary>
-/// 生成本机稳定设备 ID 并持久化到 Data/device.id。
+/// 生成本机稳定设备 ID 并持久化到用户应用数据目录（LocalApplicationData/ChatApp/Data/device.id）。
 /// 格式与服务端 DeviceIdHashHelper 兼容：32 字节随机 → Base64url（43 字符）。
 /// </summary>
 public sealed class LocalDeviceIdentity : ILocalDeviceIdentity

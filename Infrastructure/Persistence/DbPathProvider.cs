@@ -13,14 +13,20 @@ public static class DbPathProvider
 {
     public static string DbPath { get; } = BuildDbPath();
 
-    public static string BuildConnectionString()
+    /// <summary>用户应用数据目录（LocalApplicationData/ChatApp/Data），供 DB、日志、device.id 等复用。</summary>
+    public static string GetAppDataDir()
     {
         var dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
             "Data");
         Directory.CreateDirectory(dir);
-        var dbPath = Path.Combine(dir, "ChatApp.db");
+        return dir;
+    }
+
+    public static string BuildConnectionString()
+    {
+        var dbPath = Path.Combine(GetAppDataDir(), "ChatApp.db");
 
         // 仅使用 Microsoft.Data.Sqlite 官方关键字
         var builder = new SqliteConnectionStringBuilder
@@ -36,12 +42,5 @@ public static class DbPathProvider
     }
 
     private static string BuildDbPath()
-    {
-        var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ChatApp",
-            "Data");
-        Directory.CreateDirectory(dir);
-        return Path.Combine(dir, "ChatApp.db");
-    }
+        => Path.Combine(GetAppDataDir(), "ChatApp.db");
 }
