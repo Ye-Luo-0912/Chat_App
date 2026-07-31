@@ -202,6 +202,78 @@ public class AccountIsolationTests : IDisposable
         Assert.Equal("B-version", bConv!.LastMessagePreview);
     }
 
+    /// <summary>
+    /// 草稿隔离：A 保存草稿后，B 查询同名会话不得看到 A 的草稿；
+    /// B 保存自己的草稿后，A 的草稿不受影响。
+    /// 验收标准：B 不得看到 A 的草稿。
+    /// </summary>
+    [Fact]
+    public async Task Draft_Is_Isolated_Between_Accounts()
+    {
+        const string sharedConvId = "conv-draft-shared";
+
+        // A 创建会话并保存草稿
+        await _db.UpsertConversationAsync(new LocalConversation
+        {
+            OwnerUserId = UserA, ConversationId = sharedConvId,
+            Type = 1, PeerUserId = 9999
+        });
+        await _db.UpdateConversationDraftAsync(UserA, sharedConvId, "A的私密草稿");
+
+        // B 创建同名会话但不保存草稿
+        await _db.UpsertConversationAsync(new LocalConversation
+        {
+            OwnerUserId = UserB, ConversationId = sharedConvId,
+            Type = 1, PeerUserId = 9999
+        });
+
+        var aConv = await _db.GetConversationAsync(UserA, sharedConvId);
+        var bConv = await _db.GetConversationAsync(UserB, sharedConvId);
+
+        Assert.NotNull(aConv);
+        Assert.NotNull(bConv);
+        Assert.Equal("A的私密草稿", aConv!.Draft);
+        Assert.Null(bConv!.Draft);
+
+        // B 保存自己的草稿后，A 的草稿不受影响
+        await _db.UpdateConversationDraftAsync(UserB, sharedConvId, "B的草稿");
+        var aConv2 = await _db.GetConversationAsync(UserA, sharedConvId);
+        Assert.Equal("A的私密草稿", aConv2!.Draft);
+    }
+
+    /// <summary>
+    /// Outbox 隔离：A 写入待发送 Outbox，B 查询应全部为空；
+    /// B 不能通过 A 的 ClientMessageId 拿到 A 的 Outbox 条目。
+    /// 验收标准：B 不得看到 A 的离线发送状态（Outbox 反映离线发送数据）。
+    /// </summary>
+    [Fact]
+    public async Task Outbox_Is_Isolated_Between_Accounts()
+    {
+        await _db.EnqueueOutboxAsync(new LocalOutboxMessage
+        {
+            OwnerUserId = UserA,
+            ClientMessageId = "cmsg-outbox-a-1",
+            ConversationId = ConversationIdA,
+            TargetUserId = 9999,
+            Content = "A的离线消息",
+            Status = OutboxStatus.Queued,
+            QueuedAt = DateTime.UtcNow
+        });
+
+        // B 查询待发送 Outbox 应为空
+        var bPending = await _db.GetPendingOutboxAsync(UserB);
+        Assert.Empty(bPending);
+
+        // B 不能通过 A 的 clientMessageId 拿到 A 的 Outbox
+        var bByClientId = await _db.GetOutboxByClientIdAsync(UserB, "cmsg-outbox-a-1");
+        Assert.Null(bByClientId);
+
+        // A 能查到自己的 Outbox
+        var aPending = await _db.GetPendingOutboxAsync(UserA);
+        Assert.Single(aPending);
+        Assert.Equal("A的离线消息", aPending[0].Content);
+    }
+
     public void Dispose()
     {
         _connection.Dispose();
