@@ -293,7 +293,8 @@ public class ProtocolFrameFuzzingTests
     }
 
     /// <summary>
-    /// TryRead 返回的 Body 引用在后续 Append 后仍应保持独立（数据完整性修复回归）。
+    /// TryRead 返回的 Body 是内部 buffer 的零拷贝切片，仅在下次 Append/TryRead 前有效。
+    /// 调用方须在下次 Append 前消费（如 ToArray 快照或同步反序列化）。本测试验证此契约。
     /// </summary>
     [Fact]
     public void Body_Remains_Valid_After_Subsequent_Append()

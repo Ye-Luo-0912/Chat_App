@@ -267,7 +267,7 @@ public class TcpClientExample : ITcpClient, IDisposable
     /// </summary>
     private async Task ReceiveDataAsync(CancellationToken token, int generation, Socket socket)
     {
-        var buffer = _bufferPool.Rent(4096);
+        var buffer = _bufferPool.Rent(8192);
         try
         {
             while (!token.IsCancellationRequested)

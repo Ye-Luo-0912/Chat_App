@@ -5,14 +5,13 @@ using System.Buffers;
 namespace Core.Protocol
 {
     /// <summary>
-    /// 基于 growable buffer + ReadOnlySequence 的消息包编解码器（P0-十 热路径优化）。
+    /// 基于 growable buffer 的消息包编解码器（P0-十 热路径优化）。
     ///
-    /// 入站路径改进：
-    /// - 使用 byte[] + offset/count 替代手写 Array.Resize + Buffer.BlockCopy 前移。
-    /// - 仅在容量不足时 compact（将未消费数据前移），而非每帧前移，避免 O(n²) 复制。
-    /// - 使用 ReadOnlySequence&lt;byte&gt; + SequenceReader&lt;byte&gt; 进行帧解析和坏帧重同步。
-    /// - body 仍复制到独立内存（CopyBodyToOwnedMemory），保证返回的 packet.Body
-    ///   在后续 Append/读取后仍然有效（数据完整性契约）。
+    /// 入站路径：
+    /// - byte[] + offset/count，仅在容量不足时 compact，非每帧前移，避免 O(n²) 复制。
+    /// - body 零拷贝：TryRead 返回内部 buffer 的切片（ReadOnlySequence），不分配新 byte[]。
+    ///   契约：Body 仅在下一次 Append/TryRead 调用前有效。生产代码 RoutePacket 在 TryRead
+    ///   循环内同步反序列化，消费完 Body 后才进入下一轮，满足此契约。
     /// </summary>
     public class MessagePacketCodec : IMessagePacketCodec
     {
@@ -77,7 +76,8 @@ namespace Core.Protocol
                     var consumed = originalLen - seq.Length;
                     _offset += (int)consumed;
                     _count -= (int)consumed;
-                    packet = CopyBodyToOwnedMemory(parsed);
+                    // 零拷贝：返回内部 buffer 的切片。契约：Body 仅在下一次 Append/TryRead 前有效。
+                    packet = parsed;
                     return true;
                 }
 
@@ -122,20 +122,6 @@ namespace Core.Protocol
             var keep = magic.Length - 1;
             if (buffer.Length > keep)
                 buffer = buffer.Slice(buffer.Length - keep);
-        }
-
-        /// <summary>
-        /// 将 packet.Body 复制到独立内存，返回引用该内存的新 packet。
-        /// 保证调用方持有的 Body 切片不受后续 Append/compact 影响。
-        /// </summary>
-        private static MessagePacket CopyBodyToOwnedMemory(MessagePacket packet)
-        {
-            if (packet.Body.IsEmpty)
-                return packet;
-
-            var bodyCopy = new byte[(int)packet.Body.Length];
-            packet.Body.CopyTo(bodyCopy);
-            return new MessagePacket(packet.Command, new ReadOnlySequence<byte>(bodyCopy));
         }
 
         /// <summary>

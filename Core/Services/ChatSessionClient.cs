@@ -73,7 +73,7 @@ namespace Core.Services
         {
             _codec.Append(rawData);
 
-            // 疯狂往外掏完整的包
+            // 同步路由：Body 是零拷贝切片，RoutePacket 在下次 Append 前消费完毕
             while (_codec.TryRead(out var packet))
             {
                 try
