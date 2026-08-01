@@ -29,6 +29,21 @@ namespace Core.Services
         private long _lastHeartbeatAckTicks;
         private const int HeartbeatTimeoutSeconds = 60;
 
+        // 请求超时（秒）—— 按业务类型分级
+        private const int AuthTimeoutSec = 5;
+        private const int DefaultRequestTimeoutSec = 8;
+        private const int SyncBootstrapTimeoutSec = 12;
+        private const int HistoryFetchTimeoutSec = 15;
+        private const int ReceiptTimeoutSec = 10;
+
+        // 协议上限
+        private const int MaxAttachmentsPerMessage = 32;
+        private const int MaxAttachmentIdLength = 64;
+        private const int MaxMessageIdLength = 64;
+        private const int MaxPreviewLength = 256;
+        private const int MaxEditContentLength = 4000;
+        private const int MaxPresenceIdsPerRequest = 100;
+
         public bool IsConnected => _tcpClient.IsConnected;
 
         public bool IsAuthenticated { get; private set; }
@@ -125,7 +140,7 @@ namespace Core.Services
             await SendPacketAsync(PacketCommand.AuthRequest, authRequest, ct);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(AuthTimeoutSec));
 
             try
             {
@@ -194,11 +209,11 @@ namespace Core.Services
             if (string.IsNullOrWhiteSpace(content) && !hasAttachments)
                 throw new ArgumentException("消息文本与附件至少需要其一。");
 
-            if (attachmentIds is { Count: > 32 })
-                throw new ArgumentException("单条消息最多 32 个附件。");
+            if (attachmentIds is { Count: > MaxAttachmentsPerMessage })
+                throw new ArgumentException($"单条消息最多 {MaxAttachmentsPerMessage} 个附件。");
 
             if (attachmentIds?.Any(static id =>
-                    string.IsNullOrWhiteSpace(id) || id.Length > 64) == true)
+                    string.IsNullOrWhiteSpace(id) || id.Length > MaxAttachmentIdLength) == true)
             {
                 throw new ArgumentException("附件 Id 无效。");
             }
@@ -210,7 +225,7 @@ namespace Core.Services
 
             if (hasReply)
             {
-                if (replyToMessageId!.Length > 64)
+                if (replyToMessageId!.Length > MaxMessageIdLength)
                     throw new ArgumentException("回复目标消息 Id 过长。");
                 if (replyToSenderUserId is null or <= 0)
                     throw new ArgumentException("回复目标发送方无效。");
@@ -222,7 +237,7 @@ namespace Core.Services
 
             if (hasForward)
             {
-                if (forwardedFromMessageId!.Length > 64)
+                if (forwardedFromMessageId!.Length > MaxMessageIdLength)
                     throw new ArgumentException("转发来源消息 Id 过长。");
                 if (forwardedFromSenderUserId is null or <= 0)
                     throw new ArgumentException("转发来源发送方无效。");
@@ -235,12 +250,12 @@ namespace Core.Services
 
             var preview = string.IsNullOrWhiteSpace(replyToPreview)
                 ? null
-                : (replyToPreview.Length <= 256 ? replyToPreview : replyToPreview[..256]);
+                : (replyToPreview.Length <= MaxPreviewLength ? replyToPreview : replyToPreview[..MaxPreviewLength]);
             var forwardPreview = string.IsNullOrWhiteSpace(forwardedFromPreview)
                 ? null
-                : (forwardedFromPreview.Length <= 256
+                : (forwardedFromPreview.Length <= MaxPreviewLength
                     ? forwardedFromPreview
-                    : forwardedFromPreview[..256]);
+                    : forwardedFromPreview[..MaxPreviewLength]);
 
             var clientMessageId = string.IsNullOrWhiteSpace(clientMessageIdParam)
                 ? Guid.CreateVersion7().ToString("N")
@@ -282,7 +297,7 @@ namespace Core.Services
             await SendPacketAsync(PacketCommand.Heartbeat, (object?)null, ct);
         }
 
-        public async Task<ConversationListResponseDto> QueryConversationListAsync(
+        public Task<ConversationListResponseDto> QueryConversationListAsync(
             int limit = 50,
             bool? beforeIsPinned = null,
             long? beforePinnedAtMs = null,
@@ -291,38 +306,21 @@ namespace Core.Services
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<ConversationListResponseDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_listPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("会话列表请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.ConversationListRequest,
-                    new ConversationListRequestDto
-                    {
-                        RequestId = requestId,
-                        BeforeIsPinned = beforeIsPinned,
-                        BeforePinnedAtMs = beforePinnedAtMs,
-                        BeforeLastMessageAtMs = beforeLastMessageAtMs,
-                        BeforeConversationId = beforeConversationId,
-                        Limit = Math.Clamp(limit, 1, 100)
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(8));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _listPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_listPending, PacketCommand.ConversationListRequest,
+                new ConversationListRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    BeforeIsPinned = beforeIsPinned,
+                    BeforePinnedAtMs = beforePinnedAtMs,
+                    BeforeLastMessageAtMs = beforeLastMessageAtMs,
+                    BeforeConversationId = beforeConversationId,
+                    Limit = Math.Clamp(limit, 1, 100)
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "会话列表请求 Id 冲突", ct);
         }
 
-        public async Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
+        public Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
             string conversationId,
             bool? pinned = null,
             bool? muted = null,
@@ -335,112 +333,61 @@ namespace Core.Services
             if (pinned is null && muted is null)
                 throw new ArgumentException("pinned 与 muted 至少需要其一");
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<ConversationSetPrefsResponseDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_prefsPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("会话偏好请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.ConversationSetPrefsRequest,
-                    new ConversationSetPrefsRequestDto
-                    {
-                        RequestId = requestId,
-                        ConversationId = conversationId.Trim(),
-                        Pinned = pinned,
-                        Muted = muted,
-                        MutedUntilMs = mutedUntilMs
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(8));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _prefsPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_prefsPending, PacketCommand.ConversationSetPrefsRequest,
+                new ConversationSetPrefsRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    ConversationId = conversationId.Trim(),
+                    Pinned = pinned,
+                    Muted = muted,
+                    MutedUntilMs = mutedUntilMs
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "会话偏好请求 Id 冲突", ct);
         }
 
-        public async Task<MessageRecallAcknowledgementDto> RecallMessageAsync(
+        public Task<MessageRecallAcknowledgementDto> RecallMessageAsync(
             string messageId,
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
-            if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > 64)
+            if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > MaxMessageIdLength)
                 throw new ArgumentException("messageId 无效");
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<MessageRecallAcknowledgementDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_recallPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("消息撤回请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.MessageRecallRequest,
-                    new MessageRecallRequestDto
-                    {
-                        RequestId = requestId,
-                        MessageId = messageId.Trim()
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(8));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _recallPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_recallPending, PacketCommand.MessageRecallRequest,
+                new MessageRecallRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    MessageId = messageId.Trim()
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "消息撤回请求 Id 冲突", ct);
         }
 
-        public async Task<MessageEditAcknowledgementDto> EditMessageAsync(
+        public Task<MessageEditAcknowledgementDto> EditMessageAsync(
             string messageId,
             string content,
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
-            if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > 64)
+            if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > MaxMessageIdLength)
                 throw new ArgumentException("messageId 无效");
             ArgumentNullException.ThrowIfNull(content);
             var trimmed = content.Trim();
             if (trimmed.Length == 0)
                 throw new ArgumentException("编辑内容不能为空");
-            if (trimmed.Length > 4000)
+            if (trimmed.Length > MaxEditContentLength)
                 throw new ArgumentException("编辑内容过长");
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<MessageEditAcknowledgementDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_editPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("消息编辑请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.MessageEditRequest,
-                    new MessageEditRequestDto
-                    {
-                        RequestId = requestId,
-                        MessageId = messageId.Trim(),
-                        Content = trimmed
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(8));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _editPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_editPending, PacketCommand.MessageEditRequest,
+                new MessageEditRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    MessageId = messageId.Trim(),
+                    Content = trimmed
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "消息编辑请求 Id 冲突", ct);
         }
 
         public async Task SendTypingNotifyAsync(
@@ -464,42 +411,21 @@ namespace Core.Services
                 ct);
         }
 
-        public async Task<PresenceSnapshotResponseDto> QueryPresenceAsync(
+        public Task<PresenceSnapshotResponseDto> QueryPresenceAsync(
             IReadOnlyList<long> userIds,
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
             ArgumentNullException.ThrowIfNull(userIds);
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<PresenceSnapshotResponseDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_presencePending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("在线状态请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.PresenceQuery,
-                    new PresenceQueryRequestDto
-                    {
-                        RequestId = requestId,
-                        UserIds = userIds
-                            .Where(static id => id > 0)
-                            .Distinct()
-                            .Take(100)
-                            .ToArray()
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(8));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _presencePending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_presencePending, PacketCommand.PresenceQuery,
+                new PresenceQueryRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    UserIds = NormalizePresenceIds(userIds)
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "在线状态请求 Id 冲突", ct);
         }
 
         public async Task UnwatchPresenceAsync(
@@ -509,11 +435,7 @@ namespace Core.Services
             EnsureAuthenticated();
             ArgumentNullException.ThrowIfNull(userIds);
 
-            var ids = userIds
-                .Where(static id => id > 0)
-                .Distinct()
-                .Take(100)
-                .ToArray();
+            var ids = NormalizePresenceIds(userIds);
             if (ids.Length == 0)
                 return;
 
@@ -523,7 +445,7 @@ namespace Core.Services
                 ct);
         }
 
-        public async Task<SyncBootstrapResponseDto> QuerySyncBootstrapAsync(
+        public Task<SyncBootstrapResponseDto> QuerySyncBootstrapAsync(
             int listLimit = 50,
             int historyLimitPerConversation = 20,
             int maxConversationsWithHistory = 10,
@@ -531,37 +453,20 @@ namespace Core.Services
             CancellationToken ct = default)
         {
             EnsureAuthenticated();
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<SyncBootstrapResponseDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_syncPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("同步引导请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.SyncBootstrapRequest,
-                    new SyncBootstrapRequestDto
-                    {
-                        RequestId = requestId,
-                        ListLimit = Math.Clamp(listLimit, 1, 100),
-                        HistoryLimitPerConversation = Math.Clamp(historyLimitPerConversation, 1, 50),
-                        MaxConversationsWithHistory = Math.Clamp(maxConversationsWithHistory, 0, 20),
-                        Watermarks = watermarks
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(12));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _syncPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_syncPending, PacketCommand.SyncBootstrapRequest,
+                new SyncBootstrapRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    ListLimit = Math.Clamp(listLimit, 1, 100),
+                    HistoryLimitPerConversation = Math.Clamp(historyLimitPerConversation, 1, 50),
+                    MaxConversationsWithHistory = Math.Clamp(maxConversationsWithHistory, 0, 20),
+                    Watermarks = watermarks
+                },
+                TimeSpan.FromSeconds(SyncBootstrapTimeoutSec),
+                "同步引导请求 Id 冲突", ct);
         }
 
-        public async Task<MessageHistoryPageDto> QueryMessageHistoryAsync(
+        public Task<MessageHistoryPageDto> QueryMessageHistoryAsync(
             string conversationId,
             int limit = 50,
             long? beforeReceivedAtMs = null,
@@ -572,36 +477,19 @@ namespace Core.Services
             if (string.IsNullOrWhiteSpace(conversationId))
                 throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<MessageHistoryPageDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_historyPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("历史拉取请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.MessageHistoryRequest,
-                    new MessageHistoryRequestDto
-                    {
-                        RequestId = requestId,
-                        ConversationId = conversationId.Trim(),
-                        BeforeReceivedAtMs = beforeReceivedAtMs,
-                        BeforeMessageId = beforeMessageId,
-                        Limit = Math.Clamp(limit, 1, 100)
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(15));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _historyPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_historyPending, PacketCommand.MessageHistoryRequest,
+                new MessageHistoryRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    ConversationId = conversationId.Trim(),
+                    BeforeReceivedAtMs = beforeReceivedAtMs,
+                    BeforeMessageId = beforeMessageId,
+                    Limit = Math.Clamp(limit, 1, 100)
+                },
+                TimeSpan.FromSeconds(HistoryFetchTimeoutSec),
+                "历史拉取请求 Id 冲突", ct);
         }
-        public async Task<MessageReceiptAckDto> SendMessageReceiptAsync(
+        public Task<MessageReceiptAckDto> SendMessageReceiptAsync(
             string conversationId,
             string? lastReadMessageId,
             long? lastReadAtMs,
@@ -611,36 +499,19 @@ namespace Core.Services
             if (string.IsNullOrWhiteSpace(conversationId))
                 throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<MessageReceiptAckDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_receiptPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("已读回执请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.MessageReceipt,
-                    new MessageReceiptDto
-                    {
-                        RequestId = requestId,
-                        ConversationId = conversationId.Trim(),
-                        LastReadMessageId = lastReadMessageId,
-                        LastReadAtMs = lastReadAtMs,
-                        ReaderUserId = CurrentUserId
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(10));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _receiptPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_receiptPending, PacketCommand.MessageReceipt,
+                new MessageReceiptDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    ConversationId = conversationId.Trim(),
+                    LastReadMessageId = lastReadMessageId,
+                    LastReadAtMs = lastReadAtMs,
+                    ReaderUserId = CurrentUserId
+                },
+                TimeSpan.FromSeconds(ReceiptTimeoutSec),
+                "已读回执请求 Id 冲突", ct);
         }
-        public async Task<ConversationMarkReadResponseDto> MarkConversationReadAsync(
+        public Task<ConversationMarkReadResponseDto> MarkConversationReadAsync(
             string conversationId,
             string? lastReadMessageId = null,
             long? lastReadAtMs = null,
@@ -650,33 +521,16 @@ namespace Core.Services
             if (string.IsNullOrWhiteSpace(conversationId))
                 throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<ConversationMarkReadResponseDto>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_markReadPending.TryAdd(requestId, tcs))
-                throw new InvalidOperationException("标记已读请求 Id 冲突");
-
-            try
-            {
-                await SendPacketAsync(
-                    PacketCommand.ConversationMarkReadRequest,
-                    new ConversationMarkReadRequestDto
-                    {
-                        RequestId = requestId,
-                        ConversationId = conversationId.Trim(),
-                        LastReadMessageId = lastReadMessageId,
-                        LastReadAtMs = lastReadAtMs
-                    },
-                    ct);
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(10));
-                return await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                _markReadPending.TryRemove(requestId, out _);
-            }
+            return SendRequestAsync(_markReadPending, PacketCommand.ConversationMarkReadRequest,
+                new ConversationMarkReadRequestDto
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    ConversationId = conversationId.Trim(),
+                    LastReadMessageId = lastReadMessageId,
+                    LastReadAtMs = lastReadAtMs
+                },
+                TimeSpan.FromSeconds(ReceiptTimeoutSec),
+                "标记已读请求 Id 冲突", ct);
         }
         private void EnsureAuthenticated()
         {
@@ -684,39 +538,59 @@ namespace Core.Services
                 throw new InvalidOperationException("TCP 未连接或未鉴权");
         }
 
+        /// <summary>
+        /// 统一请求-响应模板：生成 requestId → 注册 TCS → 发包 → 带超时等待响应 → finally 清理（P0-代码复用）。
+        /// 调用方需先 EnsureAuthenticated 并完成参数校验。
+        /// </summary>
+        private async Task<T> SendRequestAsync<T>(
+            ConcurrentDictionary<string, TaskCompletionSource<T>> pending,
+            PacketCommand command,
+            object payload,
+            TimeSpan timeout,
+            string conflictMessage,
+            CancellationToken ct)
+        {
+            var requestId = Guid.NewGuid().ToString("N");
+            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!pending.TryAdd(requestId, tcs))
+                throw new InvalidOperationException(conflictMessage);
+
+            try
+            {
+                await SendPacketAsync(command, payload, ct).ConfigureAwait(false);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                linkedCts.CancelAfter(timeout);
+                return await tcs.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                pending.TryRemove(requestId, out _);
+            }
+        }
+
+        /// <summary>规整 presence 用户 Id 列表：过滤无效值、去重、截断到上限。</summary>
+        private static long[] NormalizePresenceIds(IReadOnlyList<long> userIds)
+            => userIds.Where(static id => id > 0).Distinct().Take(MaxPresenceIdsPerRequest).ToArray();
+
+        /// <summary>将所有 pending 请求以异常失败并清空字典（连接断开时批量回收）。</summary>
+        private static void FailAll<T>(ConcurrentDictionary<string, TaskCompletionSource<T>> dict, Exception ex)
+        {
+            foreach (var pair in dict)
+                pair.Value.TrySetException(ex);
+            dict.Clear();
+        }
+
         private void FailPendingRequests(Exception ex)
         {
-            foreach (var pair in _listPending)
-                pair.Value.TrySetException(ex);
-            _listPending.Clear();
-
-            foreach (var pair in _prefsPending)
-                pair.Value.TrySetException(ex);
-            _prefsPending.Clear();
-
-            foreach (var pair in _recallPending)
-                pair.Value.TrySetException(ex);
-            _recallPending.Clear();
-
-            foreach (var pair in _presencePending)
-                pair.Value.TrySetException(ex);
-            _presencePending.Clear();
-
-            foreach (var pair in _syncPending)
-                pair.Value.TrySetException(ex);
-            _syncPending.Clear();
-
-            foreach (var pair in _historyPending)
-                pair.Value.TrySetException(ex);
-            _historyPending.Clear();
-
-            foreach (var pair in _receiptPending)
-                pair.Value.TrySetException(ex);
-            _receiptPending.Clear();
-
-            foreach (var pair in _markReadPending)
-                pair.Value.TrySetException(ex);
-            _markReadPending.Clear();
+            FailAll(_listPending, ex);
+            FailAll(_prefsPending, ex);
+            FailAll(_recallPending, ex);
+            FailAll(_editPending, ex);
+            FailAll(_presencePending, ex);
+            FailAll(_syncPending, ex);
+            FailAll(_historyPending, ex);
+            FailAll(_receiptPending, ex);
+            FailAll(_markReadPending, ex);
         }
 
 

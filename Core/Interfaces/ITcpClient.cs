@@ -14,20 +14,18 @@ public interface ITcpClient : IDisposable
     bool IsConnected { get; }
 
     /// <summary>
-    /// 连接到服务器的方法，接受一个 ServerEndpoint 对象作为参数，包含服务器的相关信息，如 IP 地址和端口号，以及一个可选的 CancellationToken 参数用于取消连接操作。
-    /// 该方法是异步的，返回一个 Task，表示连接操作的完成状态。通过这个方法，客户端可以尝试连接到指定的服务器，并在连接成功后进行数据通信。
+    /// 连接到指定服务器端点。成功后可通过 <see cref="SendAsync(ReadOnlyMemory{byte}, CancellationToken)"/> 发送数据，
+    /// 并调用 <see cref="ReceiveDataAsync"/> 启动接收循环。
     /// </summary>
-    /// <param name="endpoint"></param>
-    /// <param name="token"></param>
-    /// <returns></returns>
+    /// <param name="endpoint">服务器端点（主机、端口）。</param>
+    /// <param name="token">取消令牌。</param>
     Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default);
 
     /// <summary>
-    /// 断开与服务器的连接的方法，接受一个可选的字符串参数 reason 用于描述断开连接的原因，以及一个可选的 CancellationToken 参数用于取消断开操作。该方法是异步的，返回一个 Task，表示断开连接操作的完成状态。通过这个方法，客户端可以主动断开与服务器的连接，并提供断开原因以便日志记录或用户通知。
+    /// 发送数据到服务器。数据在返回 Task 前已同步复制到独立缓冲区，调用方可在返回后释放源内存。
     /// </summary>
-    /// <param name="data"></param>
-    /// <param name="token"></param>
-    /// <returns></returns>
+    /// <param name="data">要发送的数据块。</param>
+    /// <param name="token">取消令牌。</param>
     Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token = default);
 
     /// <summary>
@@ -48,11 +46,11 @@ public interface ITcpClient : IDisposable
     }
 
     /// <summary>
-    /// 发送数据的方法，接受一个 ReadOnlyMemory<byte> 参数 data，表示要发送的数据块，以及一个可选的 CancellationToken 参数 token 用于取消发送操作。该方法是异步的，返回一个 Task，表示发送操作的完成状态。通过这个方法，客户端可以将数据发送到服务器，并在发送完成后继续执行其他操作。
+    /// 启动接收循环，持续从服务器读取数据并通过 <see cref="OnDataChunkReceived"/> 事件通知。
+    /// 阻塞至连接关闭或令牌取消。
     /// </summary>
-    /// <param name="token"></param>
-    /// <returns></returns>
-    Task ReceiveDataAsync (CancellationToken token);
+    /// <param name="token">取消令牌；取消时结束接收循环。</param>
+    Task ReceiveDataAsync(CancellationToken token);
 
     /// <summary>
     /// 断开与服务器的连接的方法，接受一个可选的字符串参数 reason 用于描述断开连接的原因。通过这个方法，客户端可以主动断开与服务器的连接，并提供断开原因以便日志记录或用户通知。

@@ -7,13 +7,28 @@ using System.Threading.Tasks;
 
 namespace Core.Interfaces;
 
+/// <summary>
+/// TCP 聊天会话客户端：负责与服务器的双向通信（鉴权、消息收发、请求-响应）。
+/// 所有请求-响应方法内部使用 requestId + TCS + 超时机制匹配响应。
+/// </summary>
 public interface IChatSessionClient : IDisposable
 {
+    /// <summary>TCP 套接字是否已连接。</summary>
     bool IsConnected { get; }
+
+    /// <summary>是否已通过服务端鉴权。</summary>
     bool IsAuthenticated { get; }
+
+    /// <summary>鉴权成功后的当前用户 Id；未鉴权时为 0。</summary>
     long CurrentUserId { get; }
 
+    /// <summary>连接到指定服务器端点。成功后需调用 <see cref="AuthenticateAsync"/>。</summary>
     Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default);
+
+    /// <summary>
+    /// 发送鉴权请求并等待服务端确认（超时 5 秒）。
+    /// 成功触发 <see cref="Authenticated"/> 事件；失败触发 <see cref="AuthenticationFailed"/>。
+    /// </summary>
     Task AuthenticateAsync(string accessToken, long userId, string? sessionId, ulong? deviceIdHash, CancellationToken ct = default);
 
     /// <summary>
@@ -33,9 +48,13 @@ public interface IChatSessionClient : IDisposable
         string? clientMessageId = null,
         CancellationToken ct = default);
 
+    /// <summary>发送心跳包；若距上次 ACK 超过阈值则主动判定半开并断连。</summary>
     Task SendHeartbeatAsync(CancellationToken ct = default);
+
+    /// <summary>主动断开连接，重置鉴权状态与心跳。</summary>
     Task DisconnectAsync(string? reason = null, CancellationToken ct = default);
 
+    /// <summary>分页查询会话列表（超时 8 秒）。</summary>
     Task<ConversationListResponseDto> QueryConversationListAsync(
         int limit = 50,
         bool? beforeIsPinned = null,
@@ -44,6 +63,7 @@ public interface IChatSessionClient : IDisposable
         string? beforeConversationId = null,
         CancellationToken ct = default);
 
+    /// <summary>设置会话偏好（置顶/免打扰，超时 8 秒）。</summary>
     Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
         string conversationId,
         bool? pinned = null,
@@ -51,6 +71,7 @@ public interface IChatSessionClient : IDisposable
         long? mutedUntilMs = null,
         CancellationToken ct = default);
 
+    /// <summary>撤回已发送的消息（超时 8 秒）。</summary>
     Task<MessageRecallAcknowledgementDto> RecallMessageAsync(
         string messageId,
         CancellationToken ct = default);
