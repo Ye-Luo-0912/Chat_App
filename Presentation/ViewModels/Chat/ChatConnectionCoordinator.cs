@@ -130,8 +130,8 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
         var authTokenTask = _databaseService.GetTokenAsync();
         await Task.WhenAll(serverInfoTask, authTokenTask).ConfigureAwait(false);
 
-        var serverInfo = serverInfoTask.Result;
-        var authToken = authTokenTask.Result;
+        var serverInfo = await serverInfoTask.ConfigureAwait(false);
+        var authToken = await authTokenTask.ConfigureAwait(false);
 
         if (serverInfo is null || authToken is null || string.IsNullOrWhiteSpace(authToken.AccessToken))
         {

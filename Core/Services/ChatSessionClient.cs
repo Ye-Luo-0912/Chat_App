@@ -922,7 +922,8 @@ namespace Core.Services
                         UnreadCountChanged?.Invoke(this, unreadChanged);
                     return;
                 case PacketCommand.Error:
-                    var errorMsg = Encoding.UTF8.GetString(packet.Body.ToArray());
+                    // 零拷贝：codec 以单段 byte[] 构造 Body，直接用 FirstSpan 解码，避免 ToArray 堆分配
+                    var errorMsg = Encoding.UTF8.GetString(packet.Body.FirstSpan);
                     AuthenticationFailed?.Invoke(this, $"服务器错误：{errorMsg}");
                     return;
             }

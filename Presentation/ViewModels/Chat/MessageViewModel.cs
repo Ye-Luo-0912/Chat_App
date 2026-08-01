@@ -304,7 +304,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 : CurrFriend?.FriendId;
             ReplyDraftPreview = string.IsNullOrWhiteSpace(msg.Content)
                 ? (msg.HasAttachments ? msg.AttachmentSummary : "原消息")
-                : TruncatePreview(msg.Content);
+                : PreviewText.Truncate(msg.Content, 80);
         });
 
         ForwardMessageCommand = new RelayCommand(param =>
@@ -507,15 +507,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (string.IsNullOrWhiteSpace(update.MessageId))
             return;
 
-        if (CurrFriend is not null)
-        {
-            var peerId = CurrFriend.FriendId;
-            var selfId = _chatSession.CurrentUserId;
-            var touchesPeer = update.SenderUserId == peerId || update.ReceiverUserId == peerId;
-            var touchesSelf = update.SenderUserId == selfId || update.ReceiverUserId == selfId;
-            if (!touchesPeer || !touchesSelf)
-                return;
-        }
+        if (!TouchesCurrentConversation(update.SenderUserId, update.ReceiverUserId))
+            return;
 
         Dispatcher.UIThread.Post(() => ApplyRecalled(update.MessageId));
     }
@@ -525,18 +518,27 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (string.IsNullOrWhiteSpace(update.MessageId))
             return;
 
-        if (CurrFriend is not null)
-        {
-            var peerId = CurrFriend.FriendId;
-            var selfId = _chatSession.CurrentUserId;
-            var touchesPeer = update.SenderUserId == peerId || update.ReceiverUserId == peerId;
-            var touchesSelf = update.SenderUserId == selfId || update.ReceiverUserId == selfId;
-            if (!touchesPeer || !touchesSelf)
-                return;
-        }
+        if (!TouchesCurrentConversation(update.SenderUserId, update.ReceiverUserId))
+            return;
 
         Dispatcher.UIThread.Post(() =>
             ApplyEdited(update.MessageId, update.Content, update.EditVersion, update.EditedAtMs));
+    }
+
+    /// <summary>
+    /// 判断消息更新（撤回/编辑）是否影响当前会话。
+    /// 仅当更新涉及当前好友与当前用户双方时返回 true；无选中会话时放行。
+    /// </summary>
+    private bool TouchesCurrentConversation(long senderUserId, long receiverUserId)
+    {
+        if (CurrFriend is null)
+            return true;
+
+        var peerId = CurrFriend.FriendId;
+        var selfId = _chatSession.CurrentUserId;
+        var touchesPeer = senderUserId == peerId || receiverUserId == peerId;
+        var touchesSelf = senderUserId == selfId || receiverUserId == selfId;
+        return touchesPeer && touchesSelf;
     }
 
     private async Task RecallMessageAsync(Message? message, CancellationToken ct)
@@ -1211,8 +1213,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
             content = "转发消息";
 
         var forwardPreview = string.IsNullOrWhiteSpace(source.Content)
-            ? (source.HasAttachments ? TruncatePreview(source.AttachmentSummary) : "原消息")
-            : TruncatePreview(source.Content);
+            ? (source.HasAttachments ? PreviewText.Truncate(source.AttachmentSummary, 80) : "原消息")
+            : PreviewText.Truncate(source.Content, 80);
 
         var selfId = _currentUserContext.RequireUserId();
         var conversationId = ConversationId.CreateDirect(selfId, target.FriendId);
@@ -1689,12 +1691,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(EditDraftPreview));
         OnPropertyChanged(nameof(SendButtonText));
         ClearEditDraftCommand.RaiseCanExecuteChanged();
-    }
-
-    private static string TruncatePreview(string text)
-    {
-        var trimmed = text.Trim();
-        return trimmed.Length <= 80 ? trimmed : trimmed[..80] + "…";
     }
 
     public void Clear()

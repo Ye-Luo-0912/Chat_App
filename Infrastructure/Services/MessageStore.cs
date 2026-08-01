@@ -113,7 +113,7 @@ public sealed class MessageStore : IMessageStore
             Type = ConversationTypeDirect,
             PeerUserId = ConversationId.TryGetPeerUserId(conversationId, owner),
             LastMessageId = message.MessageId,
-            LastMessagePreview = BuildPreview(content),
+            LastMessagePreview = PreviewText.Truncate(content, 100),
             LastMessageAtMs = receivedAtMs,
             LastSenderUserId = dto.SenderUserId,
             // 发送方为自己时不递增未读；非自己时为增量 1（仅对未读消息生效，由事务内逻辑判定）。
@@ -473,13 +473,6 @@ public sealed class MessageStore : IMessageStore
         if (peer <= 0 || peer == selfId)
             return null;
         return ConversationId.CreateDirect(selfId, peer);
-    }
-
-    private static string BuildPreview(string content)
-    {
-        var s = content?.Trim() ?? string.Empty;
-        const int Max = 100;
-        return s.Length <= Max ? s : s[..Max] + "…";
     }
 
     private static long ToUnixMs(DateTime utc)

@@ -236,10 +236,10 @@ public class FriendsViewModel : ViewModelBase
             await Task.WhenAll(friendsTask, incomingTask, outgoingTask, blockedTask).ConfigureAwait(false);
 
             // 更新 UI 集合
-            UpdateCollection(_allFriends, friendsTask.Result);
-            UpdateCollection(IncomingRequests, incomingTask.Result);
-            UpdateCollection(OutgoingRequests, outgoingTask.Result);
-            UpdateCollection(BlockedUsers, blockedTask.Result);
+            UpdateCollection(_allFriends, await friendsTask.ConfigureAwait(false));
+            UpdateCollection(IncomingRequests, await incomingTask.ConfigureAwait(false));
+            UpdateCollection(OutgoingRequests, await outgoingTask.ConfigureAwait(false));
+            UpdateCollection(BlockedUsers, await blockedTask.ConfigureAwait(false));
 
             // 初始过滤
             FilterFriends();

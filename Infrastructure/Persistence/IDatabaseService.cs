@@ -42,13 +42,24 @@ public interface IDatabaseService
     Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft);
 
     // ---- 消息（P0-6）----
+    /// <summary>分页拉取会话历史消息（向后翻页， newest-first）。</summary>
+    /// <param name="limit">单页条数上限。</param>
+    /// <param name="beforeReceivedAtMs">游标：仅返回 ReceivedAtMs 严格小于该值的消息。</param>
+    /// <param name="beforeMessageId">同毫秒消息的 tie-breaker：与 beforeReceivedAtMs 配合排除该 Id 及之后的消息。</param>
+    /// <remarks>首次加载可不传游标；翻页时传入上一页最早消息的时间戳与 Id。</remarks>
     Task<List<LocalMessage>> GetMessagesAsync(long ownerUserId, string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null);
     Task<LocalMessage?> GetMessageByServerIdAsync(long ownerUserId, string messageId);
     Task<LocalMessage?> GetMessageByClientIdAsync(long ownerUserId, string clientMessageId);
     Task UpsertMessageAsync(LocalMessage message);
+    /// <summary>更新单条消息状态。</summary>
+    /// <param name="messageId">服务端消息 Id；与 clientMessageId 二选一非空用于定位行。</param>
+    /// <param name="clientMessageId">客户端幂等 Id；服务端尚未回填 MessageId 时用它定位。</param>
+    /// <param name="ackServerMessageId">ACK 接受时回填的服务端消息 Id（仅 status=Sent 时有意义）。</param>
+    /// <param name="failureReason">status=Failed 时的失败原因。</param>
     Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null);
     Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs);
     Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs);
+    /// <summary>前向增量拉取：返回 ReceivedAtMs &gt; afterReceivedAtMs 的消息，用于重连后 catch-up。</summary>
     Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100);
 
     /// <summary>
@@ -60,6 +71,7 @@ public interface IDatabaseService
     // ---- Outbox（P0-6）----
     Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox);
     Task<LocalOutboxMessage?> GetOutboxByClientIdAsync(long ownerUserId, string clientMessageId);
+    /// <summary>取出待发送/重试的 Outbox 记录（Queued/Sending/Failed），按创建时间升序，供 OutboxProcessor 轮询。</summary>
     Task<List<LocalOutboxMessage>> GetPendingOutboxAsync(long ownerUserId, int limit = 50);
     Task UpdateOutboxStatusAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
     Task DeleteOutboxAsync(long ownerUserId, string clientMessageId);
@@ -93,7 +105,14 @@ public interface IDatabaseService
     Task<LocalAttachment?> GetAttachmentByAttachmentIdAsync(long ownerUserId, string attachmentId);
     Task<LocalAttachment?> GetAttachmentByClientAttachmentIdAsync(long ownerUserId, string clientAttachmentId);
     Task<LocalAttachment?> GetAttachmentBySha256Async(long ownerUserId, string sha256);
+    /// <summary>按 AttachmentId upsert 附件元数据；AttachmentId 为空时按 ClientAttachmentId 定位（上传中场景）。</summary>
     Task UpsertAttachmentAsync(LocalAttachment attachment);
+    /// <summary>更新附件状态。</summary>
+    /// <param name="attachmentId">服务端附件 Id；与 clientAttachmentId 二选一非空定位行。</param>
+    /// <param name="clientAttachmentId">上传中尚未拿到服务端 Id 时用它定位。</param>
+    /// <param name="status">见 <see cref="LocalAttachment.Status"/>：0=Uploading,1=Available,2=Failed,3=Abandoned。</param>
+    /// <param name="downloadPath">下载路径（presign confirm 后回填）。</param>
+    /// <param name="failureReason">status=Failed/Abandoned 时的原因。</param>
     Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null);
 
     /// <summary>更新附件的本地上传路径和重试次数。传 null 表示不修改对应字段（localUploadingPath 传空字符串可清空）。</summary>
