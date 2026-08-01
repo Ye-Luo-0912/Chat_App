@@ -77,7 +77,7 @@ public sealed class OutboxProcessor : IDisposable
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(5), _cts.Token).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(DrainIntervalSec), _cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -118,7 +118,7 @@ public sealed class OutboxProcessor : IDisposable
                     continue;
 
                 // 永久失败：重试次数超限，不再发送
-                if (entry.Status == OutboxStatus.Failed && entry.RetryCount > 10)
+                if (entry.Status == OutboxStatus.Failed && entry.RetryCount > MaxRetryCount)
                     continue;
 
                 // 发送前标记 Sending，避免被下一轮重复拉取

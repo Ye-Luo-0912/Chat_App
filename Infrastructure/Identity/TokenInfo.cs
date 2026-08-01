@@ -61,11 +61,6 @@ public class TokenInfo
     }
 
     /// <summary>
-    /// 同步初始化（向后兼容）。推荐在异步上下文中使用 <see cref="InitAsync"/>。
-    /// </summary>
-    public void Init() => InitAsync().GetAwaiter().GetResult();
-
-    /// <summary>
     /// 登录成功后由外部直接设置内存中的 Token（LoginResult 中的数据已经完整）。
     /// </summary>
     public void SetToken(Token token)

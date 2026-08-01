@@ -128,7 +128,7 @@ public sealed class AttachmentRecoveryService
         // No local file path: abandon
         if (string.IsNullOrWhiteSpace(att.LocalUploadingPath))
         {
-            await _db.UpdateAttachmentStatusAsync(att.OwnerUserId, att.AttachmentId, att.ClientAttachmentId, 3, null, "Local file lost").ConfigureAwait(false);
+            await _db.UpdateAttachmentStatusAsync(att.OwnerUserId, att.AttachmentId, att.ClientAttachmentId, AttachmentStatus.Abandoned, null, "Local file lost").ConfigureAwait(false);
             return;
         }
 
@@ -136,7 +136,7 @@ public sealed class AttachmentRecoveryService
         var fullPath = _storage.ResolvePath(Path.Combine("uploading", att.LocalUploadingPath));
         if (!File.Exists(fullPath))
         {
-            await _db.UpdateAttachmentStatusAsync(att.OwnerUserId, att.AttachmentId, att.ClientAttachmentId, 3, null, "Local file lost").ConfigureAwait(false);
+            await _db.UpdateAttachmentStatusAsync(att.OwnerUserId, att.AttachmentId, att.ClientAttachmentId, AttachmentStatus.Abandoned, null, "Local file lost").ConfigureAwait(false);
             return;
         }
 
@@ -152,7 +152,7 @@ public sealed class AttachmentRecoveryService
 
         // Success: update metadata to Available
         att.AttachmentId = result.AttachmentId;
-        att.Status = 1;
+        att.Status = AttachmentStatus.Available;
         att.DownloadPath = result.DownloadPath;
         att.ObjectKey = result.ObjectKey;
         att.UpdatedAt = DateTime.UtcNow;

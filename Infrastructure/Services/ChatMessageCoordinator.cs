@@ -58,91 +58,44 @@ public sealed class ChatMessageCoordinator : IDisposable
     // 若用户未登录（RequireUserId 会抛异常），则以警告日志丢弃事件。
 
     private void OnChatMessageReceived(object? sender, ChatMessageDto dto)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到消息但用户未登录，丢弃 SenderUserId={SenderUserId}", dto.SenderUserId);
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.ChatMessage, userId, dto));
-    }
+        => EnqueueMutation(dto, InboundMutationKind.ChatMessage, "消息", dto.SenderUserId);
 
     private void OnMessageAcknowledged(object? sender, MessageAcknowledgementDto ack)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到消息确认但用户未登录，丢弃 ClientMessageId={ClientMessageId}", ack.ClientMessageId);
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.MessageAck, userId, ack));
-    }
+        => EnqueueMutation(ack, InboundMutationKind.MessageAck, "消息确认", ack.ClientMessageId);
 
     private void OnConversationChanged(object? sender, ConversationChangedDto dto)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到会话变更但用户未登录，丢弃 ConversationId={ConversationId}", dto.ConversationId);
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.ConversationChanged, userId, dto));
-    }
+        => EnqueueMutation(dto, InboundMutationKind.ConversationChanged, "会话变更", dto.ConversationId);
 
     private void OnMessageRecalled(object? sender, MessageRecalledUpdateDto update)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到消息撤回但用户未登录，丢弃 MessageId={MessageId}", update.MessageId);
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.MessageRecalled, userId, update));
-    }
+        => EnqueueMutation(update, InboundMutationKind.MessageRecalled, "消息撤回", update.MessageId);
 
     private void OnMessageEdited(object? sender, MessageEditedUpdateDto update)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到消息编辑但用户未登录，丢弃 MessageId={MessageId}", update.MessageId);
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.MessageEdited, userId, update));
-    }
+        => EnqueueMutation(update, InboundMutationKind.MessageEdited, "消息编辑", update.MessageId);
 
     private void OnMessageReceiptReceived(object? sender, MessageReceiptDto dto)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到已读回执但用户未登录，丢弃");
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.MessageReceiptReceived, userId, dto));
-    }
+        => EnqueueMutation(dto, InboundMutationKind.MessageReceiptReceived, "已读回执");
 
     private void OnMessageReceiptUpdated(object? sender, MessageReceiptUpdatedDto dto)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-        {
-            Log.Warning("收到已读状态更新但用户未登录，丢弃");
-            return;
-        }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.MessageReceiptUpdated, userId, dto));
-    }
+        => EnqueueMutation(dto, InboundMutationKind.MessageReceiptUpdated, "已读状态更新");
 
     private void OnUnreadCountChanged(object? sender, UnreadCountChangedDto dto)
+        => EnqueueMutation(dto, InboundMutationKind.UnreadCountChanged, "未读数变更", dto.ConversationId);
+
+    /// <summary>
+    /// 统一入站事件入队模板：捕获当前 OwnerUserId 后写入 Channel；
+    /// 用户未登录时以警告日志丢弃事件（P0-代码复用，消除 8 处重复骨架）。
+    /// </summary>
+    private void EnqueueMutation<T>(T payload, InboundMutationKind kind, string label, object? id = null)
     {
         if (!_currentUserContext.TryGetUserId(out var userId))
         {
-            Log.Warning("收到未读数变更但用户未登录，丢弃 ConversationId={ConversationId}", dto.ConversationId);
+            if (id is not null)
+                Log.Warning("收到{Label}但用户未登录，丢弃 {Id}", label, id);
+            else
+                Log.Warning("收到{Label}但用户未登录，丢弃", label);
             return;
         }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(
-            InboundMutationKind.UnreadCountChanged, userId, dto));
+        _inboundChannel.Writer.TryWrite(new InboundMutation(kind, userId, payload));
     }
 
     private async Task ConsumeLoopAsync()

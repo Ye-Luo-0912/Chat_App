@@ -4,6 +4,24 @@ using System.ComponentModel.DataAnnotations;
 namespace Infrastructure.Models;
 
 /// <summary>
+/// 附件状态枚举（底层 byte，与数据库列兼容）。
+/// </summary>
+public enum AttachmentStatus : byte
+{
+    /// <summary>上传中：文件已落盘到 uploading 目录，尚未得到服务端确认。</summary>
+    Uploading = 0,
+
+    /// <summary>可用：服务端已确认，可被下载/引用。</summary>
+    Available = 1,
+
+    /// <summary>失败：上传或确认过程出错，可重试。</summary>
+    Failed = 2,
+
+    /// <summary>放弃：永久失败或本地文件丢失，不再重试。</summary>
+    Abandoned = 3
+}
+
+/// <summary>
 /// 本地附件元数据记录。与 LocalMessage 多对一关联（通过 MessageId）。
 /// 也用于上传任务跟踪（MessageId 为空时表示未关联消息的上传中附件）。
 /// </summary>
@@ -59,8 +77,8 @@ public sealed class LocalAttachment
     /// <summary>上传重试次数。</summary>
     public int RetryCount { get; set; }
 
-    /// <summary>附件状态：0=Uploading, 1=Available, 2=Failed, 3=Abandoned。</summary>
-    public byte Status { get; set; }
+    /// <summary>附件状态。见 <see cref="AttachmentStatus"/>。</summary>
+    public AttachmentStatus Status { get; set; }
 
     /// <summary>失败原因。</summary>
     public string? FailureReason { get; set; }

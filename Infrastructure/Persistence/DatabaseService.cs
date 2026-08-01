@@ -1021,7 +1021,7 @@ public class DatabaseService(
         return await db.Attachments
             .AsNoTracking()
             .Where(a => a.OwnerUserId == ownerUserId && a.Sha256 == sha256)
-            .OrderByDescending(a => a.Status == 1 ? 1 : 0)
+            .OrderByDescending(a => a.Status == AttachmentStatus.Available ? 1 : 0)
             .FirstOrDefaultAsync(None);
     }
     public Task UpsertAttachmentAsync(LocalAttachment attachment) => WriteAsync(() => UpsertAttachmentAsyncImpl(attachment));
@@ -1079,9 +1079,9 @@ public class DatabaseService(
             // 幂等：并发写入导致唯一索引冲突，行已存在，忽略。
         }
     }
-    public Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null) => WriteAsync(() => UpdateAttachmentStatusAsyncImpl(ownerUserId, attachmentId, clientAttachmentId, status, downloadPath, failureReason));
+    public Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, AttachmentStatus status, string? downloadPath = null, string? failureReason = null) => WriteAsync(() => UpdateAttachmentStatusAsyncImpl(ownerUserId, attachmentId, clientAttachmentId, status, downloadPath, failureReason));
 
-    private async Task UpdateAttachmentStatusAsyncImpl(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null)
+    private async Task UpdateAttachmentStatusAsyncImpl(long ownerUserId, string? attachmentId, string? clientAttachmentId, AttachmentStatus status, string? downloadPath = null, string? failureReason = null)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var query = db.Attachments.Where(a => a.OwnerUserId == ownerUserId);
@@ -1153,7 +1153,7 @@ public class DatabaseService(
         // Status: 0=Uploading；按 CreatedAt 升序。
         return await db.Attachments
             .AsNoTracking()
-            .Where(a => a.OwnerUserId == ownerUserId && a.Status == 0)
+            .Where(a => a.OwnerUserId == ownerUserId && a.Status == AttachmentStatus.Uploading)
             .OrderBy(a => a.CreatedAt)
             .ToListAsync(None);
     }

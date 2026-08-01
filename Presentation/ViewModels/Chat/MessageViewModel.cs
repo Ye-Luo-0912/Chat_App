@@ -510,7 +510,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (!TouchesCurrentConversation(update.SenderUserId, update.ReceiverUserId))
             return;
 
-        Dispatcher.UIThread.Post(() => ApplyRecalled(update.MessageId));
+        PostIfCurrent(() => ApplyRecalled(update.MessageId));
     }
 
     private void OnMessageEdited(object? sender, MessageEditedUpdateDto update)
@@ -521,7 +521,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (!TouchesCurrentConversation(update.SenderUserId, update.ReceiverUserId))
             return;
 
-        Dispatcher.UIThread.Post(() =>
+        PostIfCurrent(() =>
             ApplyEdited(update.MessageId, update.Content, update.EditVersion, update.EditedAtMs));
     }
 
@@ -1406,7 +1406,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     ContentType = picked.ContentType,
                     SizeBytes = picked.ContentLength,
                     Sha256 = sha256,
-                    Status = 0,
+                    Status = AttachmentStatus.Uploading,
                     LocalUploadingPath = uploadingRelativePath,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
@@ -1467,7 +1467,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     DownloadPath = result.DownloadPath,
                     ObjectKey = result.ObjectKey,
                     LocalCachePath = localCachePath,
-                    Status = 1,
+                    Status = AttachmentStatus.Available,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
                 }).ConfigureAwait(true);
@@ -1501,7 +1501,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (string.IsNullOrEmpty(clientAttachmentId)) return;
         try
         {
-            await _dbService.UpdateAttachmentStatusAsync(_currentUserContext.RequireUserId(), null, clientAttachmentId, 2, null, reason).ConfigureAwait(true);
+            await _dbService.UpdateAttachmentStatusAsync(_currentUserContext.RequireUserId(), null, clientAttachmentId, AttachmentStatus.Failed, null, reason).ConfigureAwait(true);
         }
         catch (Exception ex)
         {

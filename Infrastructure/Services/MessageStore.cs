@@ -95,7 +95,7 @@ public sealed class MessageStore : IMessageStore
                     SizeBytes = att.SizeBytes,
                     DownloadPath = att.DownloadApiHint,
                     ThumbnailPath = att.ThumbnailApiHint,
-                    Status = (byte)(att.Status == 1 ? 1 : 0),
+                    Status = att.Status == 1 ? AttachmentStatus.Available : AttachmentStatus.Uploading,
                     CreatedAt = DateTime.UtcNow,
                     UpdatedAt = DateTime.UtcNow
                 });

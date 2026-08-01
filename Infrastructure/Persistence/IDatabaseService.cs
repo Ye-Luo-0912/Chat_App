@@ -110,10 +110,10 @@ public interface IDatabaseService
     /// <summary>更新附件状态。</summary>
     /// <param name="attachmentId">服务端附件 Id；与 clientAttachmentId 二选一非空定位行。</param>
     /// <param name="clientAttachmentId">上传中尚未拿到服务端 Id 时用它定位。</param>
-    /// <param name="status">见 <see cref="LocalAttachment.Status"/>：0=Uploading,1=Available,2=Failed,3=Abandoned。</param>
+    /// <param name="status">见 <see cref="AttachmentStatus"/>。</param>
     /// <param name="downloadPath">下载路径（presign confirm 后回填）。</param>
     /// <param name="failureReason">status=Failed/Abandoned 时的原因。</param>
-    Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, byte status, string? downloadPath = null, string? failureReason = null);
+    Task UpdateAttachmentStatusAsync(long ownerUserId, string? attachmentId, string? clientAttachmentId, AttachmentStatus status, string? downloadPath = null, string? failureReason = null);
 
     /// <summary>更新附件的本地上传路径和重试次数。传 null 表示不修改对应字段（localUploadingPath 传空字符串可清空）。</summary>
     Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null);
