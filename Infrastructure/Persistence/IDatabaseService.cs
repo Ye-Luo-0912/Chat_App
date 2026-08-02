@@ -39,6 +39,9 @@ public interface IDatabaseService
     Task<List<LocalConversation>> GetConversationsAsync(long ownerUserId);
     Task<LocalConversation?> GetConversationAsync(long ownerUserId, string conversationId);
     Task UpsertConversationAsync(LocalConversation conversation);
+
+    /// <summary>本地归档/删除状态落库（不随服务端同步 Upsert 覆盖）。</summary>
+    Task SetConversationLocalStateAsync(long ownerUserId, string conversationId, bool? archived = null, bool? deleted = null);
     Task DeleteConversationAsync(long ownerUserId, string conversationId);
 
     /// <summary>仅更新会话草稿（轻量写入，切换会话时保存输入框文本）。</summary>

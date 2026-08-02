@@ -11,19 +11,33 @@ using Avalonia.Threading;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
 
+/// <summary>
+/// 会话列表状态（会话中心）：以 LocalConversation 为 UI 数据源。
+/// 好友信息（显示名/在线状态）经共享好友索引注入，聊天列表与通讯录共用同一状态源。
+/// 负责：服务端会话列表投影、实时会话变化、本地会话合并、搜索过滤、置顶/最后活动排序、
+/// 归档/删除本地状态、未读角标与草稿摘要展示。
+/// </summary>
 public sealed class ChatFriendListState : IDisposable
 {
-    private readonly ObservableCollection<LocalFriend> _friends;
+    private readonly ObservableCollection<LocalConversation> _conversations;
+    private readonly ObservableCollection<LocalConversation> _filteredConversations;
+
+    // conversationId → 会话（含归档项，不含已删除项）
+    private readonly Dictionary<string, LocalConversation> _byId = new(StringComparer.Ordinal);
+    // 共享好友状态源：显示名/备注/在线状态（通讯录与聊天列表共用）
     private readonly Dictionary<long, LocalFriend> _friendsById = new();
-    private readonly ObservableCollection<LocalFriend> _filteredFriends;
+
     private string _searchText = string.Empty;
-    private LocalFriend? _selectedFriend;
+    private LocalConversation? _selectedConversation;
+    private bool _showArchived;
     private CancellationTokenSource? _searchDebounceCts;
 
-    public ChatFriendListState(ObservableCollection<LocalFriend> friends, ObservableCollection<LocalFriend> filteredFriends)
+    public ChatFriendListState(
+        ObservableCollection<LocalConversation> conversations,
+        ObservableCollection<LocalConversation> filteredConversations)
     {
-        _friends = friends;
-        _filteredFriends = filteredFriends;
+        _conversations = conversations;
+        _filteredConversations = filteredConversations;
     }
 
     public string SearchText
@@ -36,6 +50,7 @@ public sealed class ChatFriendListState : IDisposable
 
             _searchText = value;
             _searchDebounceCts?.Cancel();
+            _searchDebounceCts?.Dispose();
             _searchDebounceCts = new CancellationTokenSource();
             var token = _searchDebounceCts.Token;
             _ = Task.Delay(200, token).ContinueWith(_ =>
@@ -46,213 +61,251 @@ public sealed class ChatFriendListState : IDisposable
         }
     }
 
-    public LocalFriend? SelectedFriend
+    public LocalConversation? SelectedConversation
     {
-        get => _selectedFriend;
-        set => _selectedFriend = value;
+        get => _selectedConversation;
+        set => _selectedConversation = value;
     }
 
-    public void ReplaceFriends(IEnumerable<LocalFriend> friends)
+    /// <summary>归档视图开关：打开时在列表中展示已归档会话。</summary>
+    public bool ShowArchived
     {
-        // 增量同步 _friends：按 FriendId 对比，删除消失项、就地更新已有项字段、追加新增项。
-        // 保留已有对象引用，避免 Clear+Add 重建全部 item container 并丢失会话派生状态（置顶/免打扰/预览/在线）。
-        // Tombstone 项（IsDeleted）不进入列表：已删除好友退出聊天列表。
-        var incoming = (friends as IList<LocalFriend> ?? friends.ToList())
-            .Where(f => !f.IsDeleted)
-            .ToList();
-        var incomingById = new Dictionary<long, LocalFriend>(incoming.Count);
-        foreach (var f in incoming)
-            incomingById[f.FriendId] = f;
-
-        // 1. 从后往前删除新列表中不存在的项
-        for (var i = _friends.Count - 1; i >= 0; i--)
+        get => _showArchived;
+        set
         {
-            if (!incomingById.ContainsKey(_friends[i].FriendId))
-            {
-                _friendsById.Remove(_friends[i].FriendId);
-                _friends.RemoveAt(i);
-            }
+            if (_showArchived == value)
+                return;
+            _showArchived = value;
+            ApplyFilter();
+        }
+    }
+
+    public bool HasArchivedConversations => _conversations.Any(c => c.Archived);
+
+    /// <summary>按会话 Id 查找（含归档项，不含已删除项）。</summary>
+    public LocalConversation? FindConversation(string conversationId) =>
+        _byId.TryGetValue(conversationId, out var conv) ? conv : null;
+
+    /// <summary>从会话外入口（如通讯录跳转）新建/更新会话并展示。</summary>
+    public void UpsertLocalConversation(LocalConversation conversation)
+    {
+        if (_byId.ContainsKey(conversation.ConversationId))
+        {
+            _byId[conversation.ConversationId] = conversation;
+            ApplyFilter();
+            return;
         }
 
-        // 2. 就地更新已有项的好友表字段（保留 target 的会话派生字段 IsPinned/IsMuted/LastMessagePreview/IsOnline）
-        for (var i = 0; i < _friends.Count; i++)
-        {
-            if (incomingById.TryGetValue(_friends[i].FriendId, out var src))
-                CopyFriendTableFields(_friends[i], src);
-        }
-
-        // 3. 追加新增项（顺序按 incoming；_friends 顺序不影响 UI，排序由 ApplyFilter 统一处理）
-        foreach (var f in incoming)
-        {
-            if (_friendsById.TryAdd(f.FriendId, f))
-                _friends.Add(f);
-        }
-
+        _byId[conversation.ConversationId] = conversation;
+        _conversations.Add(conversation);
         ApplyFilter();
     }
 
-    /// <summary>
-    /// 将 src 的好友表字段复制到 target（保留 target 的会话派生状态：置顶/免打扰/预览/在线）。
-    /// DisplayName 按 Note→FriendName 规则重算，与服务端 DTO 转换（FriendDtoExtensions.ToLocalFriend）保持一致。
-    /// </summary>
-    private static void CopyFriendTableFields(LocalFriend target, LocalFriend src)
+    // ── 共享好友状态源 ────────────────────────────────────
+
+    public IReadOnlyCollection<long> FriendIds => _friendsById.Keys;
+
+    public bool TryGetFriend(long peerId, out LocalFriend friend) =>
+        _friendsById.TryGetValue(peerId, out friend!);
+
+    /// <summary>替换好友状态源（含 tombstone 过滤），并刷新所有会话的显示名/在线状态。</summary>
+    public void ApplyFriends(IEnumerable<LocalFriend> friends)
     {
-        target.FriendName = src.FriendName;
-        target.AvatarUrl = src.AvatarUrl;
-        target.Note = src.Note;
-        target.Status = src.Status;
-        target.LastSynced = src.LastSynced;
-        target.DisplayName = string.IsNullOrWhiteSpace(src.Note)
-            ? (src.FriendName ?? string.Empty)
-            : src.Note;
+        _friendsById.Clear();
+        foreach (var f in friends)
+        {
+            if (!f.IsDeleted)
+                _friendsById[f.FriendId] = f;
+        }
+
+        foreach (var conv in _conversations)
+            RefreshDisplayName(conv);
     }
 
+    /// <summary>好友在线状态变化：更新索引并同步当前会话展示。</summary>
+    public void ApplyPresence(long userId, bool isOnline)
+    {
+        if (_friendsById.TryGetValue(userId, out var friend))
+            friend.IsOnline = isOnline;
+
+        if (_selectedConversation?.PeerUserId == userId)
+            _selectedConversation.PeerIsOnline = isOnline;
+        foreach (var conv in _conversations)
+        {
+            if (conv.PeerUserId == userId)
+                conv.PeerIsOnline = isOnline;
+        }
+    }
+
+    // ── 会话层 ──────────────────────────────────────────
+
+    /// <summary>服务端会话列表投影：新增/更新会话（不覆盖本地草稿/归档/删除状态）。</summary>
     public void ApplyConversationPrefs(IReadOnlyList<ConversationListItemDto> items, long selfUserId)
     {
         foreach (var item in items)
         {
-            var peerId = item.PeerUserId
-                ?? ConversationId.TryGetPeerUserId(item.ConversationId, selfUserId);
-            if (peerId is not long friendId)
+            if (string.IsNullOrEmpty(item.ConversationId))
                 continue;
-
-            _friendsById.TryGetValue(friendId, out var friend);
-            // 好友缺失（已删除/从未是好友）时以会话条目承载：创建合成项，保证历史会话不消失。
-            if (friend is null)
-                friend = CreateSessionEntry(friendId, selfUserId);
-
-            friend.IsPinned = item.IsPinned;
-            friend.PinnedAtMs = item.PinnedAtMs;
-            friend.IsMuted = item.IsMuted;
-            friend.MutedUntilMs = item.MutedUntilMs;
-            if (!string.IsNullOrWhiteSpace(item.LastMessagePreview))
-                friend.LastMessagePreview = item.LastMessagePreview;
+            var conv = GetOrCreate(item.ConversationId, selfUserId);
+            CopyDtoToConversation(conv, item);
+            RefreshDisplayName(conv);
         }
 
         ApplyFilter();
     }
 
+    /// <summary>实时会话变化（新消息/置顶/免打扰等）。</summary>
     public void ApplyConversationChanged(ConversationChangedDto changed, long selfUserId)
     {
-        var peerId = changed.PeerUserId
-            ?? ConversationId.TryGetPeerUserId(changed.ConversationId, selfUserId);
-        if (peerId is not long friendId)
+        if (string.IsNullOrEmpty(changed.ConversationId))
             return;
 
-        _friendsById.TryGetValue(friendId, out var friend);
-        // 好友缺失时同样以会话条目承载，保持会话变更可见。
-        if (friend is null)
-            friend = CreateSessionEntry(friendId, selfUserId);
+        var conv = GetOrCreate(changed.ConversationId, selfUserId);
+        if (changed.LastMessageId is not null)
+            conv.LastMessageId = changed.LastMessageId;
+        if (changed.LastMessagePreview is not null)
+            conv.LastMessagePreview = changed.LastMessagePreview;
+        if (changed.LastMessageAtMs is long atMs)
+            conv.LastMessageAtMs = atMs;
+        if (changed.LastSenderUserId is long sender)
+            conv.LastSenderUserId = sender;
 
         if (changed.IsPinned is bool pinned)
         {
-            friend.IsPinned = pinned;
-            if (!pinned)
-                friend.PinnedAtMs = null;
-            else if (friend.PinnedAtMs is null)
-                friend.PinnedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            conv.IsPinned = pinned;
+            conv.PinnedAtMs = pinned
+                ? (conv.PinnedAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                : null;
         }
 
         if (changed.IsMuted is bool muted)
         {
-            friend.IsMuted = muted;
-            friend.MutedUntilMs = muted ? changed.MutedUntilMs : null;
+            conv.IsMuted = muted;
+            conv.MutedUntilMs = muted ? changed.MutedUntilMs : null;
         }
 
-        if (!string.IsNullOrWhiteSpace(changed.LastMessagePreview))
-            friend.LastMessagePreview = changed.LastMessagePreview;
+        RefreshDisplayName(conv);
+        ApplyFilter();
+    }
+
+    /// <summary>启动时合并本地会话（含草稿/归档/删除状态），仅新增，服务端字段随后覆盖。</summary>
+    public void ApplyLocalConversations(IEnumerable<LocalConversation> conversations)
+    {
+        foreach (var conv in conversations)
+        {
+            if (conv.IsDeleted || string.IsNullOrEmpty(conv.ConversationId))
+                continue;
+            if (_byId.ContainsKey(conv.ConversationId))
+                continue;
+            _byId[conv.ConversationId] = conv;
+            _conversations.Add(conv);
+            RefreshDisplayName(conv);
+        }
 
         ApplyFilter();
     }
 
-    /// <summary>
-    /// 会话条目承载：本地无好友记录时创建合成项（FriendId 恒为 peerId），
-    /// 使历史会话不依赖好友数据即可显示。好友同步回来后在 ReplaceFriends 中就地升级为真实好友。
-    /// </summary>
-    private LocalFriend CreateSessionEntry(long friendId, long selfUserId)
+    /// <summary>归档会话：从主列表移除，可从归档视图恢复。</summary>
+    public void ArchiveConversation(string conversationId)
     {
-        var display = $"用户 {friendId}";
-        var entry = new LocalFriend
+        if (_byId.TryGetValue(conversationId, out var conv))
         {
-            OwnerUserId = selfUserId,
-            FriendId = friendId,
-            FriendName = display,
-            DisplayName = display,
-            Status = FriendshipStatus.Approved
-        };
-        _friendsById[friendId] = entry;
-        _friends.Add(entry);
-        return entry;
+            conv.Archived = true;
+            conv.IsPinned = false;
+            ApplyFilter();
+        }
+    }
+
+    /// <summary>恢复归档会话。</summary>
+    public void UnarchiveConversation(string conversationId)
+    {
+        if (_byId.TryGetValue(conversationId, out var conv))
+        {
+            conv.Archived = false;
+            ApplyFilter();
+        }
+    }
+
+    /// <summary>本地删除会话：从列表与索引移除，DB 保留删除标记防止服务端同步复活。</summary>
+    public void RemoveConversation(string conversationId)
+    {
+        if (!_byId.TryGetValue(conversationId, out var conv))
+            return;
+        _byId.Remove(conversationId);
+        _conversations.Remove(conv);
+        _filteredConversations.Remove(conv);
+        if (ReferenceEquals(_selectedConversation, conv))
+            _selectedConversation = null;
+        ApplyFilter();
     }
 
     public void ApplyFilter()
     {
         var text = _searchText.Trim();
-        IEnumerable<LocalFriend> filtered = string.IsNullOrEmpty(text)
-            ? _friends
-            : _friends.Where(f =>
-                (f.FriendName?.Contains(text, StringComparison.OrdinalIgnoreCase) == true)
-                || f.FriendId.ToString().Contains(text, StringComparison.OrdinalIgnoreCase)
-                || (!string.IsNullOrWhiteSpace(f.DisplayName)
-                    && f.DisplayName.Contains(text, StringComparison.OrdinalIgnoreCase)));
+        IEnumerable<LocalConversation> filtered = _conversations
+            .Where(c => !c.IsDeleted)
+            .Where(c => _showArchived ? c.Archived : !c.Archived);
+
+        if (!string.IsNullOrEmpty(text))
+        {
+            filtered = filtered.Where(c =>
+                c.Title.Contains(text, StringComparison.OrdinalIgnoreCase)
+                || (c.LastMessagePreview?.Contains(text, StringComparison.OrdinalIgnoreCase) == true)
+                || (c.Draft?.Contains(text, StringComparison.OrdinalIgnoreCase) == true));
+        }
 
         var ordered = filtered
-            .OrderByDescending(f => f.IsPinned)
-            .ThenByDescending(f => f.PinnedAtMs ?? 0)
-            .ThenBy(f => f.DisplayName ?? f.FriendName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(c => c.IsPinned)
+            .ThenByDescending(c => c.PinnedAtMs ?? 0)
+            .ThenByDescending(c => c.LastMessageAtMs ?? 0)
             .ToList();
 
-        // 增量 diff：只更新变化的部分，避免 Clear+Add 导致 UI 重建所有 item container
-        ApplyIncrementalDiff(ordered);
+        ApplyIncrementalDiff(_filteredConversations, ordered, c => c.ConversationId);
     }
 
     /// <summary>
-    /// 增量更新 _filteredFriends：删除不再匹配的项，插入新增的项，移动顺序变化的项。
+    /// 增量更新绑定列表：删除消失项、插入新增项、移动顺序变化的项。
     /// 保留未变化项的 item container，避免 UI 重建。
     /// </summary>
-    private void ApplyIncrementalDiff(List<LocalFriend> source)
+    private static void ApplyIncrementalDiff<T>(
+        ObservableCollection<T> target, List<T> source, Func<T, string> keyOf)
     {
-        if (_filteredFriends.Count == 0)
+        if (target.Count == 0)
         {
             foreach (var item in source)
-                _filteredFriends.Add(item);
+                target.Add(item);
             return;
         }
 
         if (source.Count == 0)
         {
-            _filteredFriends.Clear();
+            target.Clear();
             return;
         }
 
-        // 构建新列表的 FriendId → index 映射
-        var sourceIds = new Dictionary<long, int>(source.Count);
+        var sourceIds = new Dictionary<string, int>(source.Count);
         for (var i = 0; i < source.Count; i++)
-            sourceIds[source[i].FriendId] = i;
+            sourceIds[keyOf(source[i])] = i;
 
-        // 从后往前删除不在新列表中的项
-        for (var i = _filteredFriends.Count - 1; i >= 0; i--)
+        for (var i = target.Count - 1; i >= 0; i--)
         {
-            if (!sourceIds.ContainsKey(_filteredFriends[i].FriendId))
-                _filteredFriends.RemoveAt(i);
+            if (!sourceIds.ContainsKey(keyOf(target[i])))
+                target.RemoveAt(i);
         }
 
-        // 从前往后遍历，移动或插入到正确位置
         for (int srcIdx = 0, tgtIdx = 0; srcIdx < source.Count; srcIdx++)
         {
             var srcItem = source[srcIdx];
-            if (tgtIdx < _filteredFriends.Count && _filteredFriends[tgtIdx].FriendId == srcItem.FriendId)
+            if (tgtIdx < target.Count && keyOf(target[tgtIdx]) == keyOf(srcItem))
             {
-                // 位置正确，跳过
                 tgtIdx++;
                 continue;
             }
 
-            // 查找该项是否已在列表后续位置（需要移动）
             var found = -1;
-            for (var j = tgtIdx; j < _filteredFriends.Count; j++)
+            for (var j = tgtIdx; j < target.Count; j++)
             {
-                if (_filteredFriends[j].FriendId == srcItem.FriendId)
+                if (keyOf(target[j]) == keyOf(srcItem))
                 {
                     found = j;
                     break;
@@ -261,15 +314,66 @@ public sealed class ChatFriendListState : IDisposable
 
             if (found >= 0)
             {
-                _filteredFriends.Move(found, tgtIdx);
+                target.Move(found, tgtIdx);
                 tgtIdx++;
             }
             else
             {
-                _filteredFriends.Insert(tgtIdx, srcItem);
+                target.Insert(tgtIdx, srcItem);
                 tgtIdx++;
             }
         }
+    }
+
+    /// <summary>按会话 Id 获取或创建会话项（新建时加入列表与索引）。</summary>
+    private LocalConversation GetOrCreate(string conversationId, long selfUserId)
+    {
+        if (_byId.TryGetValue(conversationId, out var existing))
+            return existing;
+
+        var conv = new LocalConversation
+        {
+            OwnerUserId = selfUserId,
+            ConversationId = conversationId
+        };
+        _byId[conversationId] = conv;
+        _conversations.Add(conv);
+        return conv;
+    }
+
+    /// <summary>从共享好友索引注入显示名/在线状态（无好友记录时 Title 兜底"用户 {id}"）。</summary>
+    private void RefreshDisplayName(LocalConversation conv)
+    {
+        if (conv.PeerUserId is long peerId && _friendsById.TryGetValue(peerId, out var friend))
+        {
+            conv.PeerDisplayName = string.IsNullOrWhiteSpace(friend.DisplayName)
+                ? friend.FriendName
+                : friend.DisplayName;
+            conv.PeerIsOnline = friend.IsOnline;
+        }
+        else
+        {
+            conv.PeerDisplayName = null;
+            conv.PeerIsOnline = false;
+        }
+    }
+
+    /// <summary>服务端字段投影到会话（草稿/归档/删除等本地状态不覆盖）。</summary>
+    private static void CopyDtoToConversation(LocalConversation target, ConversationListItemDto src)
+    {
+        target.Type = (byte)src.Type;
+        target.PeerUserId = src.PeerUserId;
+        target.LastMessageId = src.LastMessageId;
+        target.LastMessagePreview = src.LastMessagePreview;
+        target.LastMessageAtMs = src.LastMessageAtMs;
+        target.LastSenderUserId = src.LastSenderUserId;
+        target.UnreadCount = src.UnreadCount;
+        target.LastReadMessageId = src.LastReadMessageId;
+        target.LastReadAtMs = src.LastReadAtMs;
+        target.IsPinned = src.IsPinned;
+        target.PinnedAtMs = src.PinnedAtMs;
+        target.IsMuted = src.IsMuted;
+        target.MutedUntilMs = src.MutedUntilMs;
     }
 
     public void Dispose()

@@ -161,7 +161,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         {
             Log.Information("通过通讯录跳转到聊天页面: 好友={FriendName}", e.Friend.FriendName);
             await NavigateToFriends(CancellationToken.None);
-            _chatViewModel.SelectedFriend = e.Friend;
+            _chatViewModel.OpenDirectConversation(e.Friend);
             IsFriendsSelected = true;
             IsContactsSelected = false;
         }

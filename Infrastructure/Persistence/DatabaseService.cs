@@ -306,12 +306,16 @@ public class DatabaseService(
 
     // ---- 会话（持久化聊天系统）----
 
+    /// <summary>加载会话列表（不含已删除），排序与 UI 一致：置顶优先，其次最后活动时间。</summary>
     public async Task<List<LocalConversation>> GetConversationsAsync(long ownerUserId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         return await db.Conversations
             .AsNoTracking()
-            .Where(c => c.OwnerUserId == ownerUserId)
+            .Where(c => c.OwnerUserId == ownerUserId && !c.IsDeleted)
+            .OrderByDescending(c => c.IsPinned)
+            .ThenByDescending(c => c.PinnedAtMs)
+            .ThenByDescending(c => c.LastMessageAtMs)
             .ToListAsync(None);
     }
 
@@ -324,6 +328,24 @@ public class DatabaseService(
     }
 
     public Task UpsertConversationAsync(LocalConversation conversation) => WriteAsync(() => UpsertConversationAsyncImpl(conversation));
+
+    /// <summary>本地归档/删除状态落库（不随服务端同步 Upsert 覆盖，本地状态独立于远端）。</summary>
+    public Task SetConversationLocalStateAsync(long ownerUserId, string conversationId, bool? archived = null, bool? deleted = null) =>
+        WriteAsync(() => SetConversationLocalStateAsyncImpl(ownerUserId, conversationId, archived, deleted));
+
+    private async Task SetConversationLocalStateAsyncImpl(long ownerUserId, string conversationId, bool? archived, bool? deleted)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var entity = await db.Conversations
+            .FirstOrDefaultAsync(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId, None);
+        if (entity is null)
+            return;
+        if (archived is bool a)
+            entity.Archived = a;
+        if (deleted is bool d)
+            entity.IsDeleted = d;
+        await db.SaveChangesAsync(None);
+    }
 
     private async Task UpsertConversationAsyncImpl(LocalConversation conversation)
     {

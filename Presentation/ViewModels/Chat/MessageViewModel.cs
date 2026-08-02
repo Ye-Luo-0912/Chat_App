@@ -41,7 +41,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IAttachmentDownloadService _downloadService;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
-    private LocalFriend? CurrFriend { get; set; }
+    private long CurrPeerId { get; set; }
     private string? CurrConversationId { get; set; }
 
     // 会话切换代际与取消令牌：防止快速切换 A→B 时 A 的异步历史/已读任务污染 B（七）。
@@ -226,7 +226,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         AttachFileCommand = new AsyncRelayCommand(
             AttachFileAsync,
-            () => !IsUploading && CurrFriend is not null,
+            () => !IsUploading && CurrPeerId > 0,
             ex =>
             {
                 Log.Error(ex, "附件上传失败");
@@ -308,7 +308,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _replyToMessageId = msg.MessageId;
             _replyToSenderUserId = msg.IsSentByMe
                 ? _chatSession.CurrentUserId
-                : CurrFriend?.FriendId;
+                : (CurrPeerId > 0 ? CurrPeerId : null);
             ReplyDraftPreview = string.IsNullOrWhiteSpace(msg.Content)
                 ? (msg.HasAttachments ? msg.AttachmentSummary : "原消息")
                 : PreviewText.Truncate(msg.Content, 80);
@@ -563,10 +563,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     /// </summary>
     private bool TouchesCurrentConversation(long senderUserId, long receiverUserId)
     {
-        if (CurrFriend is null)
+        if (CurrPeerId <= 0)
             return true;
 
-        var peerId = CurrFriend.FriendId;
+        var peerId = CurrPeerId;
         var selfId = _chatSession.CurrentUserId;
         var touchesPeer = senderUserId == peerId || receiverUserId == peerId;
         var touchesSelf = senderUserId == selfId || receiverUserId == selfId;
@@ -646,7 +646,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
             MessageMutationKind.Edit, content, editVersion, editedAtMs));
     }
 
-    public void Init(LocalFriend selectedFriend)
+    /// <summary>
+    /// 初始化当前会话（会话中心：以 LocalConversation 为数据源）。
+    /// 无好友记录的直聊历史会话同样可打开（PeerUserId 缺失时仅浏览与发送受限）。
+    /// </summary>
+    public void Init(LocalConversation conversation)
     {
         // 强制 flush 上一会话完整草稿（在清空输入状态前捕获快照，异步落库不阻塞切换）
         if (CurrConversationId is not null && _currentUserContext.HasUserId)
@@ -656,8 +660,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = SaveDraftSnapshotAsync(prevOwner, prevConv);
         }
 
-        var previousPeerId = CurrFriend?.FriendId ?? 0;
-        if (previousPeerId > 0 && previousPeerId != selectedFriend.FriendId)
+        var targetPeerId = conversation.PeerUserId ?? 0;
+        var previousPeerId = CurrPeerId;
+        if (previousPeerId > 0 && previousPeerId != targetPeerId)
             _ = UnwatchPeerPresenceAsync(previousPeerId);
 
         // 取消上一会话所有进行中的加载/已读/同步任务，并提升代际（七）。
@@ -665,18 +670,19 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var generation = ++_conversationGeneration;
         var ct = _conversationCts.Token;
 
-        CurrFriend = selectedFriend;
+        CurrPeerId = targetPeerId;
         try
         {
-            CurrConversationId = ConversationId.CreateDirect(
-                _currentUserContext.RequireUserId(), selectedFriend.FriendId);
+            CurrConversationId = string.IsNullOrWhiteSpace(conversation.ConversationId)
+                ? ConversationId.CreateDirect(_currentUserContext.RequireUserId(), targetPeerId)
+                : conversation.ConversationId;
         }
         catch
         {
             CurrConversationId = null;
         }
-        PeerTitle = selectedFriend.Title;
-        PeerIsOnline = selectedFriend.IsOnline;
+        PeerTitle = conversation.Title;
+        PeerIsOnline = conversation.PeerIsOnline;
         IsPeerTyping = false;
         CancelPeerTypingClear();
         ClearMessages();
@@ -689,8 +695,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
         UploadProgress = 0;
         IsUploading = false;
         AttachFileCommand.RaiseCanExecuteChanged();
-        Log.Debug("MessageView 初始化: 好友={FriendName}", selectedFriend.FriendName);
-        _ = RefreshPeerPresenceAsync(selectedFriend.FriendId);
+        Log.Debug("MessageView 初始化: 会话={Title}", conversation.Title);
+        if (CurrPeerId > 0)
+            _ = RefreshPeerPresenceAsync(CurrPeerId);
 
         // 顺序：加载本地最新页 → 渲染 → 标记实际最后可见消息已读 → 后台同步缺失消息（七）。
         // 全程校验代际，代际不匹配即放弃，避免快速切换 A→B 时 A 的结果污染 B。
@@ -1017,7 +1024,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task MarkCurrentConversationReadAsync(long generation, CancellationToken ct)
     {
-        if (CurrConversationId is null || CurrFriend is null)
+        if (CurrConversationId is null || CurrPeerId <= 0)
             return;
         try
         {
@@ -1123,13 +1130,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
     /// <summary>将同步 catch-up 消息合并进当前打开的会话（按 MessageId 去重）。</summary>
     public void ApplyCatchUp(IReadOnlyList<MessageHistoryItemDto> items)
     {
-        if (CurrFriend is null || items.Count == 0)
+        if (CurrPeerId <= 0 || items.Count == 0)
             return;
 
         if (CurrConversationId is not null)
             _ = _messageStore.PersistHistoryAsync(_chatSession.CurrentSession, CurrConversationId, items);
 
-        var peerId = CurrFriend.FriendId;
+        var peerId = CurrPeerId;
         var selfId = _chatSession.CurrentUserId;
 
         // 去重依赖 FindMessage 的 _messagesByServerId 索引：已存在则更新，本次循环新追加的也会被后续 FindMessage 命中。
@@ -1241,7 +1248,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task SendMessage(CancellationToken ct)
     {
-        if (CurrFriend is null) return;
+        if (CurrPeerId <= 0) return;
 
         var text = NewMessage?.Trim();
         var hasText = !string.IsNullOrWhiteSpace(text);
@@ -1310,7 +1317,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var replyPreview = _replyDraftPreview;
 
         var selfId = _currentUserContext.RequireUserId();
-        var conversationId = ConversationId.CreateDirect(selfId, CurrFriend.FriendId);
+        var conversationId = CurrConversationId
+            ?? ConversationId.CreateDirect(selfId, CurrPeerId);
         var nowUtc = DateTime.UtcNow;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -1318,7 +1326,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var attachmentsJson = hasAttachments ? AttachmentJson.Serialize(attachments) : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
-        var targetUserId = CurrFriend.FriendId;
+        var targetUserId = CurrPeerId;
 
         var outbox = new LocalOutboxMessage
         {
@@ -1390,17 +1398,24 @@ public class MessageViewModel : ViewModelBase, IDisposable
     }
 
     /// <summary>
-    /// 转发消息到指定好友：仅文本（或附件摘要），带 ForwardedFrom*，不含附件与回复。
-    /// 调用时 CurrFriend 仍应为来源会话（先发送再 Init 目标会话）。
+    /// 转发消息到指定会话：仅文本（或附件摘要），带 ForwardedFrom*，不含附件与回复。
+    /// 调用时当前会话仍应为来源会话（先发送再 Init 目标会话）。
     /// 返回可插入目标会话的本地气泡（调用方在 Init 之后添加）。
     /// </summary>
     public async Task<Message?> ExecuteForwardAsync(
-        LocalFriend target,
+        LocalConversation target,
         Message source,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(source);
+
+        var targetPeerId = target.PeerUserId ?? 0;
+        if (targetPeerId <= 0)
+        {
+            _notificationService.ShowError("无法转发到该会话。");
+            return null;
+        }
 
         if (source.IsRecalled || string.IsNullOrWhiteSpace(source.MessageId))
         {
@@ -1411,8 +1426,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         long forwardSenderId;
         if (source.IsSentByMe)
             forwardSenderId = _chatSession.CurrentUserId;
-        else if (CurrFriend is not null)
-            forwardSenderId = CurrFriend.FriendId;
+        else if (CurrPeerId > 0)
+            forwardSenderId = CurrPeerId;
         else
             forwardSenderId = 0;
 
@@ -1435,7 +1450,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
             : PreviewText.Truncate(source.Content, 80);
 
         var selfId = _currentUserContext.RequireUserId();
-        var conversationId = ConversationId.CreateDirect(selfId, target.FriendId);
+        var conversationId = string.IsNullOrWhiteSpace(target.ConversationId)
+            ? ConversationId.CreateDirect(selfId, targetPeerId)
+            : target.ConversationId;
         var nowUtc = DateTime.UtcNow;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var clientMessageId = Guid.CreateVersion7().ToString("N");
@@ -1445,7 +1462,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             OwnerUserId = selfId,
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
-            TargetUserId = target.FriendId,
+            TargetUserId = targetPeerId,
             Content = content,
             ForwardedFromMessageId = source.MessageId,
             ForwardedFromSenderUserId = forwardSenderId,
@@ -1460,7 +1477,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
             SenderUserId = selfId,
-            ReceiverUserId = target.FriendId,
+            ReceiverUserId = targetPeerId,
             Content = content,
             ReceivedAtMs = nowMs,
             ForwardedFromMessageId = source.MessageId,
@@ -1485,7 +1502,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         // UI 仅事务化入库，网络发送全部由 OutboxProcessor 执行；
         // 发布事件提示排空器立即发送，后续状态经 OutboxStatusChangedEvent 回流 UI。
-        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, target.FriendId));
+        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, targetPeerId));
 
         return new Message
         {
@@ -1503,7 +1520,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task AttachFileAsync(CancellationToken ct)
     {
-        if (CurrFriend is null) return;
+        if (CurrPeerId <= 0) return;
         if (PickAttachmentAsync is null)
         {
             _notificationService.ShowError("No file picker available.");
@@ -1843,13 +1860,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     public void Clear()
     {
-        var peerId = CurrFriend?.FriendId ?? 0;
+        var peerId = CurrPeerId;
         _ = StopTypingAsync();
         if (peerId > 0)
             _ = UnwatchPeerPresenceAsync(peerId);
 
         CancelConversationOperations();
-        CurrFriend = null;
+        CurrPeerId = 0;
         CurrConversationId = null;
         PeerTitle = string.Empty;
         PeerIsOnline = false;
@@ -1866,7 +1883,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public void Dispose()
     {
         CancelPeerTypingClear();
-        var peerId = CurrFriend?.FriendId ?? 0;
+        var peerId = CurrPeerId;
         if (peerId > 0)
             _ = UnwatchPeerPresenceAsync(peerId);
 
@@ -1893,7 +1910,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private void OnTypingUpdated(object? sender, TypingUpdateDto update)
     {
-        if (CurrFriend is null || update.SenderUserId != CurrFriend.FriendId)
+        if (CurrPeerId <= 0 || update.SenderUserId != CurrPeerId)
             return;
 
         Dispatcher.UIThread.Post(() =>
@@ -1914,14 +1931,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private void OnPresenceChanged(object? sender, PresenceChangedDto update)
     {
-        if (CurrFriend is null || update.UserId != CurrFriend.FriendId)
+        if (CurrPeerId <= 0 || update.UserId != CurrPeerId)
             return;
 
-        Dispatcher.UIThread.Post(() =>
-        {
-            PeerIsOnline = update.IsOnline;
-            CurrFriend.IsOnline = update.IsOnline;
-        });
+        Dispatcher.UIThread.Post(() => PeerIsOnline = update.IsOnline);
     }
 
     private async Task RefreshPeerPresenceAsync(long friendId)
@@ -1937,8 +1950,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 return;
 
             PeerIsOnline = item.IsOnline;
-            if (CurrFriend?.FriendId == friendId)
-                CurrFriend.IsOnline = item.IsOnline;
+            if (CurrPeerId == friendId)
+                PeerIsOnline = item.IsOnline;
         }
         catch (Exception ex)
         {
@@ -1963,7 +1976,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task NotifyTypingFromComposerAsync()
     {
-        if (CurrFriend is null
+        if (CurrPeerId <= 0
             || !_chatSession.IsConnected
             || !_chatSession.IsAuthenticated)
         {
@@ -1983,9 +1996,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         try
         {
             await _chatSession.SendTypingNotifyAsync(
-                    CurrFriend.FriendId,
+                    CurrPeerId,
                     true,
-                    ConversationId.CreateDirect(_chatSession.CurrentUserId, CurrFriend.FriendId))
+                    CurrConversationId
+                        ?? ConversationId.CreateDirect(_chatSession.CurrentUserId, CurrPeerId))
                 .ConfigureAwait(false);
             _typingActive = true;
             _lastTypingSentUtc = now;
@@ -1998,7 +2012,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task StopTypingAsync()
     {
-        if (!_typingActive || CurrFriend is null)
+        if (!_typingActive || CurrPeerId <= 0)
         {
             _typingActive = false;
             return;
@@ -2010,9 +2024,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
             if (_chatSession.IsConnected && _chatSession.IsAuthenticated)
             {
                 await _chatSession.SendTypingNotifyAsync(
-                        CurrFriend.FriendId,
+                        CurrPeerId,
                         false,
-                        ConversationId.CreateDirect(_chatSession.CurrentUserId, CurrFriend.FriendId))
+                        CurrConversationId
+                            ?? ConversationId.CreateDirect(_chatSession.CurrentUserId, CurrPeerId))
                     .ConfigureAwait(false);
             }
         }

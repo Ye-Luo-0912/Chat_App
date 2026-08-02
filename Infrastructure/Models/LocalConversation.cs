@@ -1,11 +1,13 @@
 using System.ComponentModel;
+using System.ComponentModel.DataAnnotations.Schema;
 using System.Runtime.CompilerServices;
 
 namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 本地会话摘要实体（持久化聊天系统）。
+/// 本地会话实体（会话中心数据源）。
 /// 每个 (OwnerUserId, ConversationId) 全局唯一。
+/// UI 列表以本实体为数据源；显示名/在线等好友派生信息经 <see cref="PeerDisplayName"/> 注入。
 /// </summary>
 public class LocalConversation : INotifyPropertyChanged
 {
@@ -47,7 +49,11 @@ public class LocalConversation : INotifyPropertyChanged
         set
         {
             if (SetField(ref _unreadCount, value))
+            {
                 OnPropertyChanged(nameof(HasUnread));
+                OnPropertyChanged(nameof(UnreadBadgeText));
+                OnPropertyChanged(nameof(UnreadBadgeVisibility));
+            }
         }
     }
 
@@ -59,7 +65,14 @@ public class LocalConversation : INotifyPropertyChanged
     public bool IsPinned
     {
         get => _isPinned;
-        set => SetField(ref _isPinned, value);
+        set
+        {
+            if (SetField(ref _isPinned, value))
+            {
+                OnPropertyChanged(nameof(PinGlyph));
+                OnPropertyChanged(nameof(PinnedAtMs));
+            }
+        }
     }
 
     public long? PinnedAtMs { get; set; }
@@ -68,13 +81,29 @@ public class LocalConversation : INotifyPropertyChanged
     public bool IsMuted
     {
         get => _isMuted;
-        set => SetField(ref _isMuted, value);
+        set
+        {
+            if (SetField(ref _isMuted, value))
+            {
+                OnPropertyChanged(nameof(MuteGlyph));
+                OnPropertyChanged(nameof(Subtitle));
+            }
+        }
     }
 
     public long? MutedUntilMs { get; set; }
 
     /// <summary>会话输入框草稿（未发送的文本），持久化到 DB，切换会话后恢复。</summary>
-    public string? Draft { get; set; }
+    private string? _draft;
+    public string? Draft
+    {
+        get => _draft;
+        set
+        {
+            if (SetField(ref _draft, value))
+                OnPropertyChanged(nameof(Subtitle));
+        }
+    }
 
     /// <summary>完整草稿 JSON（文本/回复目标/编辑目标/待发送附件），见 <see cref="DraftState"/>。</summary>
     public string? DraftState { get; set; }
@@ -85,11 +114,80 @@ public class LocalConversation : INotifyPropertyChanged
     /// <summary>草稿修订号，单调递增，防止旧草稿覆盖新草稿。</summary>
     public int DraftRevision { get; set; }
 
+    /// <summary>归档标记：已归档会话从主列表隐藏，可从归档视图恢复。</summary>
+    public bool Archived { get; set; }
+
+    /// <summary>本地删除标记：已删除会话不再从服务端同步中复活。</summary>
+    public bool IsDeleted { get; set; }
+
     public DateTime LastSynced { get; set; }
 
     public bool HasUnread => UnreadCount > 0;
 
     public bool HasLastMessage => !string.IsNullOrWhiteSpace(LastMessagePreview);
+
+    // ── UI 展示辅助（非持久化，由会话列表层注入好友派生信息） ──────────
+
+    private string? _peerDisplayName;
+    [NotMapped]
+    public string? PeerDisplayName
+    {
+        get => _peerDisplayName;
+        set
+        {
+            if (SetField(ref _peerDisplayName, value))
+            {
+                OnPropertyChanged(nameof(Title));
+                OnPropertyChanged(nameof(Initial));
+            }
+        }
+    }
+
+    private bool _peerIsOnline;
+    [NotMapped]
+    public bool PeerIsOnline
+    {
+        get => _peerIsOnline;
+        set
+        {
+            if (SetField(ref _peerIsOnline, value))
+                OnPropertyChanged(nameof(IsOffline));
+        }
+    }
+
+    [NotMapped]
+    public bool IsOffline => !PeerIsOnline;
+
+    [NotMapped]
+    public string Title =>
+        !string.IsNullOrWhiteSpace(PeerDisplayName)
+            ? PeerDisplayName!
+            : PeerUserId is long peer ? $"用户 {peer}" : "会话";
+
+    [NotMapped]
+    public string Initial =>
+        Title.Length > 0 ? Title[..1] : "?";
+
+    [NotMapped]
+    public string PinGlyph => IsPinned ? "📌" : string.Empty;
+
+    [NotMapped]
+    public string MuteGlyph => IsMuted ? "🔕" : string.Empty;
+
+    [NotMapped]
+    public bool UnreadBadgeVisibility => UnreadCount > 0;
+
+    [NotMapped]
+    public string UnreadBadgeText => UnreadCount > 99 ? "99+" : UnreadCount.ToString();
+
+    /// <summary>列表副标题：草稿优先，其次最后消息预览。</summary>
+    [NotMapped]
+    public string Subtitle =>
+        !string.IsNullOrWhiteSpace(Draft)
+            ? $"草稿: {Draft!.ReplaceLineEndings(" ")}"
+            : !string.IsNullOrWhiteSpace(LastMessagePreview)
+                ? LastMessagePreview!
+                : (IsMuted ? "消息免打扰" : "暂无消息");
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

@@ -82,10 +82,10 @@
                     </Border>
                 </StackPanel>
 
-                <!-- 消息列表 (使用 FilteredFriends 绑定) -->
-                <ListBox x:Name="FriendList"
-                         ItemsSource="{Binding FilteredFriends}"
-                         SelectedItem="{Binding SelectedFriend, Mode=TwoWay}"
+                <!-- 会话列表 (使用 FilteredConversations 绑定) -->
+                <ListBox x:Name="ConversationList"
+                         ItemsSource="{Binding FilteredConversations}"
+                         SelectedItem="{Binding SelectedConversation, Mode=TwoWay}"
                          Background="White"
                          Padding="4"
                          BorderThickness="0">
@@ -95,22 +95,33 @@
                         </ItemsPanelTemplate>
                     </ListBox.ItemsPanel>
                     <ListBox.ItemTemplate>
-                        <DataTemplate DataType="models:LocalFriend">
+                        <DataTemplate DataType="models:LocalConversation">
                             <controls:FriendsItemControl Margin="0 1">
                                 <controls:FriendsItemControl.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="置顶"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).PinFriendCommand}"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).PinConversationCommand}"
                                                   CommandParameter="{Binding}"/>
                                         <MenuItem Header="取消置顶"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnpinFriendCommand}"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnpinConversationCommand}"
                                                   CommandParameter="{Binding}"/>
                                         <Separator/>
                                         <MenuItem Header="消息免打扰"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).MuteFriendCommand}"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).MuteConversationCommand}"
                                                   CommandParameter="{Binding}"/>
                                         <MenuItem Header="关闭免打扰"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnmuteFriendCommand}"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnmuteConversationCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <Separator/>
+                                        <MenuItem Header="归档会话"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).ArchiveConversationCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <MenuItem Header="恢复归档"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnarchiveConversationCommand}"
+                                                  CommandParameter="{Binding}"/>
+                                        <Separator/>
+                                        <MenuItem Header="删除会话"
+                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).DeleteConversationCommand}"
                                                   CommandParameter="{Binding}"/>
                                     </ContextMenu>
                                 </controls:FriendsItemControl.ContextMenu>
@@ -138,7 +149,7 @@
                 <TextBlock Text="💬"
                            FontSize="48"
                            HorizontalAlignment="Center"/>
-                <TextBlock Text="选择左侧好友开始聊天"
+                <TextBlock Text="选择左侧会话开始聊天"
                            FontSize="16"
                            Foreground="#888"
                            HorizontalAlignment="Center"/>

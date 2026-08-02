@@ -5,12 +5,12 @@
              xmlns:models="clr-namespace:Chat_App.Infrastructure.Models;assembly=Infrastructure"
              mc:Ignorable="d"
              x:Class="Chat_App.Presentation.Controls.FriendsItemControl"
-             x:DataType="models:LocalFriend"
+             x:DataType="models:LocalConversation"
              d:DesignWidth="220"
              d:DesignHeight="60">
 
     <Border Name="HighlightBorder" CornerRadius="8" Padding="4 2">
-        <Grid Height="56" ColumnDefinitions="Auto,*,Auto">
+        <Grid Height="56" ColumnDefinitions="Auto,*,Auto,Auto">
             <Border Width="40" Height="40" CornerRadius="20" Background="#DBEAFE"
                     VerticalAlignment="Center" Margin="4 0 10 0">
                 <Panel>
@@ -26,7 +26,7 @@
                              Stroke="White"
                              StrokeThickness="1.5"
                              Fill="#22C55E"
-                             IsVisible="{Binding IsOnline}"/>
+                             IsVisible="{Binding PeerIsOnline}"/>
                     <Ellipse Width="10" Height="10"
                              HorizontalAlignment="Right"
                              VerticalAlignment="Bottom"
@@ -58,6 +58,23 @@
                 <TextBlock Text="{Binding PinGlyph}" FontSize="12"/>
                 <TextBlock Text="{Binding MuteGlyph}" FontSize="12"/>
             </StackPanel>
+
+            <Border Grid.Column="3"
+                    CornerRadius="10"
+                    Background="#EF4444"
+                    MinWidth="18"
+                    Height="18"
+                    Padding="4 0"
+                    VerticalAlignment="Center"
+                    Margin="4 0 4 0"
+                    IsVisible="{Binding UnreadBadgeVisibility}">
+                <TextBlock Text="{Binding UnreadBadgeText}"
+                           Foreground="White"
+                           FontSize="11"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Border>
         </Grid>
     </Border>
 </UserControl>

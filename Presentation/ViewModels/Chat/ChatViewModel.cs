@@ -6,6 +6,7 @@ using Core.Helpers;
 using Core.Interfaces;
 using Core.Models.DTO;
 using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Services;
 using Serilog;
 using System;
@@ -25,6 +26,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly IChatConnectionCoordinator _connectionCoordinator;
     private readonly IChatSessionClient _chatSession;
     private readonly ISyncEngine _syncEngine;
+    private readonly IDatabaseService _dbService;
+    private readonly ICurrentUserContext _currentUserContext;
     private readonly ChatFriendListState _friendListState;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly SemaphoreSlim _friendSyncLock = new(1, 1);
@@ -32,10 +35,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private bool _disposed;
     private Message? _pendingForwardMessage;
     private long[] _watchedPresenceUserIds = [];
-    private readonly Dictionary<long, LocalFriend> _friendsById = new();
 
-    public ObservableCollection<LocalFriend> Friends { get; } = [];
-    public ObservableCollection<LocalFriend> FilteredFriends { get; } = [];
+    public ObservableCollection<LocalConversation> Conversations { get; } = [];
+    public ObservableCollection<LocalConversation> FilteredConversations { get; } = [];
 
     private string _searchText = string.Empty;
     public string SearchText
@@ -66,31 +68,38 @@ public class ChatViewModel : ViewModelBase, IDisposable
     }
 
     public string ForwardHintText =>
-        IsSelectingForwardTarget ? "选择要转发到的好友…" : string.Empty;
+        IsSelectingForwardTarget ? "选择要转发到的会话…" : string.Empty;
 
-    private LocalFriend? _selectedFriend;
-    public LocalFriend? SelectedFriend
+    private LocalConversation? _selectedConversation;
+    public LocalConversation? SelectedConversation
     {
-        get => _selectedFriend;
+        get => _selectedConversation;
         set
         {
             if (IsSelectingForwardTarget && _pendingForwardMessage is not null && value is not null)
             {
                 var source = _pendingForwardMessage;
-                var sourceFriend = _selectedFriend;
-                // 允许转发到当前会话：即使 SelectedFriend 未变也继续
-                _ = SetProperty(ref _selectedFriend, value);
-                _friendListState.SelectedFriend = value;
+                var sourceConversation = _selectedConversation;
+                // 允许转发到当前会话：即使 SelectedConversation 未变也继续
+                _ = SetProperty(ref _selectedConversation, value);
+                _friendListState.SelectedConversation = value;
                 ClearForwardSelection();
-                _ = CompleteForwardAsync(value, source, sourceFriend);
+                _ = CompleteForwardAsync(value, source, sourceConversation);
                 return;
             }
 
-            if (SetProperty(ref _selectedFriend, value))
+            if (SetProperty(ref _selectedConversation, value))
             {
-                _friendListState.SelectedFriend = value;
+                _friendListState.SelectedConversation = value;
                 if (value is not null)
                 {
+                    // 打开会话即清零本地未读角标（服务端未读数随后续会话列表同步校正）
+                    if (value.UnreadCount > 0)
+                    {
+                        value.UnreadCount = 0;
+                        _friendListState.ApplyFilter();
+                    }
+
                     _messageViewModel.Init(value);
                     CurrentMessage = _messageViewModel;
                 }
@@ -157,10 +166,13 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _ => DisconnectedBrush
     };
 
-    public AsyncRelayCommand<LocalFriend> PinFriendCommand { get; }
-    public AsyncRelayCommand<LocalFriend> UnpinFriendCommand { get; }
-    public AsyncRelayCommand<LocalFriend> MuteFriendCommand { get; }
-    public AsyncRelayCommand<LocalFriend> UnmuteFriendCommand { get; }
+    public AsyncRelayCommand<LocalConversation> PinConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> UnpinConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> MuteConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> UnmuteConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> ArchiveConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> UnarchiveConversationCommand { get; }
+    public AsyncRelayCommand<LocalConversation> DeleteConversationCommand { get; }
     public AsyncRelayCommand CancelForwardCommand { get; }
 
 #pragma warning disable CS8618
@@ -169,17 +181,42 @@ public class ChatViewModel : ViewModelBase, IDisposable
         if (Avalonia.Controls.Design.IsDesignMode)
         {
             _isInitialized = true;
-            Friends.Add(new LocalFriend { FriendName = "马化腾 (预览)", FriendId = 10001, DisplayName = "马化腾 (预览)", IsPinned = true });
-            Friends.Add(new LocalFriend { FriendName = "张小龙 (预览)", FriendId = 10002, DisplayName = "张小龙 (预览)", IsMuted = true });
-            Friends.Add(new LocalFriend { FriendName = "Avalonia 机器人", FriendId = 10003, DisplayName = "Avalonia 机器人" });
+            Conversations.Add(new LocalConversation
+            {
+                ConversationId = "preview-1",
+                PeerUserId = 10001,
+                PeerDisplayName = "马化腾 (预览)",
+                IsPinned = true,
+                LastMessagePreview = "好的，收到",
+                LastMessageAtMs = DateTimeOffset.Now.AddMinutes(-5).ToUnixTimeMilliseconds()
+            });
+            Conversations.Add(new LocalConversation
+            {
+                ConversationId = "preview-2",
+                PeerUserId = 10002,
+                PeerDisplayName = "张小龙 (预览)",
+                IsMuted = true,
+                LastMessagePreview = "[图片]",
+                LastMessageAtMs = DateTimeOffset.Now.AddHours(-2).ToUnixTimeMilliseconds()
+            });
+            Conversations.Add(new LocalConversation
+            {
+                ConversationId = "preview-3",
+                PeerUserId = 10003,
+                PeerDisplayName = "Avalonia 机器人",
+                LastMessagePreview = "你好，有什么可以帮你？",
+                LastMessageAtMs = DateTimeOffset.Now.AddDays(-1).ToUnixTimeMilliseconds()
+            });
 
-            _friendListState = new ChatFriendListState(Friends, FilteredFriends);
-            RebuildFriendsIndex();
+            _friendListState = new ChatFriendListState(Conversations, FilteredConversations);
             _friendListState.ApplyFilter();
-            PinFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
-            UnpinFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
-            MuteFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
-            UnmuteFriendCommand = new AsyncRelayCommand<LocalFriend>(_ => Task.CompletedTask);
+            PinConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            UnpinConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            MuteConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            UnmuteConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            ArchiveConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            UnarchiveConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            DeleteConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
             CancelForwardCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
         }
     }
@@ -191,7 +228,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
         IChatFriendLoader friendLoader,
         IChatConnectionCoordinator connectionCoordinator,
         IChatSessionClient chatSessionClient,
-        ISyncEngine syncEngine)
+        ISyncEngine syncEngine,
+        IDatabaseService dbService,
+        ICurrentUserContext currentUserContext)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
@@ -199,27 +238,44 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _connectionCoordinator = connectionCoordinator;
         _chatSession = chatSessionClient;
         _syncEngine = syncEngine;
-        _friendListState = new ChatFriendListState(Friends, FilteredFriends);
+        _dbService = dbService;
+        _currentUserContext = currentUserContext;
+        _friendListState = new ChatFriendListState(Conversations, FilteredConversations);
 
-        PinFriendCommand = new AsyncRelayCommand<LocalFriend>(
-            friend => SetPrefsAsync(friend, pinned: true),
-            friend => friend is not null && !friend.IsPinned,
+        PinConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            conversation => SetConversationPrefsAsync(conversation, pinned: true),
+            conversation => conversation is not null && !conversation.IsPinned,
             ex => _notificationService.ShowError($"置顶失败: {ex.Message}"));
 
-        UnpinFriendCommand = new AsyncRelayCommand<LocalFriend>(
-            friend => SetPrefsAsync(friend, pinned: false),
-            friend => friend is not null && friend.IsPinned,
+        UnpinConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            conversation => SetConversationPrefsAsync(conversation, pinned: false),
+            conversation => conversation is not null && conversation.IsPinned,
             ex => _notificationService.ShowError($"取消置顶失败: {ex.Message}"));
 
-        MuteFriendCommand = new AsyncRelayCommand<LocalFriend>(
-            friend => SetPrefsAsync(friend, muted: true),
-            friend => friend is not null && !friend.IsMuted,
+        MuteConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            conversation => SetConversationPrefsAsync(conversation, muted: true),
+            conversation => conversation is not null && !conversation.IsMuted,
             ex => _notificationService.ShowError($"开启免打扰失败: {ex.Message}"));
 
-        UnmuteFriendCommand = new AsyncRelayCommand<LocalFriend>(
-            friend => SetPrefsAsync(friend, muted: false),
-            friend => friend is not null && friend.IsMuted,
+        UnmuteConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            conversation => SetConversationPrefsAsync(conversation, muted: false),
+            conversation => conversation is not null && conversation.IsMuted,
             ex => _notificationService.ShowError($"关闭免打扰失败: {ex.Message}"));
+
+        ArchiveConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            ArchiveConversationAsync,
+            conversation => conversation is not null && !conversation.Archived,
+            ex => _notificationService.ShowError($"归档失败: {ex.Message}"));
+
+        UnarchiveConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            UnarchiveConversationAsync,
+            conversation => conversation is not null && conversation.Archived,
+            ex => _notificationService.ShowError($"恢复归档失败: {ex.Message}"));
+
+        DeleteConversationCommand = new AsyncRelayCommand<LocalConversation>(
+            DeleteConversationAsync,
+            conversation => conversation is not null,
+            ex => _notificationService.ShowError($"删除会话失败: {ex.Message}"));
 
         CancelForwardCommand = new AsyncRelayCommand(
             _ =>
@@ -240,30 +296,19 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _syncEngine.Completed += OnSyncCompleted;
     }
 
-    private void RebuildFriendsIndex()
-    {
-        _friendsById.Clear();
-        foreach (var f in Friends)
-            _friendsById[f.FriendId] = f;
-    }
-
     private void OnPresenceChanged(object? sender, Core.Models.DTO.PresenceChangedDto e)
     {
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (_friendsById.TryGetValue(e.UserId, out var friend))
-                friend.IsOnline = e.IsOnline;
-        });
+        Dispatcher.UIThread.Post(() => _friendListState.ApplyPresence(e.UserId, e.IsOnline));
     }
 
     private async Task RefreshPresenceAsync(CancellationToken ct)
     {
-        if (!_chatSession.IsAuthenticated || Friends.Count == 0)
+        if (!_chatSession.IsAuthenticated || _friendListState.FriendIds.Count == 0)
             return;
 
         try
         {
-            var ids = Friends.Select(f => f.FriendId).Where(id => id > 0).Distinct().ToArray();
+            var ids = _friendListState.FriendIds.Where(id => id > 0).Distinct().ToArray();
             if (ids.Length == 0)
                 return;
 
@@ -272,13 +317,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
                 foreach (var item in snap.Items)
-                {
-                    if (_friendsById.TryGetValue(item.UserId, out var friend))
-                        friend.IsOnline = item.IsOnline;
-                }
-
-                if (SelectedFriend is not null && _friendsById.TryGetValue(SelectedFriend.FriendId, out var selected))
-                    SelectedFriend.IsOnline = selected.IsOnline;
+                    _friendListState.ApplyPresence(item.UserId, item.IsOnline);
             });
         }
         catch (Exception ex)
@@ -316,14 +355,14 @@ public class ChatViewModel : ViewModelBase, IDisposable
     }
 
     private async Task CompleteForwardAsync(
-        LocalFriend target,
+        LocalConversation target,
         Message source,
-        LocalFriend? sourceFriend)
+        LocalConversation? sourceConversation)
     {
         Message? localBubble = null;
         try
         {
-            // CurrFriend 仍为来源会话，先发送再 Init 目标
+            // 当前会话仍为来源会话，先发送再 Init 目标
             localBubble = await _messageViewModel.ExecuteForwardAsync(target, source)
                 .ConfigureAwait(true);
         }
@@ -334,8 +373,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
         }
         finally
         {
-            // 切到其他好友才 Init；转发到当前会话只追加气泡，避免清空历史
-            if (sourceFriend?.FriendId != target.FriendId)
+            // 切到其他会话才 Init；转发到当前会话只追加气泡，避免清空历史
+            if (sourceConversation?.ConversationId != target.ConversationId)
             {
                 _messageViewModel.Init(target);
                 CurrentMessage = _messageViewModel;
@@ -359,16 +398,27 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
             try
             {
+                List<LocalConversation>? conversations = null;
+                if (_currentUserContext.HasUserId)
+                {
+                    var owner = _currentUserContext.UserId!.Value;
+                    conversations = await _dbService.GetConversationsAsync(owner);
+                }
+
                 var friends = await _friendLoader.LoadAsync(ct);
-                _friendListState.ReplaceFriends(friends);
-                RebuildFriendsIndex();
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (conversations is { Count: > 0 })
+                        _friendListState.ApplyLocalConversations(conversations);
+                    _friendListState.ApplyFriends(friends);
+                });
                 _isInitialized = true;
                 if (_chatSession.IsAuthenticated)
                     _ = RefreshPresenceAsync(ct);
             }
             catch (Exception ex)
             {
-                _notificationService.ShowError($"加载好友列表失败: {ex.Message}");
+                _notificationService.ShowError($"加载会话列表失败: {ex.Message}");
             }
 
             try
@@ -409,8 +459,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             var synced = await _friendLoader.SyncFromServerAsync();
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                _friendListState.ReplaceFriends(synced);
-                RebuildFriendsIndex();
+                _friendListState.ApplyFriends(synced);
 
                 if (_lastConversations is { Count: > 0 })
                     _friendListState.ApplyConversationPrefs(_lastConversations, _chatSession.CurrentUserId);
@@ -449,12 +498,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
                 _friendListState.ApplyConversationPrefs(e.Conversations, _chatSession.CurrentUserId);
                 RaisePrefsCommands();
 
-                if (SelectedFriend is null || e.CatchUps.Count == 0)
+                if (SelectedConversation is null || e.CatchUps.Count == 0)
                     return;
 
-                var conversationId = ConversationId.CreateDirect(
-                    _chatSession.CurrentUserId,
-                    SelectedFriend.FriendId);
+                var conversationId = SelectedConversation.ConversationId;
                 var catchUp = e.CatchUps.FirstOrDefault(c =>
                     string.Equals(c.ConversationId, conversationId, StringComparison.Ordinal));
                 if (catchUp is not null)
@@ -534,9 +581,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
         return allItems;
     }
 
-    private async Task SetPrefsAsync(LocalFriend? friend, bool? pinned = null, bool? muted = null)
+    private async Task SetConversationPrefsAsync(LocalConversation? conversation, bool? pinned = null, bool? muted = null)
     {
-        if (friend is null)
+        if (conversation is null)
             return;
         if (!_chatSession.IsAuthenticated)
         {
@@ -544,9 +591,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        var conversationId = ConversationId.CreateDirect(_chatSession.CurrentUserId, friend.FriendId);
         var response = await _chatSession.SetConversationPrefsAsync(
-                conversationId,
+                conversation.ConversationId,
                 pinned,
                 muted,
                 mutedUntilMs: null)
@@ -558,14 +604,15 @@ public class ChatViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        friend.IsPinned = response.IsPinned;
-        friend.IsMuted = response.IsMuted;
-        friend.MutedUntilMs = response.MutedUntilMs;
-        if (response.IsPinned && friend.PinnedAtMs is null)
-            friend.PinnedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        conversation.IsPinned = response.IsPinned;
+        conversation.IsMuted = response.IsMuted;
+        conversation.MutedUntilMs = response.MutedUntilMs;
+        if (response.IsPinned && conversation.PinnedAtMs is null)
+            conversation.PinnedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         if (!response.IsPinned)
-            friend.PinnedAtMs = null;
+            conversation.PinnedAtMs = null;
 
+        _ = _dbService.UpsertConversationAsync(conversation);
         _friendListState.ApplyFilter();
         RaisePrefsCommands();
         _notificationService.ShowSuccess(
@@ -575,12 +622,84 @@ public class ChatViewModel : ViewModelBase, IDisposable
             "已关闭免打扰");
     }
 
+    /// <summary>归档会话：仅本地标记，服务端不感知；列表隐藏，可在归档视图恢复。</summary>
+    private async Task ArchiveConversationAsync(LocalConversation? conversation)
+    {
+        if (conversation is null)
+            return;
+
+        _friendListState.ArchiveConversation(conversation.ConversationId);
+        await _dbService.SetConversationLocalStateAsync(
+            _chatSession.CurrentUserId, conversation.ConversationId, archived: true).ConfigureAwait(true);
+        RaisePrefsCommands();
+    }
+
+    /// <summary>恢复归档会话。</summary>
+    private async Task UnarchiveConversationAsync(LocalConversation? conversation)
+    {
+        if (conversation is null)
+            return;
+
+        _friendListState.UnarchiveConversation(conversation.ConversationId);
+        await _dbService.SetConversationLocalStateAsync(
+            _chatSession.CurrentUserId, conversation.ConversationId, archived: false).ConfigureAwait(true);
+        RaisePrefsCommands();
+    }
+
+    /// <summary>本地删除会话：列表与索引移除，DB 保留删除标记，防止服务端同步复活。</summary>
+    private async Task DeleteConversationAsync(LocalConversation? conversation)
+    {
+        if (conversation is null)
+            return;
+
+        if (SelectedConversation?.ConversationId == conversation.ConversationId)
+            SelectedConversation = null;
+
+        _friendListState.RemoveConversation(conversation.ConversationId);
+        await _dbService.SetConversationLocalStateAsync(
+            _chatSession.CurrentUserId, conversation.ConversationId, deleted: true).ConfigureAwait(true);
+        RaisePrefsCommands();
+    }
+
     private void RaisePrefsCommands()
     {
-        PinFriendCommand.RaiseCanExecuteChanged();
-        UnpinFriendCommand.RaiseCanExecuteChanged();
-        MuteFriendCommand.RaiseCanExecuteChanged();
-        UnmuteFriendCommand.RaiseCanExecuteChanged();
+        PinConversationCommand.RaiseCanExecuteChanged();
+        UnpinConversationCommand.RaiseCanExecuteChanged();
+        MuteConversationCommand.RaiseCanExecuteChanged();
+        UnmuteConversationCommand.RaiseCanExecuteChanged();
+        ArchiveConversationCommand.RaiseCanExecuteChanged();
+        UnarchiveConversationCommand.RaiseCanExecuteChanged();
+        DeleteConversationCommand.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>会话外入口（如通讯录跳转）：按好友定位/新建直聊会话并打开。</summary>
+    public void OpenDirectConversation(LocalFriend friend)
+    {
+        if (friend is null || friend.FriendId <= 0)
+            return;
+
+        var userId = _chatSession.CurrentUserId;
+        if (userId <= 0)
+            return;
+
+        var conversationId = ConversationId.CreateDirect(userId, friend.FriendId);
+        var conv = _friendListState.FindConversation(conversationId);
+        if (conv is null)
+        {
+            conv = new LocalConversation
+            {
+                OwnerUserId = userId,
+                ConversationId = conversationId,
+                PeerUserId = friend.FriendId,
+                PeerDisplayName = string.IsNullOrWhiteSpace(friend.DisplayName)
+                    ? friend.FriendName
+                    : friend.DisplayName,
+                PeerIsOnline = friend.IsOnline
+            };
+            _friendListState.UpsertLocalConversation(conv);
+        }
+
+        SelectedConversation = conv;
     }
 
     /// <summary>强制落盘当前会话草稿（退出登录/窗口关闭前调用）。</summary>
@@ -599,13 +718,12 @@ public class ChatViewModel : ViewModelBase, IDisposable
         SearchText = string.Empty;
         _watchedPresenceUserIds = [];
 
-        Friends.Clear();
-        FilteredFriends.Clear();
-        RebuildFriendsIndex();
+        Conversations.Clear();
+        FilteredConversations.Clear();
         _friendListState.ApplyFilter();
 
         _messageViewModel.Clear();
-        SelectedFriend = null;
+        SelectedConversation = null;
         CurrentMessage = null;
     }
     public void Dispose()
