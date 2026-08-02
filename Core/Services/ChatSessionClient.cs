@@ -589,6 +589,8 @@ namespace Core.Services
             CancellationToken ct)
         {
             var requestId = Guid.NewGuid().ToString("N");
+            // 请求 DTO 与 pending 键必须使用同一 RequestId，否则服务器回显后无法匹配。
+            SetRequestId(payload, requestId);
             var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
             if (!pending.TryAdd(requestId, tcs))
                 throw new InvalidOperationException(conflictMessage);
@@ -604,6 +606,17 @@ namespace Core.Services
             {
                 pending.TryRemove(requestId, out _);
             }
+        }
+
+        /// <summary>将 pending 键回填到请求 DTO 的 RequestId 属性（请求/响应配对的前提）。</summary>
+        private static void SetRequestId(object payload, string requestId)
+        {
+            if (payload is null)
+                return;
+            var property = payload.GetType().GetProperty(
+                "RequestId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (property is not null && property.CanWrite && property.PropertyType == typeof(string))
+                property.SetValue(payload, requestId);
         }
 
         /// <summary>规整 presence 用户 Id 列表：过滤无效值、去重、截断到上限。</summary>
