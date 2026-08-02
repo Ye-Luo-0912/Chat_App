@@ -91,6 +91,10 @@ public class Message : INotifyPropertyChanged
             OnPropertyChanged(nameof(IsPending));
             OnPropertyChanged(nameof(IsRead));
             OnPropertyChanged(nameof(IsRecalled));
+            OnPropertyChanged(nameof(IsSendFailed));
+            OnPropertyChanged(nameof(StatusGlyphText));
+            OnPropertyChanged(nameof(StatusGlyphColor));
+            OnPropertyChanged(nameof(StatusGlyphVisibility));
             OnPropertyChanged(nameof(DisplayContent));
             OnPropertyChanged(nameof(HasAttachments));
             OnPropertyChanged(nameof(HasReply));
@@ -99,9 +103,48 @@ public class Message : INotifyPropertyChanged
         }
     }
 
+    /// <summary>发送失败原因（服务端错误或本地异常描述），Failed 状态下可查看。</summary>
+    private string? _failedReason;
+    public string? FailedReason
+    {
+        get => _failedReason;
+        set
+        {
+            if (_failedReason == value)
+                return;
+            _failedReason = value;
+            OnPropertyChanged();
+        }
+    }
+
     public bool IsFailed => Status == MessageStatus.Failed;
     public bool IsPending => Status == MessageStatus.Queued || Status == MessageStatus.Sending;
     public bool IsRead => Status == MessageStatus.Read;
+
+    /// <summary>我方发送且处于失败状态：气泡显示失败标记，菜单提供重试/查看原因/删除。</summary>
+    public bool IsSendFailed => IsSentByMe && Status == MessageStatus.Failed;
+
+    /// <summary>状态字形：排队 ⏱ / 发送中 ↻ / 已送达 ✓ / 已读 ✓✓ / 失败 ⚠。</summary>
+    public string StatusGlyphText => Status switch
+    {
+        MessageStatus.Queued => "⏱",
+        MessageStatus.Sending => "↻",
+        MessageStatus.Sent => "✓",
+        MessageStatus.Delivered => "✓✓",
+        MessageStatus.Read => "✓✓",
+        MessageStatus.Failed => "⚠",
+        _ => string.Empty
+    };
+
+    public string StatusGlyphColor => Status switch
+    {
+        MessageStatus.Failed => "#EF4444",
+        MessageStatus.Read or MessageStatus.Delivered => "#3B82F6",
+        _ => "#94A3B8"
+    };
+
+    /// <summary>仅我方消息且未撤回时展示状态字形。</summary>
+    public bool StatusGlyphVisibility => IsSentByMe && !IsRecalled;
 
     /// <summary>撤回时间（Unix 毫秒）；撤回状态的一部分真相。</summary>
     public long? RecalledAtMs
@@ -114,6 +157,7 @@ public class Message : INotifyPropertyChanged
             _recalledAtMs = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(IsRecalled));
+            OnPropertyChanged(nameof(StatusGlyphVisibility));
             OnPropertyChanged(nameof(DisplayContent));
             OnPropertyChanged(nameof(HasAttachments));
             OnPropertyChanged(nameof(HasReply));

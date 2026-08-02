@@ -224,7 +224,8 @@ public sealed class OutboxProcessor : IDisposable
 
         if (kind == OutboxFailureKind.Permanent)
             Log.Warning("Outbox 永久失败（不再自动重试）ClientMessageId={ClientMessageId}", entry.ClientMessageId);
-        _eventBus.Publish(new OutboxStatusChangedEvent(entry.ClientMessageId, OutboxStatus.Failed, null));
+        _eventBus.Publish(new OutboxStatusChangedEvent(
+            entry.ClientMessageId, OutboxStatus.Failed, null, $"{errorCode}: {ex.Message}"));
     }
 
     /// <summary>失败分类：参数校验为永久失败，其余（网络/超时/未鉴权）可重试。</summary>

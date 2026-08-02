@@ -112,6 +112,14 @@
                                                       IsVisible="{Binding Status, Converter={StaticResource StatusMatch}, ConverterParameter='Queued,Sending'}"
                                                       Command="{Binding #Root.((vm:MessageViewModel)DataContext).CancelSendCommand}"
                                                       CommandParameter="{Binding}"/>
+                                            <MenuItem Header="查看失败原因"
+                                                      IsVisible="{Binding IsSendFailed}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).ShowFailureReasonCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="删除失败消息"
+                                                      IsVisible="{Binding IsSendFailed}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).DeleteFailedMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
                                         </MenuFlyout>
                                     </Border.ContextFlyout>
                                     <StackPanel Spacing="6">
@@ -188,11 +196,19 @@
                                                    Foreground="#94A3B8"
                                                    IsVisible="{Binding IsEdited}"
                                                    HorizontalAlignment="Right"/>
-                                        <TextBlock Text="{Binding Timestamp, StringFormat='HH:mm'}"
-                                                   FontSize="10"
-                                                   Foreground="#999"
-                                                   HorizontalAlignment="Right"
-                                                   Margin="0 2 0 0"/>
+                                        <StackPanel Orientation="Horizontal"
+                                                    HorizontalAlignment="Right"
+                                                    Spacing="4"
+                                                    Margin="0 2 0 0">
+                                            <TextBlock Text="{Binding StatusGlyphText}"
+                                                       FontSize="10"
+                                                       Foreground="{Binding StatusGlyphColor}"
+                                                       IsVisible="{Binding StatusGlyphVisibility}"
+                                                       VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding Timestamp, StringFormat='HH:mm'}"
+                                                       FontSize="10"
+                                                       Foreground="#999"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>

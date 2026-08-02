@@ -183,6 +183,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand<Message> RecallMessageCommand { get; }
     public AsyncRelayCommand<Message> RetryMessageCommand { get; }
     public AsyncRelayCommand<Message> CancelSendCommand { get; }
+    public RelayCommand ShowFailureReasonCommand { get; }
+    public AsyncRelayCommand<Message> DeleteFailedMessageCommand { get; }
     public AsyncRelayCommand<AttachmentRefDto> DownloadAttachmentCommand { get; }
 
     /// <summary>由 ChatViewModel 注入：进入转发选好友模式。</summary>
@@ -393,6 +395,27 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 _notificationService.ShowError($"取消失败: {ex.Message}");
             });
 
+        // 查看发送失败原因（Failed 且带原因时可用）
+        ShowFailureReasonCommand = new RelayCommand(param =>
+        {
+            if (param is not Message { IsSendFailed: true } msg)
+                return;
+            var reason = string.IsNullOrWhiteSpace(msg.FailedReason)
+                ? "未知原因"
+                : msg.FailedReason!;
+            _notificationService.ShowError($"发送失败：{reason}");
+        });
+
+        // 删除失败消息：清除本地气泡与 Outbox 记录，彻底放弃发送
+        DeleteFailedMessageCommand = new AsyncRelayCommand<Message>(
+            DeleteFailedMessageAsync,
+            msg => msg is { IsSendFailed: true } && !string.IsNullOrWhiteSpace(msg.ClientMessageId),
+            ex =>
+            {
+                Log.Error(ex, "删除失败消息失败");
+                _notificationService.ShowError($"删除失败: {ex.Message}");
+            });
+
         DownloadAttachmentCommand = new AsyncRelayCommand<AttachmentRefDto>(
             DownloadAttachmentAsync,
             att => att is not null && !string.IsNullOrWhiteSpace(att.AttachmentId),
@@ -438,6 +461,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         {
             var local = FindMessage(e.MessageId, e.ClientMessageId);
             if (local is null) return;
+            local.FailedReason = e.FailureReason;
             local.Status = e.NewStatus;
         });
     }
@@ -450,6 +474,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         {
             var local = FindMessage(null, e.ClientMessageId);
             if (local is null) return;
+            local.FailedReason = e.FailureReason;
             local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
             if (!string.IsNullOrWhiteSpace(e.ServerMessageId))
             {
@@ -630,6 +655,19 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         message.Status = MessageStatus.Failed;
         _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Cancelled, null));
+    }
+
+    /// <summary>删除失败消息：清理 Outbox 记录并移除本地气泡（DB 消息行保留，历史仍可见）。</summary>
+    private async Task DeleteFailedMessageAsync(Message? message, CancellationToken ct)
+    {
+        if (message is null || !message.IsSendFailed || string.IsNullOrWhiteSpace(message.ClientMessageId))
+            return;
+        var selfId = _currentUserContext.RequireUserId();
+        await _dbService.DeleteOutboxAsync(selfId, message.ClientMessageId).ConfigureAwait(true);
+        Messages.Remove(message);
+        _messagesByClientId.Remove(message.ClientMessageId);
+        if (!string.IsNullOrWhiteSpace(message.MessageId))
+            _messagesByServerId.Remove(message.MessageId);
     }
 
     private void ApplyRecalled(string messageId, long? recalledAtMs)
