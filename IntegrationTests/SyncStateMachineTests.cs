@@ -269,6 +269,134 @@ public class SyncStateMachineTests : IDisposable
 
     // ── 辅助 ────────────────────────────────────────────
 
+    /// <summary>历史滚动分页：游标递减逐页拉取 → 增量入库 → 无重复；同游标重复拉取幂等。</summary>
+    [Fact]
+    public async Task History_Paging_Incremental_And_Idempotent()
+    {
+        // 服务器消息池：120 条，ReceivedAtMs 递增（svr-001 最旧 → svr-120 最新）
+        const int total = 120;
+        var baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - total * 1000;
+        var pool = new List<MessageHistoryItemDto>(total);
+        for (var i = 1; i <= total; i++)
+        {
+            pool.Add(new MessageHistoryItemDto
+            {
+                MessageId = $"svr-{i:000}",
+                SenderUserId = PeerId,
+                ReceiverUserId = OwnerId,
+                Content = $"历史消息 {i}",
+                ReceivedAtMs = baseMs + i * 1000
+            });
+        }
+
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        SetupPagedHistoryServer(tcp, serializer, pool);
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        var eventBus = new InMemoryEventBus();
+        var store = new MessageStore(_db, eventBus, session);
+
+        // 第一页：无游标 → 最新 50 条（svr-071..svr-120），仍有更多
+        var page1 = await store.FetchAndPersistHistoryAsync(Session, ConvId, limit: 50, ct: CancellationToken.None);
+        Assert.Equal(50, page1.Count);
+        Assert.Equal("svr-120", page1[^1].MessageId);
+        Assert.Equal("svr-071", page1[0].MessageId);
+
+        // 第二页：以 svr-071 为游标 → 更早 50 条（svr-021..svr-070）
+        var page2 = await store.FetchAndPersistHistoryAsync(
+            Session, ConvId, limit: 50,
+            beforeReceivedAtMs: page1[0].ReceivedAtMs, beforeMessageId: page1[0].MessageId,
+            ct: CancellationToken.None);
+        Assert.Equal(50, page2.Count);
+        Assert.Equal("svr-070", page2[^1].MessageId);
+        Assert.Equal("svr-021", page2[0].MessageId);
+
+        // 第三页：尽头（svr-001..svr-020），HasMore=false
+        var page3 = await store.FetchAndPersistHistoryAsync(
+            Session, ConvId, limit: 50,
+            beforeReceivedAtMs: page2[0].ReceivedAtMs, beforeMessageId: page2[0].MessageId,
+            ct: CancellationToken.None);
+        Assert.Equal(20, page3.Count);
+        Assert.Equal("svr-001", page3[0].MessageId);
+
+        // 增量持久化：共 120 条、无重复、本地升序完整
+        var all = await _db.GetMessagesAsync(OwnerId, ConvId, 200);
+        Assert.Equal(total, all.Count);
+        Assert.Equal(total, all.Select(m => m.MessageId).Distinct().Count());
+        Assert.Equal("svr-001", all[0].MessageId);
+        Assert.Equal("svr-120", all[^1].MessageId);
+
+        // 幂等：同游标重复拉取不重复入库、水位不回退
+        var page2Again = await store.FetchAndPersistHistoryAsync(
+            Session, ConvId, limit: 50,
+            beforeReceivedAtMs: page1[0].ReceivedAtMs, beforeMessageId: page1[0].MessageId,
+            ct: CancellationToken.None);
+        Assert.Equal(50, page2Again.Count);
+        var allAgain = await _db.GetMessagesAsync(OwnerId, ConvId, 200);
+        Assert.Equal(total, allAgain.Count);
+
+        var cursor = await _db.GetSyncCursorAsync(OwnerId, ConvId);
+        Assert.Equal("svr-120", cursor!.AfterMessageId);
+    }
+
+    /// <summary>历史分页服务器模拟：按 before 游标返回更早的 limit 条（升序），HasMore 反映是否还有更早。</summary>
+    private static void SetupPagedHistoryServer(
+        ScriptedTcpClient tcp,
+        IPacketBodySerializer serializer,
+        IReadOnlyList<MessageHistoryItemDto> pool)
+    {
+        tcp.OnFrameSent += (cmd, body) =>
+        {
+            try
+            {
+                switch (cmd)
+                {
+                    case PacketCommand.MessageHistoryRequest:
+                    {
+                        var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+                        if (req is null)
+                            return;
+
+                        // 无游标 → 最新一页；有游标 → 更早一页（均按时间升序返回，NextCursor 指向页内最早）
+                        var candidates = pool.AsEnumerable();
+                        if (req.BeforeReceivedAtMs is { } before)
+                            candidates = candidates.Where(m => m.ReceivedAtMs < before
+                                && !string.Equals(m.MessageId, req.BeforeMessageId, StringComparison.Ordinal));
+
+                        var ordered = candidates.OrderByDescending(m => m.ReceivedAtMs).Take(req.Limit).Reverse().ToList();
+                        var hasMore = candidates.Count() > ordered.Count;
+                        var cursor = ordered.Count == 0 ? null : new MessageHistoryCursorDto
+                        {
+                            ReceivedAtMs = ordered[0].ReceivedAtMs,
+                            MessageId = ordered[0].MessageId
+                        };
+
+                        InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
+                            new MessageHistoryPageDto
+                            {
+                                RequestId = req.RequestId,
+                                Succeeded = true,
+                                ConversationId = req.ConversationId ?? string.Empty,
+                                Items = ordered,
+                                HasMore = hasMore,
+                                NextCursor = cursor
+                            });
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // 模拟服务器解析失败：忽略该帧
+            }
+        };
+    }
+
     private async Task<SyncCompletedEventArgs> RunSyncAsync(SyncEngine engine, bool expectSuccess)
     {
         var completed = new TaskCompletionSource<SyncCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
