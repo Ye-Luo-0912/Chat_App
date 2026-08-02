@@ -2,7 +2,7 @@
 
 #nullable disable
 
-namespace Infrastructure.Migrations
+namespace Chat_App.Infrastructure.Migrations
 {
     /// <inheritdoc />
     public partial class AddAttachmentUploadFields : Migration

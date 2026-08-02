@@ -2,7 +2,7 @@ using Chat_App.Services;
 using Core.Contracts.Friends;
 using Core.Contracts.Friends.Enums;
 using Core.Interfaces;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 using System;
 using System.Collections.Generic;

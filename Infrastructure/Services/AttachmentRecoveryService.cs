@@ -5,15 +5,13 @@ using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
 using Core.Contracts.Attachments;
 using Core.Interfaces;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// Recovers failed attachment uploads on app startup and whenever authentication succeeds.
-/// This file depends on Infrastructure.Models, so it is compiled by Infrastructure.csproj
-/// (excluded from Core.csproj) to avoid a circular dependency.
 /// </summary>
 public sealed class AttachmentRecoveryService
 {
@@ -38,7 +36,7 @@ public sealed class AttachmentRecoveryService
         _currentUserContext = currentUserContext;
         _chatSession = chatSession;
 
-        // 恢复任务由鉴权成功事件触发（九1）：不再依赖启动时固定延迟，未登录会重试。
+        // 恢复任务由鉴权成功事件触发：不再依赖启动时固定延迟，未登录会重试。
         _chatSession.Authenticated += OnAuthenticated;
     }
 
@@ -54,7 +52,7 @@ public sealed class AttachmentRecoveryService
         if (!_currentUserContext.IsAuthenticated)
             return;
 
-        // 防止鉴权事件多次触发导致并发重复恢复（九1）。
+        // 防止鉴权事件多次触发导致并发重复恢复。
         if (Interlocked.CompareExchange(ref _recovering, 1, 0) != 0)
             return;
         try

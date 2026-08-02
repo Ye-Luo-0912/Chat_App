@@ -5,7 +5,7 @@ using System.Threading.Channels;
 using Core.Interfaces;
 using Core.Models;
 
-namespace Infrastructure.Networking;
+namespace Chat_App.Infrastructure.Networking;
 
 /// <summary>
 /// TCP 客户端实现，提供连接、发送和接收数据的功能，并通过事件通知外部数据接收和连接状态的改变。
@@ -31,11 +31,11 @@ public class TcpClientExample : ITcpClient, IDisposable
     private readonly Lock _syncRoot = new();
 
     // 连接代际：每次 ConnectAsync 递增。收发循环只有在自己所属代际等于当前代际时，
-    // 才允许修改全局连接状态（如触发 Disconnect），避免旧循环误关新连接（P0-3）。
+    // 才允许修改全局连接状态（如触发 Disconnect），避免旧循环误关新连接。
     private int _connectionGeneration;
 
     // 有界单写发送队列：所有 SendAsync 调用方只负责入队，一个独占发送循环完整发送每一帧，
-    // 消除多请求并发导致的 TCP 帧边界交错（P0-2）。队列容量形成背压。
+    // 消除多请求并发导致的 TCP 帧边界交错。队列容量形成背压。
     private readonly Channel<OutboundFrame> _sendChannel =
         Channel.CreateBounded<OutboundFrame>(new BoundedChannelOptions(256)
         {
@@ -82,7 +82,7 @@ public class TcpClientExample : ITcpClient, IDisposable
             ConnectionStatusChanged?.Invoke(this, "Connected");
 
             // 收发循环各自捕获本次连接的代际、CTS 与 Socket。
-            // 发送循环也绑定代际与本次 Socket，不再每帧读取全局 _tcpClient（P0-3）。
+            // 发送循环也绑定代际与本次 Socket，不再每帧读取全局 _tcpClient。
             _receiveTask = ReceiveDataAsync(receiveCts.Token, generation, clientSocket);
             _sendTask = SendLoopAsync(sendCts.Token, generation, clientSocket);
         }
@@ -108,7 +108,7 @@ public class TcpClientExample : ITcpClient, IDisposable
 
     /// <summary>
     /// 发送数据：复制到独立内存后入队，由独占发送循环完整发送。
-    /// 队列已满时 WriteAsync 会等待，形成背压（P0-2）。
+    /// 队列已满时 WriteAsync 会等待，形成背压。
     /// </summary>
     public async Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token = default)
     {
@@ -137,8 +137,8 @@ public class TcpClientExample : ITcpClient, IDisposable
     }
 
     /// <summary>
-    /// P0-十 零拷贝出站：直接接管 owner 的池化内存入队，发送完成后由发送循环 Dispose。
-    /// 不产生 data.ToArray() 的完整帧复制。调用方转移所有权后不得再使用 owner。
+    /// 零拷贝出站：直接接管 owner 的池化内存入队，发送完成后由发送循环 Dispose。
+    /// 不产生 data.ToArray 的完整帧复制。调用方转移所有权后不得再使用 owner。
     /// </summary>
     public async Task SendAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
     {
@@ -170,8 +170,8 @@ public class TcpClientExample : ITcpClient, IDisposable
     }
 
     /// <summary>
-    /// 独占发送循环：从队列逐帧完整发送，保证帧边界原子性（P0-2）。
-    /// P0-3 修复：发送循环绑定本次连接的 generation 和 socket，
+    /// 独占发送循环：从队列逐帧完整发送，保证帧边界原子性。
+    /// 发送循环绑定本次连接的 generation 和 socket，
     /// 不再每帧读取全局 _tcpClient；旧发送循环不会把帧发到新 Socket，
     /// 旧发送循环异常不会关闭新连接。
     /// </summary>
@@ -207,14 +207,14 @@ public class TcpClientExample : ITcpClient, IDisposable
                     frame.Tcs.TrySetException(ex);
                     frame.Owner?.Dispose();
                     DrainSendChannel(ex);
-                    // 只有当前代际的发送循环才允许触发 Disconnect，避免旧循环误关新连接（P0-3）。
+                    // 只有当前代际的发送循环才允许触发 Disconnect，避免旧循环误关新连接。
                     if (IsCurrentGeneration(generation))
                         Disconnect("Connection lost during send");
                     return;
                 }
                 finally
                 {
-                    // P0-十: 发送完成（成功）后归还池化内存。失败路径在上面已 Dispose。
+                    // 发送完成（成功）后归还池化内存。失败路径在上面已 Dispose。
                     if (frame.Tcs.Task.IsCompletedSuccessfully)
                         frame.Owner?.Dispose();
                 }
@@ -227,14 +227,14 @@ public class TcpClientExample : ITcpClient, IDisposable
         catch (Exception ex)
         {
             DrainSendChannel(ex);
-            // 只有当前代际的发送循环才允许触发 Disconnect（P0-3）。
+            // 只有当前代际的发送循环才允许触发 Disconnect。
             if (IsCurrentGeneration(generation))
                 Disconnect($"Send loop error: {ex.Message}");
         }
     }
 
     /// <summary>
-    /// 排空发送队列，将所有待发帧标记为失败，并归还其池化内存（P0-十）。
+    /// 排空发送队列，将所有待发帧标记为失败，并归还其池化内存。
     /// </summary>
     private void DrainSendChannel(Exception ex)
     {
@@ -262,7 +262,7 @@ public class TcpClientExample : ITcpClient, IDisposable
     }
 
     /// <summary>
-    /// 接收数据循环。buffer 为局部变量，避免重连时新旧循环归还竞态（P0-3）。
+    /// 接收数据循环。buffer 为局部变量，避免重连时新旧循环归还竞态。
     /// 只有当前代际的循环才允许触发 Disconnect，避免误关新连接。
     /// </summary>
     private async Task ReceiveDataAsync(CancellationToken token, int generation, Socket socket)
@@ -405,7 +405,7 @@ public class TcpClientExample : ITcpClient, IDisposable
         }
         public ReadOnlyMemory<byte> Data { get; }
         /// <summary>
-        /// P0-十: 池化内存所有权。非 null 时表示帧数据来自 owner.Memory，
+        /// 池化内存所有权。非 null 时表示帧数据来自 owner.Memory，
         /// 发送完成后必须 Dispose 以归还 ArrayPool；null 表示 Data 是独立 ToArray 副本（旧路径）。
         /// </summary>
         public IMemoryOwner<byte>? Owner { get; }

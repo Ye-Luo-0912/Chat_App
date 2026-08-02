@@ -4,7 +4,7 @@ using System.Buffers;
 namespace Core.Buffers
 {
     /// <summary>
-    /// 基于 ArrayPool 的出站帧缓冲写入器（P0-十）。
+    /// 基于 ArrayPool 的出站帧缓冲写入器。
     /// 同时实现 IBufferWriter&lt;byte&gt;（供 JSON 序列化器直写）与 IMemoryOwner&lt;byte&gt;
     /// （供传输层接管所有权，发送完成后归还池），消除出站路径的多次完整帧 byte[] 分配。
     /// 扩容时通过 ArrayPool 重新租借并复制，不依赖 Array.Resize。
@@ -42,7 +42,7 @@ namespace Core.Buffers
         public int WrittenCount => _written;
 
         /// <summary>
-        /// 返回已写入区域内 [start, start+length) 的可写切片，用于帧头长度字段回填（P0-十）。
+        /// 返回已写入区域内 [start, start+length) 的可写切片，用于帧头长度字段回填。
         /// 调用方必须保证 start+length 不超过 WrittenCount。
         /// </summary>
         public Span<byte> GetWritableSlice(int start, int length)

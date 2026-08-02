@@ -1,8 +1,8 @@
 using Core.Models;
 using Core.Models.DTO;
 using Core.Protocol;
-using Infrastructure.Networking;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Networking;
+using Chat_App.Infrastructure.Serialization;
 using System.Net;
 using System.Net.Sockets;
 using Xunit;
@@ -10,7 +10,7 @@ using Xunit;
 namespace Protocol.Tests;
 
 /// <summary>
-/// 真实 TCP 回环测试（P0-十二）。
+/// 真实 TCP 回环测试。
 /// 用本地 TcpListener 作为服务端，验证 TcpClientExample 的：
 /// - Channel 单写队列保证帧不交错
 /// - 部分发送（socket 缓冲）下完整帧到达

@@ -1,10 +1,10 @@
 using Core.Models.DTO;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// 消息持久化服务：网络消息 → 去重 → 本地事务持久化 → 发布领域事件 → UI 增量更新。

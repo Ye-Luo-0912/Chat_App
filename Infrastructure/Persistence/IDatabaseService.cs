@@ -1,7 +1,6 @@
 using Core.Contracts.Auth;
 using Core.Models;
-using Infrastructure.Data;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -32,7 +31,7 @@ public interface IDatabaseService
     Task<ServerEndpoint?> GetServerInfoAsync();
     Task DeleteServerInfoAsync();
 
-    // ---- 会话（P0-6 持久化聊天系统）----
+    // ---- 会话（持久化聊天系统）----
     Task<List<LocalConversation>> GetConversationsAsync(long ownerUserId);
     Task<LocalConversation?> GetConversationAsync(long ownerUserId, string conversationId);
     Task UpsertConversationAsync(LocalConversation conversation);
@@ -41,7 +40,7 @@ public interface IDatabaseService
     /// <summary>仅更新会话草稿（轻量写入，切换会话时保存输入框文本）。</summary>
     Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft);
 
-    // ---- 消息（P0-6）----
+    // ---- 消息----
     /// <summary>分页拉取会话历史消息（向后翻页， newest-first）。</summary>
     /// <param name="limit">单页条数上限。</param>
     /// <param name="beforeReceivedAtMs">游标：仅返回 ReceivedAtMs 严格小于该值的消息。</param>
@@ -63,12 +62,12 @@ public interface IDatabaseService
     Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100);
 
     /// <summary>
-    /// 事务性应用入站消息（P0-6）：在单个 DbContext + 单个事务内完成
+    /// 事务性应用入站消息：在单个 DbContext + 单个事务内完成
     /// 消息 upsert + 附件批量 upsert + 会话摘要原子更新 + 未读数递增。
     /// </summary>
     Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate);
 
-    // ---- Outbox（P0-6）----
+    // ---- Outbox----
     Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox);
     Task<LocalOutboxMessage?> GetOutboxByClientIdAsync(long ownerUserId, string clientMessageId);
     /// <summary>取出待发送/重试的 Outbox 记录（Queued/Sending/Failed），按创建时间升序，供 OutboxProcessor 轮询。</summary>
@@ -77,23 +76,23 @@ public interface IDatabaseService
     Task DeleteOutboxAsync(long ownerUserId, string clientMessageId);
 
     /// <summary>
-    /// 事务性写入 Outbox + LocalMessage（P0-4 事务化 Outbox）。
+    /// 事务性写入 Outbox + LocalMessage（事务化 Outbox）。
     /// 在单个 DbContext + 单个事务内完成两表 upsert，保证原子性。
     /// </summary>
     Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message);
 
     /// <summary>
-    /// 更新 Outbox 状态并推进重试元数据（P0-4）。
+    /// 更新 Outbox 状态并推进重试元数据。
     /// 仅当 status == Failed 时递增 RetryCount 并设置 NextRetryAt（指数退避 + jitter）。
     /// </summary>
     Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
 
-    // ---- 同步水位（P0-6）----
+    // ---- 同步水位----
     Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId);
     Task UpsertSyncCursorAsync(LocalSyncCursor cursor);
     Task<List<LocalSyncCursor>> GetAllSyncCursorsAsync(long ownerUserId);
 
-    // ---- 会话已读状态（P0-6）----
+    // ---- 会话已读状态----
     Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId);
     Task UpsertReadStateAsync(LocalConversationReadState readState);
 

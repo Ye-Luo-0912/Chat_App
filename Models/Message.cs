@@ -49,7 +49,7 @@ public class Message : INotifyPropertyChanged
 
     public DateTime Timestamp { get; set; }
 
-    /// <summary>服务端接收时间（Unix 毫秒），用于历史分页游标（六4）。</summary>
+    /// <summary>服务端接收时间（Unix 毫秒），用于历史分页游标。</summary>
     public long ReceivedAtMs { get; set; }
     public bool IsSentByMe { get; set; }
 

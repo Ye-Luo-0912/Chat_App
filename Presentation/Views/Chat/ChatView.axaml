@@ -4,7 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Chat"
              xmlns:controls="clr-namespace:Chat_App.Presentation.Controls"
-             xmlns:models="clr-namespace:Infrastructure.Models;assembly=Infrastructure"
+             xmlns:models="clr-namespace:Chat_App.Infrastructure.Models;assembly=Infrastructure"
              mc:Ignorable="d"
              x:Class="Chat_App.Presentation.Views.Chat.ChatView"
              x:Name="Root"

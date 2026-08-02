@@ -1,7 +1,7 @@
 using Core.Contracts.Auth;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 
-namespace Infrastructure.Data
+namespace Chat_App.Infrastructure.Models
 {
     public class LocalUser
     {

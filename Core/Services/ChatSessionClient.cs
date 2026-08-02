@@ -539,7 +539,7 @@ namespace Core.Services
         }
 
         /// <summary>
-        /// 统一请求-响应模板：生成 requestId → 注册 TCS → 发包 → 带超时等待响应 → finally 清理（P0-代码复用）。
+        /// 统一请求-响应模板：生成 requestId → 注册 TCS → 发包 → 带超时等待响应 → finally 清理。
         /// 调用方需先 EnsureAuthenticated 并完成参数校验。
         /// </summary>
         private async Task<T> SendRequestAsync<T>(
@@ -603,7 +603,7 @@ namespace Core.Services
         /// <returns></returns>
         private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct)
         {
-            // P0-十 热路径：池化出站帧缓冲，JSON 直写同一缓冲，无中间 byte[] 分配，
+            // 热路径：池化出站帧缓冲，JSON 直写同一缓冲，无中间 byte[] 分配，
             // 传输层接管所有权发送完成后归还 ArrayPool，无 ToArray 复制。
             var frameWriter = new PooledBufferWriter(MessagePacket.HeaderSize + 64);
             try

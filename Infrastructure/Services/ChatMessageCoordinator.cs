@@ -3,14 +3,14 @@ using Core.Interfaces;
 using Core.Models.DTO;
 using Serilog;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// 网络事件 → 持久化 桥接协调器。
 /// 订阅 IChatSessionClient 的网络事件，调用 IMessageStore 做去重与本地事务持久化，
 /// IMessageStore 内部通过 IEventBus 发布领域事件供 UI 层增量更新。
 /// 本协调器本身不直接操作 UI。
-/// 使用有界 Channel + 单消费者保证入站事件顺序（P0-5）。
+/// 使用有界 Channel + 单消费者保证入站事件顺序。
 /// </summary>
 public sealed class ChatMessageCoordinator : IDisposable
 {
@@ -83,7 +83,7 @@ public sealed class ChatMessageCoordinator : IDisposable
 
     /// <summary>
     /// 统一入站事件入队模板：捕获当前 OwnerUserId 后写入 Channel；
-    /// 用户未登录时以警告日志丢弃事件（P0-代码复用，消除 8 处重复骨架）。
+    /// 用户未登录时以警告日志丢弃事件。
     /// </summary>
     private void EnqueueMutation<T>(T payload, InboundMutationKind kind, string label, object? id = null)
     {

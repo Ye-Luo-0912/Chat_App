@@ -1,4 +1,4 @@
-using Chat_App;
+using Chat_App.Infrastructure.Identity;
 using Core.Interfaces;
 using System.Net;
 using System.Net.Http;
@@ -6,7 +6,7 @@ using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Infrastructure.Networking;
+namespace Chat_App.Infrastructure.Networking;
 
 public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIdentity) : DelegatingHandler
 {
@@ -78,7 +78,7 @@ public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIde
             else
             {
                 // 流式内容（如 StreamContent）不可自动缓冲重放（避免大文件 OOM 与已消耗流）。
-                // 优先使用上层提供的请求体重建工厂；未提供则抛出明确异常，绝不发送空 body（九5）。
+                // 优先使用上层提供的请求体重建工厂；未提供则抛出明确异常，绝不发送空 body。
                 if (req.Options.TryGetValue(RequestOptionKeys.ReplayFactory, out var factory) && factory is not null)
                 {
                     clone.Content = await factory(cancellation).ConfigureAwait(false);

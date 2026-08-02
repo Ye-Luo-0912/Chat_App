@@ -3,12 +3,12 @@ using System;
 using System.Buffers;
 using System.Text.Json;
 
-namespace Infrastructure.Serialization
+namespace Chat_App.Infrastructure.Serialization
 {
     /// <summary>
-    /// 基于 source-generated JSON 上下文的协议 body 序列化器（P0-十 热路径优化）。
+    /// 基于 source-generated JSON 上下文的协议 body 序列化器。
     /// 出站：Utf8JsonWriter(IBufferWriter&lt;byte&gt;) + JsonSerializer.Serialize(Utf8JsonWriter, ...)
-    ///       直接写入池化缓冲，无 SerializeToUtf8Bytes 的中间 byte[] 分配。
+    /// 直接写入池化缓冲，无 SerializeToUtf8Bytes 的中间 byte[] 分配。
     /// 入站：单段走 span 重载零分配；多段用 ArrayPool 租借避免 ToArray 堆分配。
     /// </summary>
     public class JsonPacketBodySerializer : IPacketBodySerializer

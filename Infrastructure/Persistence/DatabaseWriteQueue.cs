@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 namespace Chat_App.Infrastructure.Persistence;
 
 /// <summary>
-/// 数据库单写入队列实现（P0-数据库优化）。
+/// 数据库单写入队列实现。
 /// 使用有界 Channel 串行化所有写入操作，消除 SQLite WAL 模式下的 SQLITE_BUSY 并发冲突。
 /// 委托为自包含操作：内部自行管理 DbContext 生命周期与 SaveChangesAsync（含幂等冲突处理），
 /// 队列只负责单消费者串行调度。不跨操作共享 DbContext，避免读-改-写竞态与批处理回滚污染。

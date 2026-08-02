@@ -264,7 +264,7 @@ public partial class RegisterViewModel : ViewModelBase
 
         try
         {
-            // 携带 (邮箱, 验证码, 密码) 
+            // 携带 (邮箱, 验证码, 密码)
             var result = await _authClient.RegisterAsync(Email, VerificationCode, Password, ct);
 
             if (!result.IsSuccess)

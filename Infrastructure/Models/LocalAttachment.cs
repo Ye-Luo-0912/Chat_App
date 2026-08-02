@@ -1,7 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
 /// 附件状态枚举（底层 byte，与数据库列兼容）。

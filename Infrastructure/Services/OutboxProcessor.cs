@@ -3,20 +3,18 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
-using Infrastructure.Events;
+using Chat_App.Infrastructure.Events;
 using Core.Interfaces;
 using Core.Models;
-using Infrastructure.Models;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Serialization;
 using Serilog;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
-/// 后台排空 Outbox 的处理器（P0-4 事务化 Outbox）。
+/// 后台排空 Outbox 的处理器（事务化 Outbox）。
 /// 周期性拉取 Queued/Failed 的 Outbox 条目并重新发送，失败按指数退避重试。
-/// 本文件依赖 Infrastructure 类型（IDatabaseService / Infrastructure.Models），
-/// 故由 Infrastructure.csproj 编译（从 Core.csproj 排除），避免循环依赖。
 /// </summary>
 public sealed class OutboxProcessor : IDisposable
 {

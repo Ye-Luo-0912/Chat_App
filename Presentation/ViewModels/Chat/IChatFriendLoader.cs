@@ -1,4 +1,4 @@
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;

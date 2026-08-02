@@ -1,13 +1,13 @@
 using Chat_App.Infrastructure.Persistence;
 using Core.Contracts.Auth;
 using Core.Interfaces;
-using Infrastructure.Data;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Chat_App;
+namespace Chat_App.Infrastructure.Identity;
 
 /// <summary>
 /// 管理内存中的 AccessToken 快照与当前用户状态。

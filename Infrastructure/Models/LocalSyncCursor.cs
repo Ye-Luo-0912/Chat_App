@@ -1,7 +1,7 @@
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 同步水位实体（P0-6 持久化聊天系统）。
+/// 同步水位实体（持久化聊天系统）。
 /// </summary>
 public class LocalSyncCursor
 {

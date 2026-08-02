@@ -18,7 +18,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     private readonly ICurrentUserContext _currentUserContext;
     private readonly string _basePath;
 
-    // 下载缓存治理（九4）：容量上限与并发下载合并。
+    // 下载缓存治理：容量上限与并发下载合并。
     private const long MaxCacheBytes = 512L * 1024 * 1024; // 512MB
     private const int CacheVersion = 1;
     private const string CacheVersionFile = "cache.version";
@@ -35,7 +35,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         EnsureCacheVersion();
     }
 
-    /// <summary>缓存版本失效（九4）：版本不匹配时清空下载缓存重建。</summary>
+    /// <summary>缓存版本失效：版本不匹配时清空下载缓存重建。</summary>
     private void EnsureCacheVersion()
     {
         try
@@ -115,7 +115,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     }
 
     /// <summary>
-    /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256（九3）。
+    /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256。
     /// 源流仅读取一次，避免“先算 hash 再复制”的重复 IO。
     /// </summary>
     public async Task<(string relativePath, string sha256)> WriteToUploadingWithHashAsync(Stream content, string fileName, CancellationToken ct = default)
@@ -131,7 +131,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         int read;
         while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
         {
-            // 同一缓冲既落盘又喂给哈希，单次读取完成复制+哈希（九3）。
+            // 同一缓冲既落盘又喂给哈希，单次读取完成复制+哈希。
             await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
             sha.TransformBlock(buffer, 0, read, buffer, 0);
         }
@@ -193,7 +193,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
     public async Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default)
     {
-        // 同一 AttachmentId 的并发下载合并（九4）：复用进行中的写入任务，避免重复下载。
+        // 同一 AttachmentId 的并发下载合并：复用进行中的写入任务，避免重复下载。
         var coalesceKey = $"{_currentUserContext.UserId ?? 0}:{attachmentId}";
         var existing = _inFlightDownloads.GetValueOrDefault(coalesceKey);
         if (existing is not null)
@@ -212,7 +212,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
         try
         {
-            // 下载完整性校验 + 原子 rename（九4）：先写 .partial 临时文件，
+            // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
             // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
             var partialPath = fullPath + ".partial";
             await using (var fs = File.Create(partialPath))
@@ -224,7 +224,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
                 File.Delete(fullPath);
             File.Move(partialPath, fullPath, overwrite: false);
 
-            // 写入成功后更新访问时间并触发 LRU 清理（九4）。
+            // 写入成功后更新访问时间并触发 LRU 清理。
             File.SetLastAccessTimeUtc(fullPath, DateTime.UtcNow);
             EvictIfOverCapacity();
 
@@ -242,7 +242,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         }
     }
 
-    /// <summary>LRU 清理（九4）：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。</summary>
+    /// <summary>LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。</summary>
     private void EvictIfOverCapacity()
     {
         try

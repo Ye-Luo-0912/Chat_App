@@ -2,7 +2,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
-namespace Infrastructure.Migrations
+namespace Chat_App.Infrastructure.Migrations
 {
     /// <inheritdoc />
     public partial class AddConversationDraft : Migration

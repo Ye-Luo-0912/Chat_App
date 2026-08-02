@@ -5,8 +5,8 @@ using Chat_App.Shared.Commands;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models.DTO;
-using Infrastructure.Models;
-using Infrastructure.Services;
+using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Services;
 using Serilog;
 using System;
 using System.Collections.Generic;
@@ -565,7 +565,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
     /// <summary>
     /// 退出登录时重置会话状态：清空好友列表、消息视图与初始化标志，
-    /// 避免下一账户复用上一账户的内存视图（P0-5）。
+    /// 避免下一账户复用上一账户的内存视图。
     /// </summary>
     public void Reset()
     {

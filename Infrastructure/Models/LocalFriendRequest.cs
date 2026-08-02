@@ -1,4 +1,4 @@
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
 /// 本地好友申请记录（收到的 / 发出的）

@@ -16,7 +16,7 @@ public partial class MessageView : UserControl
 {
     private ScrollViewer? _scroll;
     private bool _loadingOlder;
-    // 接近顶部即触发向上加载的距离阈值（八）。
+    // 接近顶部即触发向上加载的距离阈值。
     private const double TopLoadThreshold = 80;
 
     public MessageView()
@@ -29,7 +29,7 @@ public partial class MessageView : UserControl
 
     private void OnLoaded(object? sender, EventArgs e)
     {
-        // ListBox 模板应用后取出内部 ScrollViewer，绑定滚动事件以驱动向上加载（八）。
+        // ListBox 模板应用后取出内部 ScrollViewer，绑定滚动事件以驱动向上加载。
         MessageList.TemplateApplied += OnMessageListTemplateApplied;
         AttachScroll(MessageList.Scroll);
     }
@@ -49,7 +49,7 @@ public partial class MessageView : UserControl
 
     private void AttachScroll(IScrollable? scrollable)
     {
-        // ListBox.Scroll 返回 IScrollable，实际对象即内部 ScrollViewer，转换后订阅滚动事件（八）。
+        // ListBox.Scroll 返回 IScrollable，实际对象即内部 ScrollViewer，转换后订阅滚动事件。
         var scroll = scrollable as ScrollViewer;
         if (scroll is null || ReferenceEquals(scroll, _scroll))
             return;
@@ -74,7 +74,7 @@ public partial class MessageView : UserControl
         if (scroll is null || _loadingOlder)
             return;
 
-        // 接近顶部时向上加载更早历史（八）。
+        // 接近顶部时向上加载更早历史。
         if (scroll.Offset.Y <= TopLoadThreshold)
         {
             if (DataContext is not MessageViewModel vm)
@@ -83,7 +83,7 @@ public partial class MessageView : UserControl
             _loadingOlder = true;
             try
             {
-                // 视觉锚点：加载前记录内容总高与偏移，加载后按新增高度补偿偏移，保持当前可见位置稳定（八）。
+                // 视觉锚点：加载前记录内容总高与偏移，加载后按新增高度补偿偏移，保持当前可见位置稳定。
                 var oldExtent = scroll.Extent.Height;
                 var oldOffset = scroll.Offset.Y;
 
@@ -99,6 +99,10 @@ public partial class MessageView : UserControl
                             scroll.Offset = new Vector(0, oldOffset + delta);
                     }, DispatcherPriority.Background);
                 }
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "向上加载更早历史失败");
             }
             finally
             {

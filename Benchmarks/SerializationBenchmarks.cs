@@ -1,6 +1,6 @@
 using BenchmarkDotNet.Attributes;
 using Core.Models.DTO;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Serialization;
 using System.Buffers;
 
 namespace Benchmarks;

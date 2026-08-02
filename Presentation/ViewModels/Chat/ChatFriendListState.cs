@@ -1,6 +1,6 @@
 using Core.Helpers;
 using Core.Models.DTO;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -183,7 +183,7 @@ public sealed class ChatFriendListState : IDisposable
 
     /// <summary>
     /// 增量更新 _filteredFriends：删除不再匹配的项，插入新增的项，移动顺序变化的项。
-    /// 保留未变化项的 item container，避免 UI 重建（P0-UI 热路径优化）。
+    /// 保留未变化项的 item container，避免 UI 重建。
     /// </summary>
     private void ApplyIncrementalDiff(List<LocalFriend> source)
     {

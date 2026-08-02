@@ -29,8 +29,8 @@ public interface ITcpClient : IDisposable
     Task SendAsync(ReadOnlyMemory<byte> data, CancellationToken token = default);
 
     /// <summary>
-    /// P0-十 零拷贝出站重载：传输层直接消费 owner.Memory 并在发送完成后 Dispose，
-    /// 避免旧 SendAsync(ReadOnlyMemory) 内部 data.ToArray() 的完整帧复制。
+    /// 零拷贝出站重载：传输层直接消费 owner.Memory 并在发送完成后 Dispose，
+    /// 避免旧 SendAsync(ReadOnlyMemory) 内部 data.ToArray 的完整帧复制。
     /// 默认实现回退到复制路径以兼容测试用 mock（未实现此方法的 mock 走 DIM）。
     /// 调用方一旦调用此方法即转移所有权，不得再使用/释放 owner。
     /// </summary>

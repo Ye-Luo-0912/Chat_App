@@ -1,4 +1,4 @@
-namespace Infrastructure.Data
+namespace Chat_App.Infrastructure.Models
 {
     public class AuthToken
     {

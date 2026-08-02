@@ -3,7 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Core.Models.DTO;
 
-namespace Infrastructure.Serialization;
+namespace Chat_App.Infrastructure.Serialization;
 
 /// <summary>
 /// 聊天协议 DTO 的 source-generated JSON 序列化上下文。

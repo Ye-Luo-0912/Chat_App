@@ -3,10 +3,10 @@ using Microsoft.Data.Sqlite;
 namespace Chat_App.Infrastructure.Persistence;
 
 /// <summary>
-/// 集中管理 SQLite 数据库路径与连接字符串（P0-2）：
+/// 集中管理 SQLite 数据库路径与连接字符串：
 /// - 路径固定在用户应用数据目录，避免只读安装目录无法持久化。
 /// - 连接字符串只使用 Microsoft.Data.Sqlite 官方支持的关键字，
-///   不再使用 Journal Mode / Synchronous / Busy Timeout 等非官方项。
+/// 不再使用 Journal Mode / Synchronous / Busy Timeout 等非官方项。
 /// - WAL / NORMAL / busy_timeout / foreign_keys 由 ClientDbContext.OnConfiguring 通过 PRAGMA 执行。
 /// </summary>
 public static class DbPathProvider

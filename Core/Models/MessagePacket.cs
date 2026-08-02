@@ -63,7 +63,7 @@ namespace Core.Models
 
         #region 序列化和反序列化
         /// <summary>
-        ///  序列化数据包到提供的缓冲区，成功后推进 buffer 并返回写入字节数；失败时抛出异常。
+        /// 序列化数据包到提供的缓冲区，成功后推进 buffer 并返回写入字节数；失败时抛出异常。
         /// </summary>
         public readonly int Serialize(ref Span<byte> buffer)
         {

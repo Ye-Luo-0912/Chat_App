@@ -5,13 +5,13 @@ using System.Buffers;
 namespace Core.Protocol
 {
     /// <summary>
-    /// 基于 growable buffer 的消息包编解码器（P0-十 热路径优化）。
+    /// 基于 growable buffer 的消息包编解码器。
     ///
     /// 入站路径：
     /// - byte[] + offset/count，仅在容量不足时 compact，非每帧前移，避免 O(n²) 复制。
     /// - body 零拷贝：TryRead 返回内部 buffer 的切片（ReadOnlySequence），不分配新 byte[]。
-    ///   契约：Body 仅在下一次 Append/TryRead 调用前有效。生产代码 RoutePacket 在 TryRead
-    ///   循环内同步反序列化，消费完 Body 后才进入下一轮，满足此契约。
+    /// 契约：Body 仅在下一次 Append/TryRead 调用前有效。生产代码 RoutePacket 在 TryRead
+    /// 循环内同步反序列化，消费完 Body 后才进入下一轮，满足此契约。
     /// </summary>
     public class MessagePacketCodec : IMessagePacketCodec
     {

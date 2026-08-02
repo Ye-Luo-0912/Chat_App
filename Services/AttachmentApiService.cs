@@ -8,7 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Core.Contracts.Attachments;
 using Core.Interfaces;
-using Infrastructure.Networking;
+using Chat_App.Infrastructure.Networking;
 using Serilog;
 
 namespace Chat_App.Services;

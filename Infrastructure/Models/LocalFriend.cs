@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 public class LocalFriend : INotifyPropertyChanged
 {

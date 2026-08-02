@@ -1,9 +1,9 @@
 using Core.Models;
 
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 本地消息实体（P0-6 持久化聊天系统）。每条消息一行。纯数据实体，无 INPC。
+/// 本地消息实体（持久化聊天系统）。每条消息一行。纯数据实体，无 INPC。
 /// </summary>
 public class LocalMessage
 {

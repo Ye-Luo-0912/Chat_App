@@ -1,10 +1,10 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 本地会话摘要实体（P0-6 持久化聊天系统）。
+/// 本地会话摘要实体（持久化聊天系统）。
 /// 每个 (OwnerUserId, ConversationId) 全局唯一。
 /// </summary>
 public class LocalConversation : INotifyPropertyChanged

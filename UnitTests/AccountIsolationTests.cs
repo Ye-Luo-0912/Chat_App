@@ -1,7 +1,7 @@
 using Chat_App.Infrastructure.Persistence;
 using Core.Models;
-using Infrastructure.Models;
-using Infrastructure.Models.Context;
+using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Models.Context;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Xunit;

@@ -1,13 +1,13 @@
 using Chat_App.Infrastructure.Persistence;
-using Infrastructure.Events;
+using Chat_App.Infrastructure.Events;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
-using Infrastructure.Models;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Serialization;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// 消息持久化服务：网络消息 → 去重 → 本地持久化 → 发布领域事件。
@@ -121,7 +121,7 @@ public sealed class MessageStore : IMessageStore
             LastSynced = DateTime.UtcNow
         };
 
-        // 单事务原子写入：消息 + 附件 + 会话摘要（P0-6 持久化层事务边界）
+        // 单事务原子写入：消息 + 附件 + 会话摘要（持久化层事务边界）
         await _db.ApplyIncomingMessageAsync(message, attachments, conversationUpdate);
 
         _eventBus.Publish(new MessagePersistedEvent(message, isNewConversation));
@@ -186,7 +186,7 @@ public sealed class MessageStore : IMessageStore
         var cursor = await _db.GetSyncCursorAsync(owner, conversationId)
             ?? new LocalSyncCursor { OwnerUserId = owner, ConversationId = conversationId };
         // 仅当前向 catch-up（批次最大时间戳超过已存水位）时才推进游标；
-        // 向后拉取更早历史时不得回退水位（六3）。
+        // 向后拉取更早历史时不得回退水位。
         if (maxItem.ReceivedAtMs > cursor.AfterReceivedAtMs)
         {
             cursor.AfterReceivedAtMs = maxItem.ReceivedAtMs;

@@ -1,9 +1,9 @@
 using Core.Models;
 
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 发送 Outbox 实体（P0-6 持久化聊天系统）。
+/// 发送 Outbox 实体（持久化聊天系统）。
 /// 与 LocalMessage 一一对应，专门跟踪发送状态。
 /// </summary>
 public class LocalOutboxMessage

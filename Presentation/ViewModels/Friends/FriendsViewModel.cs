@@ -8,7 +8,7 @@ using Avalonia.Threading;
 using Chat_App.Presentation.ViewModels.Shell;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Friends;

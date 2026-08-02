@@ -1,4 +1,4 @@
-# 基准结果与回归阈值（P0-十二）
+# 基准结果与回归阈值
 
 环境：Windows 11, .NET 10.0.9, X64 RyuJIT AVX-512
 运行命令：`dotnet run -c Release --project Benchmarks\Benchmarks.csproj`

@@ -2,10 +2,10 @@ using System.Collections.Generic;
 using System.Text.Json;
 using Core.Models.DTO;
 
-namespace Infrastructure.Serialization;
+namespace Chat_App.Infrastructure.Serialization;
 
 /// <summary>
-/// 附件 JSON 序列化/反序列化的统一入口（P0-代码复用）。
+/// 附件 JSON 序列化/反序列化的统一入口。
 /// 所有附件元数据与附件 Id 列表的 (de)serialize 均经由此处，
 /// 统一使用 <see cref="ChatJsonContext.Default.Options"/>，避免散落各处的 try-catch 与选项漂移。
 /// </summary>

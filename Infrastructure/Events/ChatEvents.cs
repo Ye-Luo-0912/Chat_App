@@ -1,7 +1,7 @@
 using Core.Models;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 
-namespace Infrastructure.Events;
+namespace Chat_App.Infrastructure.Events;
 
 /// <summary>新消息已持久化到本地 DB。</summary>
 public record MessagePersistedEvent(LocalMessage Message, bool IsNewConversation);

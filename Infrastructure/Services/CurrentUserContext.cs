@@ -1,7 +1,7 @@
 using Core.Interfaces;
 using System;
 
-namespace Infrastructure.Services;
+namespace Chat_App.Infrastructure.Services;
 
 public sealed class CurrentUserContext : ICurrentUserState
 {

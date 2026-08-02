@@ -3,7 +3,7 @@ using Core.Models;
 using Core.Models.DTO;
 using Core.Protocol;
 using Core.Services;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Serialization;
 using System.Collections.Concurrent;
 using Xunit;
 
@@ -28,6 +28,9 @@ public class ConcurrentSendFrameIntegrityTests
         public bool IsConnected => _connected;
         public event EventHandler<string>? ConnectionStatusChanged;
         public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
+
+        /// <summary>模拟服务端下发数据块，触发接收回调。</summary>
+        public void SimulateIncomingChunk(ReadOnlyMemory<byte> chunk) => OnDataChunkReceived?.Invoke(this, chunk);
 
         public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default)
         {

@@ -7,7 +7,8 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Interfaces;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Identity;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Shell;
@@ -156,11 +157,18 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
     private async void OnNavigateToChatRequested(NavigateToChatEvent e)
     {
-        Log.Information("通过通讯录跳转到聊天页面: 好友={FriendName}", e.Friend.FriendName);
-        await NavigateToFriends(CancellationToken.None);
-        _chatViewModel.SelectedFriend = e.Friend;
-        IsFriendsSelected = true;
-        IsContactsSelected = false;
+        try
+        {
+            Log.Information("通过通讯录跳转到聊天页面: 好友={FriendName}", e.Friend.FriendName);
+            await NavigateToFriends(CancellationToken.None);
+            _chatViewModel.SelectedFriend = e.Friend;
+            IsFriendsSelected = true;
+            IsContactsSelected = false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "跳转到聊天页面失败: 好友={FriendName}", e.Friend.FriendName);
+        }
     }
 
     #endregion
@@ -238,7 +246,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
         await _tokenInfo.ClearLocalSessionAsync(ct).ConfigureAwait(true);
 
-        // 重置聊天会话状态，避免下一账户复用上一账户的好友列表与初始化标志（P0-5）。
+        // 重置聊天会话状态，避免下一账户复用上一账户的好友列表与初始化标志。
         _chatViewModel.Reset();
 
         CurrentPage = _friendsViewModel;

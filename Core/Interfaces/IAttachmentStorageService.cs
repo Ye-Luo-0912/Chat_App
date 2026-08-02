@@ -7,9 +7,9 @@ namespace Core.Interfaces;
 /// <summary>
 /// 附件本地磁盘存储管理。负责文件落盘、路径解析、缓存清理。
 /// 目录结构：{AppData}/ChatApp/Attachments/{ownerUserId}/
-///   ├── uploading/   — 上传中临时文件
-///   ├── downloads/   — 下载缓存
-///   └── thumbnails/  — 缩略图缓存
+/// ├── uploading/ — 上传中临时文件
+/// ├── downloads/ — 下载缓存
+/// └── thumbnails/ — 缩略图缓存
 /// </summary>
 public interface IAttachmentStorageService
 {
@@ -32,7 +32,7 @@ public interface IAttachmentStorageService
     Task<string> WriteToUploadingAsync(Stream content, string fileName, CancellationToken ct = default);
 
     /// <summary>
-    /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256（九3）。
+    /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256。
     /// 返回 (相对路径, sha256 十六进制小写)。源流仅读取一次，避免重复 IO。
     /// </summary>
     Task<(string relativePath, string sha256)> WriteToUploadingWithHashAsync(Stream content, string fileName, CancellationToken ct = default);

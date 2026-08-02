@@ -1,5 +1,5 @@
 using Core.Contracts.Friends;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;

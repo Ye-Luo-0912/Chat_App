@@ -11,7 +11,7 @@ namespace Chat_App.Infrastructure.Persistence;
 [JsonSerializable(typeof(ErrorResult))]
 [JsonSerializable(typeof(RefreshTokenRequest))]
 [JsonSerializable(typeof(LogoutRequest))]
-[JsonSerializable(typeof(EamilRequest))]
+[JsonSerializable(typeof(EmailRequest))]
 [JsonSerializable(typeof(RegisterRequest))]
 [JsonSerializable(typeof(EmailResult))]
 [JsonSerializable(typeof(RegisterResponse))]

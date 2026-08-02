@@ -3,7 +3,7 @@ using Core.Models;
 using Core.Models.DTO;
 using Core.Protocol;
 using Core.Services;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Serialization;
 using System.Buffers;
 using System.Collections.Concurrent;
 using Xunit;
@@ -81,7 +81,7 @@ public class ReconnectionStressTests
         PacketCommand command,
         T? payload)
     {
-        // P0-十: 序列化器直写 IBufferWriter，不再返回独立 byte[]
+        // 序列化器直写 IBufferWriter，不再返回独立 byte[]
         var writer = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + 64);
         serializer.Serialize(writer, payload);
         var bodyLen = writer.WrittenCount;

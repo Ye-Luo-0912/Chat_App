@@ -1,14 +1,14 @@
 using Core.Models;
 using Core.Models.DTO;
 using Core.Protocol;
-using Infrastructure.Serialization;
+using Chat_App.Infrastructure.Serialization;
 using System.Buffers;
 using Xunit;
 
 namespace Protocol.Tests;
 
 /// <summary>
-/// 分配预算门禁测试（P0-十二）。
+/// 分配预算门禁测试。
 /// 编码/解码无反射，Debug/Release 下阈值稳定，作为强制 CI 门禁。
 /// 序列化/反序列化因 source-gen JSON 在测试宿主中杂音大（GC.GetTotalAllocatedBytes
 /// 包含 xunit/JIT 噪声），仅记录不强制；精确门禁由 BenchmarkResults.md + BenchmarkDotNet 负责。
@@ -62,8 +62,8 @@ public class AllocationBudgetTests
         var after = GC.GetTotalAllocatedBytes(precise: true);
         var perOp = (after - before) / 1000;
 
-        // 基线 400B，阈值 800B；Debug 下放宽到 2000B
-        Assert.True(perOp <= 2000, "解码单帧分配 " + perOp + "B 超过预算 2000B（基线 400B，Release 阈值 800B）");
+        // 基线 312B，Release 阈值 624B；Debug 下放宽到 2000B
+        Assert.True(perOp <= 2000, "解码单帧分配 " + perOp + "B 超过预算 2000B（基线 312B，Release 阈值 624B）");
     }
 
     /// <summary>

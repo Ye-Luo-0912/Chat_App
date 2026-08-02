@@ -6,7 +6,7 @@ public struct LoginRequest()
     public string Password { get; set; } = string.Empty;
 }
 
-public class EamilRequest()
+public class EmailRequest()
 {
     public required string Email { get; set; }
 }

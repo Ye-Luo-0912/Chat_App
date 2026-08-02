@@ -2,7 +2,7 @@ using Chat_App.Infrastructure.Persistence;
 using Core.Contracts.Auth;
 using Core.Contracts.Common;
 using Core.Interfaces;
-using Infrastructure.Networking;
+using Chat_App.Infrastructure.Networking;
 using Serilog;
 using System;
 using System.Net.Http;
@@ -34,23 +34,16 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
 
         var jsonRequest = JsonSerializer.Serialize(loginRequest, LoginJsonContext.Default.LoginRequest);
 
-        // 发送 POST 请求到认证服务器的登录端点
-        //var response = await _httpClient.PostAsync($"{_authServerBaseUrl}/api/users/login", content, cancellationToken); 
         using var request = new HttpRequestMessage(HttpMethod.Post, BaseUrlStr("login"))
         {
             Content = new StringContent(jsonRequest, Encoding.UTF8, MediaTypeHeaderValue.Parse("application/json"))
         };
 
-        // 在发送请求之前，设置一个标志，告诉认证拦截器跳过这个请求的处理
-        //request.Options.Set(RequestOptionKeys.SkipAuthInterceptor, true);
-
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-
         if (response.IsSuccessStatusCode)
         {
-            // 处理成功响应 (例如，读取访问令牌和刷新令牌)
             var loginResult = JsonSerializer.Deserialize(jsonResponse, LoginJsonContext.Default.LoginResult);
 
             if (loginResult is null)
@@ -62,11 +55,8 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
             return loginResult;
         }
 
-
-        //处理错误情况 (例如，读取错误消息)
         try
         {
-            //尝试反序列化为包含错误信息的对象.  
             var errorResult = JsonSerializer.Deserialize(jsonResponse, LoginJsonContext.Default.LoginResult);
             return errorResult ?? new LoginResult
             {
@@ -76,7 +66,6 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
         }
         catch
         {
-            //如果无法反序列化为ErrorResult, 就直接返回错误信息
             return new LoginResult { IsSuccess = false, ErrorMessage = $"登录失败: {response.StatusCode} - {jsonResponse}" };
         }
     }
@@ -133,14 +122,9 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
 
         request.Options.Set(RequestOptionKeys.SkipAuthInterceptor, true);
 
-        // 发送请求并获取响应
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-        // 发送 POST 请求到刷新令牌的端点
-        //using var response = await _httpClient.PostAsync($"{_authServerBaseUrl}/api/users/refresh-token", content, cancellationToken);
-
-        // 处理响应
         if (response.IsSuccessStatusCode)
         {
             var refreshResult = JsonSerializer.Deserialize(jsonResponse, LoginJsonContext.Default.LoginResult);
@@ -163,8 +147,8 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
 
     public async Task<bool> SendRegisterCodeAsync(string email, CancellationToken cancellationToken = default)
     {
-        var requestModel = new EamilRequest { Email = email };
-        var jsonRequest = JsonSerializer.Serialize(requestModel, LoginJsonContext.Default.EamilRequest);
+        var requestModel = new EmailRequest { Email = email };
+        var jsonRequest = JsonSerializer.Serialize(requestModel, LoginJsonContext.Default.EmailRequest);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, BaseUrlStr("send-register-code"))
         {
@@ -174,8 +158,6 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
         try
         {
             using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-            // 只要是 200 OK，就说明邮件发成功了
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)
@@ -187,7 +169,6 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
 
     public async Task<RegisterResponse> RegisterAsync(string email, string code, string password, CancellationToken cancellationToken = default)
     {
-        //构建注册包 
         var registerModel = new RegisterRequest
         {
             Email = email,
@@ -206,15 +187,9 @@ public class AuthClientService(HttpClient httpClient, IDatabaseService databaseS
             using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
             var jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-            Log.Debug(jsonResponse);
-            // 提取后端返回的错误信息
-
             var regResponse = JsonSerializer.Deserialize(jsonResponse, LoginJsonContext.Default.RegisterResponse);
 
-            Log.Debug($"Register response: {regResponse?.IsSuccess}");
-
             return regResponse ?? new RegisterResponse { IsSuccess = false, Message = "响应解析失败" };
-
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

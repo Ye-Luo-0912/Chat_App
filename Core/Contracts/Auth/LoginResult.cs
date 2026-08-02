@@ -39,7 +39,7 @@ public class LoginResult
     public UserStatus Status { get; init; }
 
     // ---------- 实时通信连接端点 ----------
-    public ServerEndPoint? Server { get; init; }
+    public ServerEndpointDto? Server { get; init; }
 }
 
 public enum LoginCheckStatus : byte

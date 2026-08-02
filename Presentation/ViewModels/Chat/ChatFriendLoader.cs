@@ -2,7 +2,7 @@ using Chat_App.Infrastructure.Persistence;
 using Chat_App.Shared.Extensions;
 using Chat_App.Services;
 using Core.Interfaces;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 using System.Collections.Generic;
 using System.Threading;
@@ -28,7 +28,7 @@ public sealed class ChatFriendLoader : IChatFriendLoader
 
     public async Task<IReadOnlyList<LocalFriend>> LoadAsync(CancellationToken ct = default)
     {
-        // 按当前账户过滤本地好友，避免跨账户数据污染（P0-5）。
+        // 按当前账户过滤本地好友，避免跨账户数据污染。
         var ownerUserId = _currentUserContext.RequireUserId();
         var localFriends = await _databaseService.GetFriendsAsync(ownerUserId);
         if (localFriends.Count > 0)

@@ -1,7 +1,7 @@
-namespace Infrastructure.Models;
+namespace Chat_App.Infrastructure.Models;
 
 /// <summary>
-/// 会话已读状态实体（P0-6 持久化聊天系统）。
+/// 会话已读状态实体（持久化聊天系统）。
 /// 与 LocalConversation 分离，专门跟踪已读水位。
 /// </summary>
 public class LocalConversationReadState

@@ -12,14 +12,14 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Contracts.Attachments;
-using Infrastructure.Events;
+using Chat_App.Infrastructure.Events;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
-using Infrastructure.Models;
-using Infrastructure.Serialization;
-using Infrastructure.Services;
+using Chat_App.Infrastructure.Models;
+using Chat_App.Infrastructure.Serialization;
+using Chat_App.Infrastructure.Services;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
@@ -445,7 +445,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     /// <summary>
     /// 在 UI 线程执行 action，回调真正执行时会话可能已切换，必须再次校验代际（七）。
-    /// 统一 6 处领域事件订阅器的 generation 捕获 + Dispatcher.UIThread.Post + 代际复核模式（P0-代码复用）。
+    /// 统一 6 处领域事件订阅器的 generation 捕获 + Dispatcher.UIThread.Post + 代际复核模式。
     /// </summary>
     private void PostIfCurrent(Action action)
     {
@@ -485,7 +485,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _messagesByClientId[msg.ClientMessageId] = msg;
     }
 
-    // 插入旧历史时同步维护两个索引，确保后续编辑/撤回/去重能定位到这些消息（六4）。
+    // 插入旧历史时同步维护两个索引，确保后续编辑/撤回/去重能定位到这些消息。
     internal void InsertMessage(int index, Message msg)
     {
         Messages.Insert(index, msg);
@@ -894,7 +894,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var selfId = _chatSession.CurrentUserId;
 
         // 去重依赖 FindMessage 的 _messagesByServerId 索引：已存在则更新，本次循环新追加的也会被后续 FindMessage 命中。
-        // 避免每次构建 knownIds HashSet 的 O(Messages) 分配（P0-热路径分配优化）。
+        // 避免每次构建 knownIds HashSet 的 O(Messages) 分配。
         foreach (var item in items.OrderBy(i => i.ReceivedAtMs).ThenBy(i => i.MessageId, StringComparer.Ordinal))
         {
             if (item.SenderUserId != peerId && item.ReceiverUserId != peerId)
@@ -947,7 +947,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     /// <summary>
     /// 将 DB 加载的最新页增量合并进当前会话：就地更新已存在消息的字段（状态/撤回/编辑），
     /// 仅追加尚未展示的新消息。不删除已有消息——fresh 仅为最新页，向上分页加载的更早消息不在其中。
-    /// 保留已存在消息的对象引用与 UI 容器，避免 Clear+Add 重建（P0-UI 热路径优化）。
+    /// 保留已存在消息的对象引用与 UI 容器，避免 Clear+Add 重建。
     /// </summary>
     private void ApplyHistoryDiff(IReadOnlyList<LocalMessage> fresh)
     {
@@ -955,7 +955,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
 
         // 单循环：用已有 _messagesByServerId/_messagesByClientId 索引 O(1) 查找，
-        // 命中则就地更新（保留 UI 容器），未命中则追加。避免每次构建临时字典（P0-热路径分配优化）。
+        // 命中则就地更新（保留 UI 容器），未命中则追加。避免每次构建临时字典。
         foreach (var lm in fresh)
         {
             var existing = FindMessage(lm.MessageId, lm.ClientMessageId);
@@ -974,7 +974,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     /// <summary>将 DB 最新状态同步到已存在的 UI 消息（状态/撤回/编辑单调推进，不回退）。</summary>
     private static void ApplyDbStateToMessage(Message target, LocalMessage src)
     {
-        // 撤回具有最高优先级（六2）
+        // 撤回具有最高优先级
         if ((src.RecalledAtMs is > 0 || src.Status == MessageStatus.Recalled) && !target.IsRecalled)
         {
             target.ApplyRecalled();
@@ -985,7 +985,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (src.Status != target.Status && (byte)src.Status > (byte)target.Status)
             target.Status = src.Status;
 
-        // 编辑版本单调递增：仅当 DB 编辑版本更新时应用（六2）
+        // 编辑版本单调递增：仅当 DB 编辑版本更新时应用
         var dbEditVersion = src.EditVersion > 0 ? src.EditVersion : 1;
         if (dbEditVersion > target.EditVersion)
             target.ApplyEdited(src.Content ?? string.Empty, dbEditVersion, src.EditedAtMs ?? 0);
@@ -1105,7 +1105,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             UpdatedAt = nowUtc
         };
 
-        // 单事务写入 Outbox + LocalMessage（P0-4 事务化 Outbox）：先持久化再发送
+        // 单事务写入 Outbox + LocalMessage（事务化 Outbox）：先持久化再发送
         try
         {
             await _dbService.EnqueueOutboxWithMessageAsync(outbox, localMessage).ConfigureAwait(true);
@@ -1253,7 +1253,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             UpdatedAt = nowUtc
         };
 
-        // 单事务写入 Outbox + LocalMessage（P0-4 事务化 Outbox）：先持久化再发送
+        // 单事务写入 Outbox + LocalMessage（事务化 Outbox）：先持久化再发送
         try
         {
             await _dbService.EnqueueOutboxWithMessageAsync(outbox, localMessage).ConfigureAwait(true);
@@ -1394,6 +1394,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 {
                     Log.Warning(ex, "Local dedup query failed");
                 }
+            }
+            if (uploadingRelativePath is null)
+            {
+                Log.Warning("Attachment temp file path is missing");
+                _notificationService.ShowError("Failed to save attachment temp file.");
+                return;
             }
             var owner = _currentUserContext.RequireUserId();
             try

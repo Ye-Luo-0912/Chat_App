@@ -6,7 +6,7 @@ using Chat_App.Infrastructure.Persistence;
 using Chat_App.Shared.Extensions;
 using Core.Contracts.Friends;
 using Core.Interfaces;
-using Infrastructure.Models;
+using Chat_App.Infrastructure.Models;
 using Serilog;
 
 namespace Chat_App.Services;
