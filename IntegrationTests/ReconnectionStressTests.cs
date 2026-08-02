@@ -29,7 +29,7 @@ public class ReconnectionStressTests
 
         public bool IsConnected => _connected;
 
-        public event EventHandler<string>? ConnectionStatusChanged;
+        public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
         public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
 
         /// <summary>每次发送一帧后触发（command, bodyBytes）。</summary>
@@ -38,7 +38,7 @@ public class ReconnectionStressTests
         public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default)
         {
             _connected = true;
-            ConnectionStatusChanged?.Invoke(this, "Connected");
+            ConnectionStatusChanged?.Invoke(this, new ConnectionStateChangedEventArgs(ConnectionState.Connected));
             return Task.CompletedTask;
         }
 
@@ -61,7 +61,7 @@ public class ReconnectionStressTests
         {
             if (!_connected) return;
             _connected = false;
-            ConnectionStatusChanged?.Invoke(this, reason ?? "Disconnected");
+            ConnectionStatusChanged?.Invoke(this, new ConnectionStateChangedEventArgs(ConnectionState.Disconnected, reason));
         }
 
         /// <summary>注入一段数据块给上层（模拟服务端下发）。</summary>

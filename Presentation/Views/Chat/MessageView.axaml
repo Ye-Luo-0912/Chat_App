@@ -21,6 +21,7 @@
                                    TrueBrush="#3B82F6"
                                    FalseBrush="#E5E7EB"/>
         <conv:LongToBoolConverter x:Key="LongToBool"/>
+        <conv:MessageStatusMatchConverter x:Key="StatusMatch"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -102,6 +103,14 @@
                                             <MenuItem Header="撤回"
                                                       IsVisible="{Binding IsSentByMe}"
                                                       Command="{Binding #Root.((vm:MessageViewModel)DataContext).RecallMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="重试发送"
+                                                      IsVisible="{Binding Status, Converter={StaticResource StatusMatch}, ConverterParameter=Failed}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).RetryMessageCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="取消发送"
+                                                      IsVisible="{Binding Status, Converter={StaticResource StatusMatch}, ConverterParameter='Queued,Sending'}"
+                                                      Command="{Binding #Root.((vm:MessageViewModel)DataContext).CancelSendCommand}"
                                                       CommandParameter="{Binding}"/>
                                         </MenuFlyout>
                                     </Border.ContextFlyout>

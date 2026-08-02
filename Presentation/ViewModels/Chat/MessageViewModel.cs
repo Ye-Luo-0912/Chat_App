@@ -178,6 +178,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public RelayCommand ForwardMessageCommand { get; }
     public RelayCommand BeginEditMessageCommand { get; }
     public AsyncRelayCommand<Message> RecallMessageCommand { get; }
+    public AsyncRelayCommand<Message> RetryMessageCommand { get; }
+    public AsyncRelayCommand<Message> CancelSendCommand { get; }
     public AsyncRelayCommand<AttachmentRefDto> DownloadAttachmentCommand { get; }
 
     /// <summary>由 ChatViewModel 注入：进入转发选好友模式。</summary>
@@ -359,6 +361,29 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 Log.Error(ex, "撤回消息失败");
                 _notificationService.ShowError($"撤回失败: {ex.Message}");
+            });
+
+        // 手动重试（Failed → Queued，交 OutboxProcessor 重发）
+        RetryMessageCommand = new AsyncRelayCommand<Message>(
+            RetryMessageAsync,
+            msg => msg is { IsSentByMe: true, Status: MessageStatus.Failed }
+                   && !string.IsNullOrWhiteSpace(msg.ClientMessageId),
+            ex =>
+            {
+                Log.Error(ex, "重试发送失败");
+                _notificationService.ShowError($"重试失败: {ex.Message}");
+            });
+
+        // 取消发送（Queued/Sending → Cancelled）
+        CancelSendCommand = new AsyncRelayCommand<Message>(
+            CancelSendAsync,
+            msg => msg is { IsSentByMe: true }
+                   && msg.Status is MessageStatus.Queued or MessageStatus.Sending
+                   && !string.IsNullOrWhiteSpace(msg.ClientMessageId),
+            ex =>
+            {
+                Log.Error(ex, "取消发送失败");
+                _notificationService.ShowError($"取消失败: {ex.Message}");
             });
 
         DownloadAttachmentCommand = new AsyncRelayCommand<AttachmentRefDto>(
@@ -573,6 +598,33 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    /// <summary>手动重试发送：Failed/Cancelled → Queued，交 OutboxProcessor 认领重发。</summary>
+    private async Task RetryMessageAsync(Message? message, CancellationToken ct)
+    {
+        if (message is null || !message.IsSentByMe || string.IsNullOrWhiteSpace(message.ClientMessageId))
+            return;
+        var selfId = _currentUserContext.RequireUserId();
+        var ok = await _dbService.RetryOutboxAsync(selfId, message.ClientMessageId).ConfigureAwait(true);
+        if (!ok)
+            return;
+        message.Status = MessageStatus.Queued;
+        CancelSendCommand.RaiseCanExecuteChanged();
+        _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Queued, null));
+    }
+
+    /// <summary>取消发送：Queued/Sending → Cancelled，OutboxProcessor 不再认领。</summary>
+    private async Task CancelSendAsync(Message? message, CancellationToken ct)
+    {
+        if (message is null || !message.IsSentByMe || string.IsNullOrWhiteSpace(message.ClientMessageId))
+            return;
+        var selfId = _currentUserContext.RequireUserId();
+        var ok = await _dbService.CancelOutboxAsync(selfId, message.ClientMessageId).ConfigureAwait(true);
+        if (!ok)
+            return;
+        message.Status = MessageStatus.Failed;
+        _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Cancelled, null));
+    }
+
     private void ApplyRecalled(string messageId)
     {
         var existing = FindMessage(messageId, null);
@@ -671,7 +723,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         // 1. 加载本地最新页并渲染
         try
         {
-            var history = await _messageStore.LoadHistoryAsync(conversationId, limit: 100, ct: ct)
+            var history = await _messageStore.LoadHistoryAsync(_chatSession.CurrentSession, conversationId, limit: 100, ct: ct)
                 .ConfigureAwait(true);
             if (generation != _conversationGeneration || ct.IsCancellationRequested)
                 return;
@@ -714,13 +766,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         try
         {
-            await _messageStore.FetchAndPersistHistoryAsync(conversationId, limit: 50, ct: ct)
+            await _messageStore.FetchAndPersistHistoryAsync(_chatSession.CurrentSession, conversationId, limit: 50, ct: ct)
                 .ConfigureAwait(true);
             if (generation != _conversationGeneration)
                 return;
 
             // 同步拉取的新消息补充到 UI（仅当仍是当前会话）
-            var fresh = await _messageStore.LoadHistoryAsync(conversationId, limit: 100, ct: ct)
+            var fresh = await _messageStore.LoadHistoryAsync(_chatSession.CurrentSession, conversationId, limit: 100, ct: ct)
                 .ConfigureAwait(true);
             if (generation != _conversationGeneration)
                 return;
@@ -789,6 +841,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             if (generation != _conversationGeneration)
                 return;
             await _messageStore.MarkConversationReadAndNotifyAsync(
+                _chatSession.CurrentSession,
                 CurrConversationId,
                 lastMessage?.MessageId,
                 ct);
@@ -816,6 +869,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         try
         {
             var older = await _messageStore.FetchAndPersistHistoryAsync(
+                _chatSession.CurrentSession,
                 CurrConversationId,
                 limit: 50,
                 beforeReceivedAtMs: oldest.ReceivedAtMs,
@@ -888,7 +942,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
 
         if (CurrConversationId is not null)
-            _ = _messageStore.PersistHistoryAsync(CurrConversationId, items);
+            _ = _messageStore.PersistHistoryAsync(_chatSession.CurrentSession, CurrConversationId, items);
 
         var peerId = CurrFriend.FriendId;
         var selfId = _chatSession.CurrentUserId;
@@ -1136,33 +1190,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ClearReplyDraft();
         _ = StopTypingAsync();
 
-        // 持久化完成后才尝试网络发送；失败由 OutboxProcessor 重试
-        try
-        {
-            await _chatSession.SendChatMessageAsync(
-                    targetUserId,
-                    text,
-                    attachmentIds,
-                    replyMessageId,
-                    replySenderId,
-                    replyPreview,
-                    null, null, null,
-                    clientMessageId,
-                    ct)
-                .ConfigureAwait(true);
-            // 发送已上行成功，标记 Sending；后续 MessageAck 会推进到 Sent
-            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Sending)
-                .ConfigureAwait(true);
-            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Sending, null));
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "发送消息失败，OutboxProcessor 将重试 ClientMessageId={ClientMessageId}", clientMessageId);
-            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Failed, null, ex.Message)
-                .ConfigureAwait(true);
-            _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Failed, null));
-            _notificationService.ShowError($"消息发送失败，已保存可重试: {ex.Message}");
-        }
+        // UI 仅事务化入库，网络发送全部由 OutboxProcessor 执行；
+        // 发布事件提示排空器立即发送，后续状态经 OutboxStatusChangedEvent 回流 UI。
+        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, targetUserId));
     }
 
     /// <summary>
@@ -1181,12 +1211,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (source.IsRecalled || string.IsNullOrWhiteSpace(source.MessageId))
         {
             _notificationService.ShowError("无法转发该消息。");
-            return null;
-        }
-
-        if (!_chatSession.IsConnected || !_chatSession.IsAuthenticated)
-        {
-            _notificationService.ShowError("未连接到服务器或未鉴权，无法转发。");
             return null;
         }
 
@@ -1265,34 +1289,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return null;
         }
 
-        var bubbleStatus = MessageStatus.Queued;
-        try
-        {
-            await _chatSession.SendChatMessageAsync(
-                    target.FriendId,
-                    content,
-                    attachmentIds: null,
-                    replyToMessageId: null,
-                    replyToSenderUserId: null,
-                    replyToPreview: null,
-                    forwardedFromMessageId: source.MessageId,
-                    forwardedFromSenderUserId: forwardSenderId,
-                    forwardedFromPreview: forwardPreview,
-                    clientMessageId: clientMessageId,
-                    ct: ct)
-                .ConfigureAwait(true);
-            // 发送已上行成功，标记 Sending；后续 MessageAck 会推进到 Sent
-            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Sending)
-                .ConfigureAwait(true);
-            bubbleStatus = MessageStatus.Sending;
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "转发消息发送失败，OutboxProcessor 将重试 ClientMessageId={ClientMessageId}", clientMessageId);
-            await _dbService.UpdateOutboxStatusWithRetryAsync(selfId, clientMessageId, OutboxStatus.Failed, null, ex.Message)
-                .ConfigureAwait(true);
-            bubbleStatus = MessageStatus.Failed;
-        }
+        // UI 仅事务化入库，网络发送全部由 OutboxProcessor 执行；
+        // 发布事件提示排空器立即发送，后续状态经 OutboxStatusChangedEvent 回流 UI。
+        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, target.FriendId));
 
         return new Message
         {
@@ -1300,7 +1299,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Content = content,
             Timestamp = DateTime.Now,
             IsSentByMe = true,
-            Status = bubbleStatus,
+            Status = MessageStatus.Queued,
             Sender = EmptyUser,
             ForwardedFromMessageId = source.MessageId,
             ForwardedFromSenderUserId = forwardSenderId,
@@ -1558,8 +1557,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
                     try
                     {
+                        var expectedSha256 = await TryGetAttachmentSha256Async(attachment.AttachmentId).ConfigureAwait(true);
                         cachedPath = await _storage.WriteToDownloadsAsync(
-                            attachment.AttachmentId, fileName, downloaded, ct).ConfigureAwait(true);
+                            attachment.AttachmentId, fileName, downloaded, ct, expectedSha256).ConfigureAwait(true);
                     }
                     catch (Exception ex)
                     {
@@ -1632,6 +1632,22 @@ public class MessageViewModel : ViewModelBase, IDisposable
         catch (Exception ex)
         {
             Log.Warning(ex, "更新附件缓存路径失败");
+        }
+    }
+
+    private async Task<string?> TryGetAttachmentSha256Async(string attachmentId)
+    {
+        if (!_currentUserContext.TryGetUserId(out var owner))
+            return null;
+        try
+        {
+            var existing = await _dbService.GetAttachmentByAttachmentIdAsync(owner, attachmentId).ConfigureAwait(true);
+            return string.IsNullOrWhiteSpace(existing?.Sha256) ? null : existing.Sha256;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "读取附件 SHA-256 失败，跳过哈希校验");
+            return null;
         }
     }
 

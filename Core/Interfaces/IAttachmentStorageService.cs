@@ -52,8 +52,11 @@ public interface IAttachmentStorageService
     /// <summary>检查下载缓存中是否已有该附件，返回完整路径或 null。</summary>
     string? GetDownloadCachePath(string attachmentId, string fileName);
 
-    /// <summary>将下载流写入缓存，返回完整路径。</summary>
-    Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default);
+    /// <summary>
+    /// 将下载流写入缓存，返回完整路径。
+    /// expectedSha256 非空时校验内容哈希，不一致则删除并抛异常。
+    /// </summary>
+    Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null);
 
     /// <summary>获取磁盘可用空间（字节）。返回 null 表示无法确定。</summary>
     long? GetAvailableDiskSpace();

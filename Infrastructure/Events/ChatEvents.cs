@@ -23,3 +23,6 @@ public record ConversationReadEvent(string ConversationId, long ReadAtMs);
 
 /// <summary>Outbox 条目状态变更。</summary>
 public record OutboxStatusChangedEvent(string ClientMessageId, OutboxStatus NewStatus, string? ServerMessageId);
+
+/// <summary>新 Outbox 条目已入库（UI 事务持久化完成），提示排空器立即发送。</summary>
+public record OutboxEnqueuedEvent(string ClientMessageId, string ConversationId, long TargetUserId);

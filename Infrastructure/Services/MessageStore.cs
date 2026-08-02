@@ -11,7 +11,8 @@ namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// 消息持久化服务：网络消息 → 去重 → 本地持久化 → 发布领域事件。
-/// 依赖 IDatabaseService（仓储）、IEventBus（事件总线）、ICurrentUserContext（账户隔离）。
+/// 依赖 IDatabaseService（仓储）、IEventBus（事件总线）。
+/// 所有方法携带 SessionStamp，账户隔离由调用方传入的会话标识保证。
 /// </summary>
 public sealed class MessageStore : IMessageStore
 {
@@ -19,21 +20,19 @@ public sealed class MessageStore : IMessageStore
 
     private readonly IDatabaseService _db;
     private readonly IEventBus _eventBus;
-    private readonly ICurrentUserContext _currentUserContext;
     private readonly IChatSessionClient _chatSession;
 
-    public MessageStore(IDatabaseService db, IEventBus eventBus, ICurrentUserContext currentUserContext, IChatSessionClient chatSession)
+    public MessageStore(IDatabaseService db, IEventBus eventBus, IChatSessionClient chatSession)
     {
         _db = db;
         _eventBus = eventBus;
-        _currentUserContext = currentUserContext;
         _chatSession = chatSession;
     }
 
     /// <inheritdoc />
-    public async Task<bool> PersistIncomingAsync(ChatMessageDto dto, CancellationToken ct = default)
+    public async Task<bool> PersistIncomingAsync(SessionStamp session, ChatMessageDto dto, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var conversationId = ResolveConversationId(dto.ConversationId, owner, dto.SenderUserId, dto.TargetUserId);
         if (conversationId is null)
             return false;
@@ -129,12 +128,12 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public async Task PersistHistoryAsync(string conversationId, IReadOnlyList<MessageHistoryItemDto> items, CancellationToken ct = default)
+    public async Task PersistHistoryAsync(SessionStamp session, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, CancellationToken ct = default)
     {
         if (items is null || items.Count == 0)
             return;
 
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
 
         foreach (var item in items)
         {
@@ -197,42 +196,52 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public async Task HandleAckAsync(MessageAcknowledgementDto ack, CancellationToken ct = default)
+    public async Task HandleAckAsync(SessionStamp session, MessageAcknowledgementDto ack, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         if (string.IsNullOrEmpty(ack.ClientMessageId))
             return;
         var clientMessageId = ack.ClientMessageId!;
 
-        var outbox = await _db.GetOutboxByClientIdAsync(owner, clientMessageId);
-        var conversationId = outbox?.ConversationId;
+        // 单事务 + 条件更新：Outbox 与 LocalMessage 原子推进；
+        // 状态仅在允许的前置状态下生效（Queued/Sending → Sent），杜绝 ACK 反向覆盖。
+        var result = await _db.ApplyOutboxAckAsync(owner, clientMessageId, ack.Accepted, ack.CommandId,
+            string.IsNullOrWhiteSpace(ack.ErrorMessage) ? ack.ErrorCode : ack.ErrorMessage);
+
+        if (!result.OutboxUpdated)
+        {
+            // 状态机不允许该转换（如已 Sent / 已 Cancelled）：重复 ACK 或乱序，忽略。
+            LogWarningDuplicateAck(clientMessageId, ack.Accepted);
+            return;
+        }
 
         if (ack.Accepted)
         {
             var serverMessageId = ack.CommandId;
-            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatus.Sent, serverMessageId, null);
-            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, MessageStatus.Sent, null, ackServerMessageId: serverMessageId);
-
             _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Sent, serverMessageId));
-            if (conversationId is not null)
-                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, MessageStatus.Sent, null));
+            if (result.ConversationId is not null)
+                _eventBus.Publish(new MessageStatusChangedEvent(result.ConversationId, serverMessageId, clientMessageId, MessageStatus.Sent, null));
         }
         else
         {
             var failureReason = string.IsNullOrWhiteSpace(ack.ErrorMessage) ? ack.ErrorCode : ack.ErrorMessage;
-            await _db.UpdateOutboxStatusAsync(owner, clientMessageId, OutboxStatus.Failed, null, failureReason);
-            await _db.UpdateMessageStatusAsync(owner, null, clientMessageId, MessageStatus.Failed, failureReason);
-
             _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Failed, null));
-            if (conversationId is not null)
-                _eventBus.Publish(new MessageStatusChangedEvent(conversationId, null, clientMessageId, MessageStatus.Failed, failureReason));
+            if (result.ConversationId is not null)
+                _eventBus.Publish(new MessageStatusChangedEvent(result.ConversationId, null, clientMessageId, MessageStatus.Failed, failureReason));
         }
     }
 
-    /// <inheritdoc />
-    public async Task HandleRecalledAsync(MessageRecalledUpdateDto update, CancellationToken ct = default)
+    private static void LogWarningDuplicateAck(string clientMessageId, bool accepted)
     {
-        var owner = _currentUserContext.RequireUserId();
+        Serilog.Log.Warning(
+            "Outbox ACK 被状态机拒绝（重复或乱序）ClientMessageId={ClientMessageId} Accepted={Accepted}",
+            clientMessageId, accepted);
+    }
+
+    /// <inheritdoc />
+    public async Task HandleRecalledAsync(SessionStamp session, MessageRecalledUpdateDto update, CancellationToken ct = default)
+    {
+        var owner = session.OwnerUserId;
         await _db.MarkMessageRecalledAsync(owner, update.MessageId, update.RecalledAtMs);
 
         var conversationId = ResolveConversationId(update.ConversationId, owner, update.SenderUserId, update.ReceiverUserId);
@@ -241,9 +250,9 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public async Task HandleEditedAsync(MessageEditedUpdateDto update, CancellationToken ct = default)
+    public async Task HandleEditedAsync(SessionStamp session, MessageEditedUpdateDto update, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         await _db.ApplyMessageEditAsync(owner, update.MessageId, update.Content, update.EditVersion, update.EditedAtMs);
 
         var conversationId = ResolveConversationId(update.ConversationId, owner, update.SenderUserId, update.ReceiverUserId);
@@ -252,9 +261,9 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public async Task HandleConversationChangedAsync(ConversationChangedDto dto, CancellationToken ct = default)
+    public async Task HandleConversationChangedAsync(SessionStamp session, ConversationChangedDto dto, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var conv = await _db.GetConversationAsync(owner, dto.ConversationId);
 
         if (conv is null)
@@ -311,16 +320,16 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public Task<List<LocalMessage>> LoadHistoryAsync(string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
+    public Task<List<LocalMessage>> LoadHistoryAsync(SessionStamp session, string conversationId, int limit = 100, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         return _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs, beforeMessageId);
     }
 
     /// <inheritdoc />
-    public async Task MarkConversationReadAsync(string conversationId, string? lastReadMessageId, CancellationToken ct = default)
+    public async Task MarkConversationReadAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var now = DateTime.UtcNow;
 
@@ -345,16 +354,16 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public Task<List<LocalConversation>> GetConversationsAsync(CancellationToken ct = default)
+    public Task<List<LocalConversation>> GetConversationsAsync(SessionStamp session, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         return _db.GetConversationsAsync(owner);
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<ConversationSyncWatermarkDto>> GetSyncWatermarksAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<ConversationSyncWatermarkDto>> GetSyncWatermarksAsync(SessionStamp session, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var cursors = await _db.GetAllSyncCursorsAsync(owner);
         return cursors
             .Where(c => !string.IsNullOrWhiteSpace(c.AfterMessageId))
@@ -368,9 +377,9 @@ public sealed class MessageStore : IMessageStore
     }
 
     /// <inheritdoc />
-    public async Task HandleReceiptAsync(MessageReceiptDto dto, CancellationToken ct = default)
+    public async Task HandleReceiptAsync(SessionStamp session, MessageReceiptDto dto, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var conversationId = ResolveConversationId(dto.ConversationId, owner, dto.ReaderUserId ?? 0, dto.ReceiverUserId ?? 0);
         if (conversationId is null)
             return;
@@ -389,10 +398,11 @@ public sealed class MessageStore : IMessageStore
 
         _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
     }
+
     /// <inheritdoc />
-    public async Task HandleReceiptUpdatedAsync(MessageReceiptUpdatedDto dto, CancellationToken ct = default)
+    public async Task HandleReceiptUpdatedAsync(SessionStamp session, MessageReceiptUpdatedDto dto, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var conversationId = dto.ConversationId;
         if (string.IsNullOrWhiteSpace(conversationId))
             return;
@@ -411,10 +421,11 @@ public sealed class MessageStore : IMessageStore
 
         _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
     }
+
     /// <inheritdoc />
-    public async Task HandleUnreadCountChangedAsync(UnreadCountChangedDto dto, CancellationToken ct = default)
+    public async Task HandleUnreadCountChangedAsync(SessionStamp session, UnreadCountChangedDto dto, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var conv = await _db.GetConversationAsync(owner, dto.ConversationId);
         if (conv is not null)
         {
@@ -437,20 +448,21 @@ public sealed class MessageStore : IMessageStore
         readState.UpdatedAt = DateTime.UtcNow;
         await _db.UpsertReadStateAsync(readState);
     }
+
     /// <inheritdoc />
-    public async Task<List<LocalMessage>> FetchAndPersistHistoryAsync(string conversationId, int limit = 50, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
+    public async Task<List<LocalMessage>> FetchAndPersistHistoryAsync(SessionStamp session, string conversationId, int limit = 50, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default)
     {
-        var owner = _currentUserContext.RequireUserId();
+        var owner = session.OwnerUserId;
         var response = await _chatSession.QueryMessageHistoryAsync(conversationId, limit, beforeReceivedAtMs, beforeMessageId, ct);
         if (response.Items is { Count: > 0 })
-            await PersistHistoryAsync(conversationId, response.Items, ct);
+            await PersistHistoryAsync(session, conversationId, response.Items, ct);
         return await _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs, beforeMessageId);
     }
 
     /// <inheritdoc />
-    public async Task MarkConversationReadAndNotifyAsync(string conversationId, string? lastReadMessageId, CancellationToken ct = default)
+    public async Task MarkConversationReadAndNotifyAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default)
     {
-        await MarkConversationReadAsync(conversationId, lastReadMessageId, ct);
+        await MarkConversationReadAsync(session, conversationId, lastReadMessageId, ct);
         try
         {
             await _chatSession.MarkConversationReadAsync(conversationId, lastReadMessageId, null, ct);
@@ -460,6 +472,7 @@ public sealed class MessageStore : IMessageStore
             // 网络失败不影响本地已读状态
         }
     }
+
     public void Reset()
     {
         // 无内存状态需清理；DB 数据按 OwnerUserId 隔离，登出时不删除。

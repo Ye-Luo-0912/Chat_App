@@ -104,6 +104,9 @@ public partial class App : Application
             .AddSingleton<IMessageStore, MessageStore>()
             .AddSingleton<ChatMessageCoordinator>()
             .AddSingleton<OutboxProcessor>()
+            .AddSingleton<ISyncCheckpointStore, SyncCheckpointStore>()
+            .AddSingleton<ISyncConflictResolver, SyncConflictResolver>()
+            .AddSingleton<ISyncEngine, SyncEngine>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<AttachmentRecoveryService>();
 

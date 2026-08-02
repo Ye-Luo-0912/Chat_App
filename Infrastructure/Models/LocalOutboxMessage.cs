@@ -53,4 +53,20 @@ public class LocalOutboxMessage
     public DateTime? SentAt { get; set; }
 
     public DateTime? NextRetryAt { get; set; }
+
+    // ---- 发送租约----
+    /// <summary>当前发送尝试 Id（Guid）：认领时生成，用于检测陈旧 Sending。</summary>
+    public string? AttemptId { get; set; }
+
+    /// <summary>当前尝试开始时间（UTC）。</summary>
+    public DateTime? AttemptStartedAt { get; set; }
+
+    /// <summary>租约到期时间（UTC）：到期后 Sending 可被回收重新入队。</summary>
+    public DateTime? LeaseUntil { get; set; }
+
+    /// <summary>最近一次失败的服务端错误码/异常类型标识。</summary>
+    public string? LastErrorCode { get; set; }
+
+    /// <summary>失败分类：可重试/永久。</summary>
+    public OutboxFailureKind FailureKind { get; set; }
 }

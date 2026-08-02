@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -20,7 +21,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
     // 下载缓存治理：容量上限与并发下载合并。
     private const long MaxCacheBytes = 512L * 1024 * 1024; // 512MB
-    private const int CacheVersion = 1;
+    private const int CacheVersion = 2;
     private const string CacheVersionFile = "cache.version";
     // 同一 AttachmentId 的并发下载合并：key = attachmentId, value = 进行中的写入任务。
     private static readonly ConcurrentDictionary<string, Task<string>> _inFlightDownloads = new();
@@ -137,21 +138,17 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         }
         sha.TransformFinalBlock([], 0, 0);
 
-        var sb = new StringBuilder(sha.Hash!.Length * 2);
-        foreach (var b in sha.Hash)
-            sb.Append(b.ToString("x2"));
-
-        return (Path.GetFileName(fullPath), sb.ToString());
+        return (Path.GetFileName(fullPath), ToHexLower(sha.Hash!));
     }
 
     public string ResolvePath(string relativePath)
     {
-        return Path.Combine(OwnerDir, relativePath);
+        return SafeResolve(OwnerDir, relativePath);
     }
 
     public Stream OpenUploadingRead(string relativePath)
     {
-        var fullPath = Path.Combine(GetUploadingDir(), relativePath);
+        var fullPath = SafeResolve(GetUploadingDir(), relativePath);
         return new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
     }
 
@@ -159,7 +156,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         try
         {
-            var fullPath = Path.Combine(GetUploadingDir(), relativePath);
+            var fullPath = SafeResolve(GetUploadingDir(), relativePath);
             if (File.Exists(fullPath))
                 File.Delete(fullPath);
         }
@@ -172,9 +169,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         var downloadsDir = GetDownloadsDir();
         var safeName = SanitizeFileName(fileName);
-        var destName = $"{attachmentId}_{safeName}";
+        var destName = $"{HashAttachmentName(attachmentId)}_{safeName}";
         var destPath = Path.Combine(downloadsDir, destName);
-        var srcPath = Path.Combine(GetUploadingDir(), uploadingRelativePath);
+        var srcPath = SafeResolve(GetUploadingDir(), uploadingRelativePath);
         if (File.Exists(srcPath))
         {
             File.Move(srcPath, destPath, overwrite: true);
@@ -187,11 +184,11 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         var downloadsDir = GetDownloadsDir();
         var safeName = SanitizeFileName(fileName);
-        var path = Path.Combine(downloadsDir, $"{attachmentId}_{safeName}");
+        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(attachmentId)}_{safeName}");
         return File.Exists(path) ? path : null;
     }
 
-    public async Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default)
+    public async Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null)
     {
         // 同一 AttachmentId 的并发下载合并：复用进行中的写入任务，避免重复下载。
         var coalesceKey = $"{_currentUserContext.UserId ?? 0}:{attachmentId}";
@@ -204,7 +201,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
         var downloadsDir = GetDownloadsDir();
         var safeName = SanitizeFileName(fileName);
-        var destName = $"{attachmentId}_{safeName}";
+        var destName = $"{HashAttachmentName(attachmentId)}_{safeName}";
         var fullPath = Path.Combine(downloadsDir, destName);
 
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -215,11 +212,33 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
             // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
             var partialPath = fullPath + ".partial";
+            var written = 0L;
+            using var sha = expectedSha256 is null ? null : SHA256.Create();
             await using (var fs = File.Create(partialPath))
             {
-                await content.CopyToAsync(fs, ct).ConfigureAwait(false);
+                var buffer = new byte[65536];
+                int read;
+                while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+                {
+                    await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    written += read;
+                    sha?.TransformBlock(buffer, 0, read, buffer, 0);
+                }
+                sha?.TransformFinalBlock([], 0, 0);
                 await fs.FlushAsync(ct).ConfigureAwait(false);
             }
+
+            // 写入长度校验：禁止空文件落盘为完整缓存。
+            if (written <= 0)
+                throw new IOException("下载内容为空");
+
+            // 内容哈希校验：调用方持有期望值时比对，不一致视为损坏。
+            if (expectedSha256 is not null
+                && !string.Equals(ToHexLower(sha!.Hash!), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("下载内容哈希校验失败");
+            }
+
             if (File.Exists(fullPath))
                 File.Delete(fullPath);
             File.Move(partialPath, fullPath, overwrite: false);
@@ -233,6 +252,17 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         }
         catch
         {
+            // 失败时清理 .partial，避免残留半成品。
+            try
+            {
+                var partialPath = fullPath + ".partial";
+                if (File.Exists(partialPath))
+                    File.Delete(partialPath);
+            }
+            catch
+            {
+                // 忽略清理失败
+            }
             tcs.TrySetException(new IOException("下载缓存写入失败"));
             throw;
         }
@@ -298,5 +328,37 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         foreach (var c in invalid)
             name = name.Replace(c, '_');
         return name.Length > 200 ? name[..200] : name;
+    }
+
+    /// <summary>
+    /// 远端 Id 派生本地文件名主段：SHA256(ownerId:attachmentId)。
+    /// 远端 Id 绝不可直接用作路径段（可含 ../ 等造成路径穿越）。
+    /// </summary>
+    private string HashAttachmentName(string attachmentId)
+    {
+        var input = $"{_currentUserContext.UserId ?? 0}:{attachmentId}";
+        return ToHexLower(SHA256.HashData(Encoding.UTF8.GetBytes(input)));
+    }
+
+    /// <summary>
+    /// 安全路径解析：GetFullPath 规范化后必须位于 rootDir 之内（大小写不敏感前缀），
+    /// 否则抛出 SecurityException，杜绝任何相对路径逃逸。
+    /// </summary>
+    private static string SafeResolve(string rootDir, string relativePath)
+    {
+        var full = Path.GetFullPath(Path.Combine(rootDir, relativePath));
+        var root = Path.GetFullPath(rootDir);
+        var rootPrefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+            throw new SecurityException($"非法附件路径: {relativePath}");
+        return full;
+    }
+
+    private static string ToHexLower(byte[] bytes)
+    {
+        var sb = new StringBuilder(bytes.Length * 2);
+        foreach (var b in bytes)
+            sb.Append(b.ToString("x2"));
+        return sb.ToString();
     }
 }

@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Core.Interfaces;
+using Core.Models;
 using Core.Models.DTO;
 using Serilog;
 
@@ -11,6 +13,10 @@ namespace Chat_App.Infrastructure.Services;
 /// IMessageStore 内部通过 IEventBus 发布领域事件供 UI 层增量更新。
 /// 本协调器本身不直接操作 UI。
 /// 使用有界 Channel + 单消费者保证入站事件顺序。
+/// 可靠队列策略：FullMode=Wait，绝不静默丢弃；背压超时则主动断开连接，
+/// 由同步水位重连后重新拉取 —— 宁可断线重同步，也不丢状态事件。
+/// 账户/连接隔离：事件入队时捕获 SessionStamp，消费时校验代际，
+/// 过期事件丢弃，绝不写入当前新账户。
 /// </summary>
 public sealed class ChatMessageCoordinator : IDisposable
 {
@@ -18,11 +24,12 @@ public sealed class ChatMessageCoordinator : IDisposable
     private readonly IChatSessionClient _chatSession;
     private readonly ICurrentUserContext _currentUserContext;
 
-    // 有界 Channel：单消费者，保证同一会话内事件严格有序
+    // 有界 Channel：单消费者，保证同一会话内事件严格有序。
+    // FullMode=Wait：队列满时入队等待（而非 DropOldest 静默丢弃），背压超时由后台任务断开连接。
     private readonly Channel<InboundMutation> _inboundChannel =
         Channel.CreateBounded<InboundMutation>(new BoundedChannelOptions(512)
         {
-            FullMode = BoundedChannelFullMode.DropOldest, // 溢出时丢弃最旧事件，避免 OOM
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
         });
@@ -30,6 +37,38 @@ public sealed class ChatMessageCoordinator : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _consumeTask;
     private bool _disposed;
+
+    // 背压处理：入队等待超时（毫秒）后主动断开连接，触发重连同步。
+    private const int BackpressureWaitMs = 5000;
+
+    // ——— 入站队列指标———
+    private long _overflowCount;
+    private long _backpressureDisconnects;
+    private long _lastProcessedSequence;
+    private long _totalProcessed;
+    private long _staleDropped;
+    private long _inboundQueueWaitDurationMs;
+
+    /// <summary>当前队列深度（等待消费的事件数）。</summary>
+    public int InboundQueueDepth => _inboundChannel.Reader.Count;
+
+    /// <summary>累计入队背压等待总耗时（毫秒）。</summary>
+    public long InboundQueueWaitDurationMs => Interlocked.Read(ref _inboundQueueWaitDurationMs);
+
+    /// <summary>累计背压溢出次数（TryWrite 失败的次数）。</summary>
+    public long InboundOverflowCount => Interlocked.Read(ref _overflowCount);
+
+    /// <summary>累计因背压超时主动断开的次数。</summary>
+    public long InboundBackpressureDisconnects => Interlocked.Read(ref _backpressureDisconnects);
+
+    /// <summary>最后处理的入站事件序号。</summary>
+    public long LastProcessedSequence => Interlocked.Read(ref _lastProcessedSequence);
+
+    /// <summary>累计成功处理的事件数。</summary>
+    public long TotalProcessed => Interlocked.Read(ref _totalProcessed);
+
+    /// <summary>累计因会话过期丢弃的事件数。</summary>
+    public long StaleDropped => Interlocked.Read(ref _staleDropped);
 
     public ChatMessageCoordinator(
         IChatSessionClient chatSession,
@@ -54,8 +93,8 @@ public sealed class ChatMessageCoordinator : IDisposable
         _consumeTask = Task.Run(ConsumeLoopAsync);
     }
 
-    // 每个事件处理器在入队时捕获当前 OwnerUserId，然后将 InboundMutation 入队。
-    // 若用户未登录（RequireUserId 会抛异常），则以警告日志丢弃事件。
+    // 每个事件处理器在入队时捕获当前 SessionStamp（OwnerUserId + 连接代际），
+    // 消费时校验，防止账户切换后旧事件写入新账户。
 
     private void OnChatMessageReceived(object? sender, ChatMessageDto dto)
         => EnqueueMutation(dto, InboundMutationKind.ChatMessage, "消息", dto.SenderUserId);
@@ -82,7 +121,8 @@ public sealed class ChatMessageCoordinator : IDisposable
         => EnqueueMutation(dto, InboundMutationKind.UnreadCountChanged, "未读数变更", dto.ConversationId);
 
     /// <summary>
-    /// 统一入站事件入队模板：捕获当前 OwnerUserId 后写入 Channel；
+    /// 统一入站事件入队模板：捕获当前 SessionStamp 后写入 Channel。
+    /// 队列满时 TryWrite 失败 → 计数溢出 → 后台等待写入（超时断开连接）。
     /// 用户未登录时以警告日志丢弃事件。
     /// </summary>
     private void EnqueueMutation<T>(T payload, InboundMutationKind kind, string label, object? id = null)
@@ -95,7 +135,48 @@ public sealed class ChatMessageCoordinator : IDisposable
                 Log.Warning("收到{Label}但用户未登录，丢弃", label);
             return;
         }
-        _inboundChannel.Writer.TryWrite(new InboundMutation(kind, userId, payload));
+
+        var stamp = new SessionStamp(userId, _chatSession.ConnectionGeneration, _chatSession.ConnectionId);
+        var mutation = new InboundMutation(kind, stamp, payload);
+
+        if (_inboundChannel.Writer.TryWrite(mutation))
+            return;
+
+        // 队列已满（FullMode=Wait 下 TryWrite 一定失败）：转入背压等待路径。
+        Interlocked.Increment(ref _overflowCount);
+        _ = HandleBackpressureAsync(mutation);
+    }
+
+    /// <summary>
+    /// 背压路径：等待队列腾出空间写入；超过 BackpressureWaitMs 未写入则主动断开连接，
+    /// 由重连后的同步水位重新拉取（宁可断线重同步，也不静默丢弃）。
+    /// </summary>
+    private async Task HandleBackpressureAsync(InboundMutation mutation)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(BackpressureWaitMs));
+            await _inboundChannel.Writer.WriteAsync(mutation, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
+        {
+            // 背压超时：消费端卡死（如 DB 死锁）。主动断开，重连后按同步水位补拉。
+            Interlocked.Increment(ref _backpressureDisconnects);
+            Log.Error(
+                "入站队列背压超时（{Ms}ms），队列深度={Depth}，主动断开连接以避免丢事件",
+                BackpressureWaitMs, _inboundChannel.Reader.Count);
+            _ = _chatSession.DisconnectAsync("入站队列背压超时，重连同步");
+        }
+        catch (OperationCanceledException)
+        {
+            // 协调器关闭
+        }
+        finally
+        {
+            Interlocked.Add(ref _inboundQueueWaitDurationMs, sw.ElapsedMilliseconds);
+        }
     }
 
     private async Task ConsumeLoopAsync()
@@ -104,9 +185,22 @@ public sealed class ChatMessageCoordinator : IDisposable
         {
             await foreach (var mutation in _inboundChannel.Reader.ReadAllAsync(_cts.Token))
             {
+                Interlocked.Increment(ref _lastProcessedSequence);
+                if (!IsSessionCurrent(mutation.Session))
+                {
+                    // 会话已过期（账户切换或连接代际变化）：丢弃，绝不写入当前新账户。
+                    Interlocked.Increment(ref _staleDropped);
+                    Log.Warning(
+                        "丢弃过期入站事件 Kind={Kind}（事件 Owner={Owner}/Gen={Gen}，当前 Owner={Current}/Gen={CurrentGen}）",
+                        mutation.Kind, mutation.Session.OwnerUserId, mutation.Session.Generation,
+                        CurrentOwnerOrZero(), _chatSession.ConnectionGeneration);
+                    continue;
+                }
+
                 try
                 {
                     await DispatchAsync(mutation);
+                    Interlocked.Increment(ref _totalProcessed);
                 }
                 catch (Exception ex)
                 {
@@ -117,34 +211,44 @@ public sealed class ChatMessageCoordinator : IDisposable
         catch (OperationCanceledException) { }
     }
 
+    private bool IsSessionCurrent(SessionStamp stamp)
+    {
+        if (!_currentUserContext.TryGetUserId(out var currentOwner))
+            return false;
+        return stamp.OwnerUserId == currentOwner && stamp.Generation == _chatSession.ConnectionGeneration;
+    }
+
+    private long CurrentOwnerOrZero()
+        => _currentUserContext.TryGetUserId(out var owner) ? owner : 0;
+
     private async Task DispatchAsync(InboundMutation mutation)
     {
         var ct = _cts.Token;
         switch (mutation.Kind)
         {
             case InboundMutationKind.ChatMessage:
-                await _messageStore.PersistIncomingAsync((ChatMessageDto)mutation.Payload!, ct);
+                await _messageStore.PersistIncomingAsync(mutation.Session, (ChatMessageDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.MessageAck:
-                await _messageStore.HandleAckAsync((MessageAcknowledgementDto)mutation.Payload!, ct);
+                await _messageStore.HandleAckAsync(mutation.Session, (MessageAcknowledgementDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.ConversationChanged:
-                await _messageStore.HandleConversationChangedAsync((ConversationChangedDto)mutation.Payload!, ct);
+                await _messageStore.HandleConversationChangedAsync(mutation.Session, (ConversationChangedDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.MessageRecalled:
-                await _messageStore.HandleRecalledAsync((MessageRecalledUpdateDto)mutation.Payload!, ct);
+                await _messageStore.HandleRecalledAsync(mutation.Session, (MessageRecalledUpdateDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.MessageEdited:
-                await _messageStore.HandleEditedAsync((MessageEditedUpdateDto)mutation.Payload!, ct);
+                await _messageStore.HandleEditedAsync(mutation.Session, (MessageEditedUpdateDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.MessageReceiptReceived:
-                await _messageStore.HandleReceiptAsync((MessageReceiptDto)mutation.Payload!, ct);
+                await _messageStore.HandleReceiptAsync(mutation.Session, (MessageReceiptDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.MessageReceiptUpdated:
-                await _messageStore.HandleReceiptUpdatedAsync((MessageReceiptUpdatedDto)mutation.Payload!, ct);
+                await _messageStore.HandleReceiptUpdatedAsync(mutation.Session, (MessageReceiptUpdatedDto)mutation.Payload!, ct);
                 break;
             case InboundMutationKind.UnreadCountChanged:
-                await _messageStore.HandleUnreadCountChangedAsync((UnreadCountChangedDto)mutation.Payload!, ct);
+                await _messageStore.HandleUnreadCountChangedAsync(mutation.Session, (UnreadCountChangedDto)mutation.Payload!, ct);
                 break;
         }
     }
@@ -185,6 +289,6 @@ public sealed class ChatMessageCoordinator : IDisposable
 
     private readonly record struct InboundMutation(
         InboundMutationKind Kind,
-        long OwnerUserId,
+        SessionStamp Session,
         object? Payload);
 }

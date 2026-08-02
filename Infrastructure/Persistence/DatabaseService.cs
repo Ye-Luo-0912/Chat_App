@@ -771,6 +771,282 @@ public class DatabaseService(
             .ExecuteDeleteAsync(None);
     }
 
+    /// <inheritdoc />
+    public Task<OutboxAckResult> ApplyOutboxAckAsync(long ownerUserId, string clientMessageId, bool accepted, string? serverMessageId = null, string? failureReason = null) => WriteAsync(() => ApplyOutboxAckAsyncImpl(ownerUserId, clientMessageId, accepted, serverMessageId, failureReason));
+
+    private async Task<OutboxAckResult> ApplyOutboxAckAsyncImpl(long ownerUserId, string clientMessageId, bool accepted, string? serverMessageId = null, string? failureReason = null)
+    {
+        if (string.IsNullOrWhiteSpace(clientMessageId))
+            return default;
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+        var now = DateTime.UtcNow;
+
+        var outbox = await db.OutboxMessages
+            .FirstOrDefaultAsync(o => o.OwnerUserId == ownerUserId
+                                   && o.ClientMessageId == clientMessageId, None);
+        if (outbox is null)
+        {
+            // 未知 ClientMessageId：跨账户/重复 ACK，忽略。
+            await transaction.CommitAsync(None);
+            return default;
+        }
+
+        bool transitioned;
+        if (accepted)
+        {
+            if (outbox.Status == OutboxStatus.Sent)
+            {
+                // 幂等：已 Sent 的重复 ACK 视为成功，避免误告警。
+                transitioned = true;
+            }
+            else if (outbox.Status is OutboxStatus.Queued or OutboxStatus.Sending)
+            {
+                outbox.Status = OutboxStatus.Sent;
+                outbox.MessageId = serverMessageId;
+                outbox.SentAt = now;
+                outbox.FailureReason = null;
+                outbox.AttemptId = null;
+                outbox.AttemptStartedAt = null;
+                outbox.LeaseUntil = null;
+                outbox.LastErrorCode = null;
+                outbox.FailureKind = OutboxFailureKind.None;
+                outbox.NextRetryAt = null;
+
+                // LocalMessage：同一事务内条件更新（Queued/Sending → Sent）。
+                await db.Messages
+                    .Where(m => m.OwnerUserId == ownerUserId
+                             && m.ClientMessageId == clientMessageId
+                             && new[] { MessageStatus.Queued, MessageStatus.Sending }.Contains(m.Status))
+                    .ExecuteUpdateAsync(m => m
+                        .SetProperty(x => x.Status, MessageStatus.Sent)
+                        .SetProperty(x => x.MessageId, serverMessageId)
+                        .SetProperty(x => x.FailureReason, (string?)null)
+                        .SetProperty(x => x.UpdatedAt, now), None);
+
+                transitioned = true;
+            }
+            else
+            {
+                // 已 Failed/Cancelled 后再收到接受 ACK：乱序，拒绝（保留失败现场）。
+                transitioned = false;
+            }
+        }
+        else
+        {
+            if (outbox.Status is OutboxStatus.Queued or OutboxStatus.Sending or OutboxStatus.Failed)
+            {
+                outbox.Status = OutboxStatus.Failed;
+                outbox.FailureReason = failureReason;
+
+                await db.Messages
+                    .Where(m => m.OwnerUserId == ownerUserId
+                             && m.ClientMessageId == clientMessageId
+                             && new[] { MessageStatus.Queued, MessageStatus.Sending }.Contains(m.Status))
+                    .ExecuteUpdateAsync(m => m
+                        .SetProperty(x => x.Status, MessageStatus.Failed)
+                        .SetProperty(x => x.FailureReason, failureReason)
+                        .SetProperty(x => x.UpdatedAt, now), None);
+
+                transitioned = true;
+            }
+            else
+            {
+                // 已 Sent 后收到拒绝 ACK：乱序，忽略（服务端曾接受过）。
+                transitioned = false;
+            }
+        }
+
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+
+        var serverId = accepted ? (serverMessageId ?? outbox.MessageId) : null;
+        return new OutboxAckResult(transitioned, outbox.ConversationId, serverId);
+    }
+
+    /// <inheritdoc />
+    public Task<List<LocalOutboxMessage>> ClaimPendingOutboxAsync(long ownerUserId, int limit, DateTime now, DateTime leaseUntil, int maxRetryCount) => WriteAsync(() => ClaimPendingOutboxAsyncImpl(ownerUserId, limit, now, leaseUntil, maxRetryCount));
+
+    private async Task<List<LocalOutboxMessage>> ClaimPendingOutboxAsyncImpl(long ownerUserId, int limit, DateTime now, DateTime leaseUntil, int maxRetryCount)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+
+        var candidates = await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && (o.Status == OutboxStatus.Queued
+                         || (o.Status == OutboxStatus.Failed
+                             && o.RetryCount < maxRetryCount
+                             && o.FailureKind != OutboxFailureKind.Permanent))
+                     && (o.NextRetryAt == null || o.NextRetryAt <= now))
+            .OrderBy(o => o.NextRetryAt ?? o.QueuedAt)
+            .Take(limit)
+            .ToListAsync(None);
+
+        var claimed = new List<LocalOutboxMessage>(candidates.Count);
+        var attemptId = Guid.NewGuid().ToString("N");
+        foreach (var candidate in candidates)
+        {
+            // 条件更新兜底：行状态已被并发改写时放弃认领（写入队列已串行化，此为双保险）。
+            var affected = await db.OutboxMessages
+                .Where(o => o.Id == candidate.Id && o.Status == candidate.Status)
+                .ExecuteUpdateAsync(o => o
+                    .SetProperty(x => x.Status, OutboxStatus.Sending)
+                    .SetProperty(x => x.AttemptId, attemptId)
+                    .SetProperty(x => x.AttemptStartedAt, now)
+                    .SetProperty(x => x.LeaseUntil, leaseUntil)
+                    .SetProperty(x => x.NextRetryAt, (DateTime?)null), None);
+            if (affected != 1)
+                continue;
+
+            candidate.Status = OutboxStatus.Sending;
+            candidate.AttemptId = attemptId;
+            candidate.AttemptStartedAt = now;
+            candidate.LeaseUntil = leaseUntil;
+            candidate.NextRetryAt = null;
+            claimed.Add(candidate);
+        }
+        return claimed;
+    }
+
+    /// <inheritdoc />
+    public Task<int> RecoverStaleSendingAsync(long ownerUserId, DateTime now) => WriteAsync(() => RecoverStaleSendingAsyncImpl(ownerUserId, now));
+
+    private async Task<int> RecoverStaleSendingAsyncImpl(long ownerUserId, DateTime now)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && o.Status == OutboxStatus.Sending
+                     && o.LeaseUntil != null
+                     && o.LeaseUntil < now)
+            .ExecuteUpdateAsync(o => o
+                .SetProperty(x => x.Status, OutboxStatus.Queued)
+                .SetProperty(x => x.AttemptId, (string?)null)
+                .SetProperty(x => x.AttemptStartedAt, (DateTime?)null)
+                .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
+    }
+
+    /// <inheritdoc />
+    public Task<bool> MarkOutboxFailureAsync(long ownerUserId, string clientMessageId, string? errorCode, string? failureReason, OutboxFailureKind failureKind, DateTime? nextRetryAt) => WriteAsync(() => MarkOutboxFailureAsyncImpl(ownerUserId, clientMessageId, errorCode, failureReason, failureKind, nextRetryAt));
+
+    private async Task<bool> MarkOutboxFailureAsyncImpl(long ownerUserId, string clientMessageId, string? errorCode, string? failureReason, OutboxFailureKind failureKind, DateTime? nextRetryAt)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+        var now = DateTime.UtcNow;
+
+        var outbox = await db.OutboxMessages
+            .FirstOrDefaultAsync(o => o.OwnerUserId == ownerUserId && o.ClientMessageId == clientMessageId, None);
+        if (outbox is null || outbox.Status is not (OutboxStatus.Queued or OutboxStatus.Sending or OutboxStatus.Failed))
+        {
+            await transaction.CommitAsync(None);
+            return false;
+        }
+
+        outbox.Status = OutboxStatus.Failed;
+        outbox.FailureReason = failureReason;
+        outbox.LastErrorCode = errorCode;
+        outbox.FailureKind = failureKind;
+        outbox.RetryCount += 1;
+        outbox.NextRetryAt = nextRetryAt;
+        outbox.AttemptId = null;
+        outbox.AttemptStartedAt = null;
+        outbox.LeaseUntil = null;
+
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ClientMessageId == clientMessageId
+                     && new[] { MessageStatus.Queued, MessageStatus.Sending }.Contains(m.Status))
+            .ExecuteUpdateAsync(m => m
+                .SetProperty(x => x.Status, MessageStatus.Failed)
+                .SetProperty(x => x.FailureReason, failureReason)
+                .SetProperty(x => x.UpdatedAt, now), None);
+
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId) => WriteAsync(() => RetryOutboxAsyncImpl(ownerUserId, clientMessageId));
+
+    private async Task<bool> RetryOutboxAsyncImpl(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+
+        var affected = await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && o.ClientMessageId == clientMessageId
+                     && new[] { OutboxStatus.Failed, OutboxStatus.Cancelled }.Contains(o.Status))
+            .ExecuteUpdateAsync(o => o
+                .SetProperty(x => x.Status, OutboxStatus.Queued)
+                .SetProperty(x => x.FailureReason, (string?)null)
+                .SetProperty(x => x.LastErrorCode, (string?)null)
+                .SetProperty(x => x.FailureKind, OutboxFailureKind.None)
+                .SetProperty(x => x.NextRetryAt, (DateTime?)null)
+                .SetProperty(x => x.AttemptId, (string?)null)
+                .SetProperty(x => x.AttemptStartedAt, (DateTime?)null)
+                .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
+
+        if (affected == 0)
+            return false;
+
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId && m.ClientMessageId == clientMessageId)
+            .ExecuteUpdateAsync(m => m
+                .SetProperty(x => x.Status, MessageStatus.Queued)
+                .SetProperty(x => x.FailureReason, (string?)null)
+                .SetProperty(x => x.UpdatedAt, now), None);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> CancelOutboxAsync(long ownerUserId, string clientMessageId) => WriteAsync(() => CancelOutboxAsyncImpl(ownerUserId, clientMessageId));
+
+    private async Task<bool> CancelOutboxAsyncImpl(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+
+        var affected = await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && o.ClientMessageId == clientMessageId
+                     && new[] { OutboxStatus.Queued, OutboxStatus.Sending }.Contains(o.Status))
+            .ExecuteUpdateAsync(o => o
+                .SetProperty(x => x.Status, OutboxStatus.Cancelled)
+                .SetProperty(x => x.AttemptId, (string?)null)
+                .SetProperty(x => x.AttemptStartedAt, (DateTime?)null)
+                .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
+
+        if (affected == 0)
+            return false;
+
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ClientMessageId == clientMessageId
+                     && new[] { MessageStatus.Queued, MessageStatus.Sending }.Contains(m.Status))
+            .ExecuteUpdateAsync(m => m
+                .SetProperty(x => x.Status, MessageStatus.Failed)
+                .SetProperty(x => x.FailureReason, "已取消发送")
+                .SetProperty(x => x.UpdatedAt, now), None);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public Task<int> CleanupOutboxAsync(long ownerUserId, DateTime olderThan) => WriteAsync(() => CleanupOutboxAsyncImpl(ownerUserId, olderThan));
+
+    private async Task<int> CleanupOutboxAsyncImpl(long ownerUserId, DateTime olderThan)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && new[] { OutboxStatus.Sent, OutboxStatus.Cancelled }.Contains(o.Status)
+                     && o.QueuedAt < olderThan)
+            .ExecuteDeleteAsync(None);
+    }
+
     /// <summary>
     /// 事务性写入 Outbox + LocalMessage（事务化 Outbox）。
     /// 在单个 DbContext + 单个事务内完成两表 upsert，保证原子性。
@@ -804,6 +1080,11 @@ public class DatabaseService(
             existingOutbox.QueuedAt                  = outbox.QueuedAt;
             existingOutbox.SentAt                    = outbox.SentAt;
             existingOutbox.NextRetryAt               = outbox.NextRetryAt;
+            existingOutbox.AttemptId                 = outbox.AttemptId;
+            existingOutbox.AttemptStartedAt          = outbox.AttemptStartedAt;
+            existingOutbox.LeaseUntil                = outbox.LeaseUntil;
+            existingOutbox.LastErrorCode             = outbox.LastErrorCode;
+            existingOutbox.FailureKind               = outbox.FailureKind;
         }
         else
         {

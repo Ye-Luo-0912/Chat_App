@@ -26,7 +26,7 @@ public class ConcurrentSendFrameIntegrityTests
         private volatile bool _connected = true;
 
         public bool IsConnected => _connected;
-        public event EventHandler<string>? ConnectionStatusChanged;
+        public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
         public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
 
         /// <summary>模拟服务端下发数据块，触发接收回调。</summary>
@@ -35,7 +35,7 @@ public class ConcurrentSendFrameIntegrityTests
         public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default)
         {
             _connected = true;
-            ConnectionStatusChanged?.Invoke(this, "Connected");
+            ConnectionStatusChanged?.Invoke(this, new ConnectionStateChangedEventArgs(ConnectionState.Connected, "Connected"));
             return Task.CompletedTask;
         }
 
@@ -54,7 +54,7 @@ public class ConcurrentSendFrameIntegrityTests
         public void Disconnect(string? reason = null)
         {
             _connected = false;
-            ConnectionStatusChanged?.Invoke(this, reason ?? "Disconnected");
+            ConnectionStatusChanged?.Invoke(this, new ConnectionStateChangedEventArgs(ConnectionState.Disconnected, reason ?? "Disconnected"));
         }
 
         public void Dispose() => _connected = false;

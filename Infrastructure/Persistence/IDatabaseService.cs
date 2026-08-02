@@ -87,6 +87,41 @@ public interface IDatabaseService
     /// </summary>
     Task UpdateOutboxStatusWithRetryAsync(long ownerUserId, string clientMessageId, OutboxStatus status, string? messageId = null, string? failureReason = null);
 
+    /// <summary>
+    /// 认领待发送条目（租约）：原子地将可发送条目（Queued，或 Failed 且未超重试上限、
+    /// 已到重试时间）置为 Sending，并写入 AttemptId/AttemptStartedAt/LeaseUntil。
+    /// 返回认领成功（状态确实转换）的条目。
+    /// </summary>
+    Task<List<LocalOutboxMessage>> ClaimPendingOutboxAsync(long ownerUserId, int limit, DateTime now, DateTime leaseUntil, int maxRetryCount);
+
+    /// <summary>
+    /// 启动/周期恢复：将租约过期的 Sending 条目（LeaseUntil &lt; now）回收为 Queued，
+    /// 清空尝试字段，供下轮认领。返回恢复条数。
+    /// </summary>
+    Task<int> RecoverStaleSendingAsync(long ownerUserId, DateTime now);
+
+    /// <summary>
+    /// 记录发送失败：Outbox 置 Failed（带分类/错误码/重试时间），
+    /// LocalMessage 同步置 Failed；单事务。
+    /// </summary>
+    Task<bool> MarkOutboxFailureAsync(long ownerUserId, string clientMessageId, string? errorCode, string? failureReason, OutboxFailureKind failureKind, DateTime? nextRetryAt);
+
+    /// <summary>手动重试：Failed/Cancelled → Queued，重置尝试元数据与分类。返回是否转换成功。</summary>
+    Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId);
+
+    /// <summary>取消发送：Queued/Sending → Cancelled（LocalMessage 同步 Cancelled→Failed 展示）。返回是否转换成功。</summary>
+    Task<bool> CancelOutboxAsync(long ownerUserId, string clientMessageId);
+
+    /// <summary>清理已结束条目：删除 olderThan 之前的 Sent/Cancelled 记录。返回删除条数。</summary>
+    Task<int> CleanupOutboxAsync(long ownerUserId, DateTime olderThan);
+
+    /// <summary>
+    /// ACK 单事务处理：Outbox 与 LocalMessage 在单个事务内原子推进。
+    /// 条件更新（单调状态机）：Queued/Sending → Sent（接受）或 → Failed（拒绝）；
+    /// 已 Sent 的重复 ACK 视为幂等成功；其它不允许的状态转换返回 OutboxUpdated=false。
+    /// </summary>
+    Task<OutboxAckResult> ApplyOutboxAckAsync(long ownerUserId, string clientMessageId, bool accepted, string? serverMessageId = null, string? failureReason = null);
+
     // ---- 同步水位----
     Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId);
     Task UpsertSyncCursorAsync(LocalSyncCursor cursor);

@@ -50,6 +50,23 @@ namespace Core.Services
 
         public long CurrentUserId { get; private set; }
 
+        // 连接代际与连接 Id：每次成功建立连接递增/更换，
+        // 供入站事件队列做 SessionStamp 代际校验，防止旧连接/旧账户事件写入新会话状态。
+        private long _connectionGeneration;
+        private Guid _connectionId;
+
+        public long ConnectionGeneration => Interlocked.Read(ref _connectionGeneration);
+
+        public Guid ConnectionId => _connectionId;
+
+        /// <summary>
+        /// 当前会话戳：未鉴权或已断开时为 SessionStamp.None。
+        /// </summary>
+        public SessionStamp CurrentSession =>
+            IsAuthenticated && CurrentUserId > 0
+                ? new SessionStamp(CurrentUserId, ConnectionGeneration, ConnectionId)
+                : SessionStamp.None;
+
         public event EventHandler? Connected;
         public event EventHandler<long>? Authenticated;
         public event EventHandler<string>? AuthenticationFailed;
@@ -105,11 +122,9 @@ namespace Core.Services
         /// <summary>
         /// 当 TCP 客户端的连接状态发生改变时触发该事件处理程序，负责根据新的连接状态来更新 ChatSessionClient 的状态，并触发相应的事件通知外部订阅者。
         /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="status"></param>
-        private void OnConnectionStatusChanged(object? sender, string status)
+        private void OnConnectionStatusChanged(object? sender, ConnectionStateChangedEventArgs e)
         {
-            if (status == "Connected")
+            if (e.State == ConnectionState.Connected)
             {
                 Connected?.Invoke(this, EventArgs.Empty);
             }
@@ -117,8 +132,8 @@ namespace Core.Services
             {
                 IsAuthenticated = false;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
-                FailPendingRequests(new IOException(status));
-                ConnectionClosed?.Invoke(this, status);
+                FailPendingRequests(new IOException(e.Reason ?? "连接已断开"));
+                ConnectionClosed?.Invoke(this, e.Reason ?? "连接已断开");
             }
         }
 
@@ -159,6 +174,9 @@ namespace Core.Services
             _codec.Reset();
             // 连接到服务器后，ChatSessionClient 将等待服务器发送认证结果消息，以确定认证是否成功，并根据认证结果更新状态和触发相应的事件通知外部订阅者。
             await _tcpClient.ConnectAsync(endpoint, ct);
+            // 新连接代际：后续事件以此代际校验 SessionStamp。
+            Interlocked.Increment(ref _connectionGeneration);
+            _connectionId = Guid.NewGuid();
         }
 
 
@@ -173,8 +191,8 @@ namespace Core.Services
             IsAuthenticated = false;
             CurrentUserId = 0;
             Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
-            _tcpClient.Disconnect(reason);
-            await Task.CompletedTask; // 占位，保持异步签名
+            // 真正等待收发循环退出后再返回。
+            await _tcpClient.DisconnectAsync(reason, ct).ConfigureAwait(false);
         }
 
         public void Dispose()

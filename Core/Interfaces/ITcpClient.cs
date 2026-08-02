@@ -59,9 +59,19 @@ public interface ITcpClient : IDisposable
     void Disconnect(string? reason = null);
 
     /// <summary>
-    /// 连接状态改变事件，传递一个字符串参数来描述当前的连接状态，如 "Connected"、"Disconnected" 或具体的错误信息。
+    /// 异步断开连接：取消收发循环并等待其真正退出后返回。
+    /// 默认实现回退到同步 Disconnect，兼容测试用 mock。
     /// </summary>
-    public event EventHandler<string>? ConnectionStatusChanged;
+    Task DisconnectAsync(string? reason = null, CancellationToken token = default)
+    {
+        Disconnect(reason);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 连接状态改变事件，携带结构化状态（<see cref="ConnectionState"/>）与原因。
+    /// </summary>
+    public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
 
 
     /// <summary>

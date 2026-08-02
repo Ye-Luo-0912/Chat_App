@@ -22,6 +22,18 @@ public interface IChatSessionClient : IDisposable
     /// <summary>鉴权成功后的当前用户 Id；未鉴权时为 0。</summary>
     long CurrentUserId { get; }
 
+    /// <summary>当前连接代际：每次成功建立连接递增，用于 SessionStamp 代际校验。</summary>
+    long ConnectionGeneration { get; }
+
+    /// <summary>当前连接 Id：每次成功建立连接更换，用于 SessionStamp。</summary>
+    Guid ConnectionId { get; }
+
+    /// <summary>
+    /// 当前会话戳：由当前代际 + 连接 Id + 已鉴权用户组成；
+    /// 未鉴权或已断开时为 <see cref="SessionStamp.None"/>。供 UI 层持久化调用携带。
+    /// </summary>
+    SessionStamp CurrentSession { get; }
+
     /// <summary>连接到指定服务器端点。成功后需调用 <see cref="AuthenticateAsync"/>。</summary>
     Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default);
 

@@ -24,7 +24,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly IChatFriendLoader _friendLoader;
     private readonly IChatConnectionCoordinator _connectionCoordinator;
     private readonly IChatSessionClient _chatSession;
-    private readonly IMessageStore _messageStore;
+    private readonly ISyncEngine _syncEngine;
     private readonly ChatFriendListState _friendListState;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _disposed;
@@ -189,14 +189,14 @@ public class ChatViewModel : ViewModelBase, IDisposable
         IChatFriendLoader friendLoader,
         IChatConnectionCoordinator connectionCoordinator,
         IChatSessionClient chatSessionClient,
-        IMessageStore messageStore)
+        ISyncEngine syncEngine)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
         _friendLoader = friendLoader;
         _connectionCoordinator = connectionCoordinator;
         _chatSession = chatSessionClient;
-        _messageStore = messageStore;
+        _syncEngine = syncEngine;
         _friendListState = new ChatFriendListState(Friends, FilteredFriends);
 
         PinFriendCommand = new AsyncRelayCommand<LocalFriend>(
@@ -235,6 +235,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _chatSession.ConversationChanged += OnConversationChanged;
         _chatSession.Authenticated += OnAuthenticatedRefreshPrefs;
         _chatSession.PresenceChanged += OnPresenceChanged;
+        _syncEngine.Completed += OnSyncCompleted;
     }
 
     private void RebuildFriendsIndex()
@@ -383,15 +384,49 @@ public class ChatViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async void OnAuthenticatedRefreshPrefs(object? sender, long userId)
+    private void OnAuthenticatedRefreshPrefs(object? sender, long userId)
+    {
+        // 同步全部移交 SyncEngine：水位 → Bootstrap → 持久化 → Completed 事件投影 UI。
+        _syncEngine.Start(_chatSession.CurrentSession);
+    }
+
+    private async void OnSyncCompleted(object? sender, SyncCompletedEventArgs e)
     {
         try
         {
-            await RefreshAfterAuthAsync(CancellationToken.None).ConfigureAwait(false);
+            if (e.Session.OwnerUserId != _chatSession.CurrentUserId)
+                return;
+
+            if (!e.Succeeded)
+            {
+                // 同步失败：回退到会话列表，至少恢复置顶/免打扰。
+                await RefreshConversationPrefsAsync(CancellationToken.None).ConfigureAwait(false);
+                await RefreshPresenceAsync(CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                _friendListState.ApplyConversationPrefs(e.Conversations, _chatSession.CurrentUserId);
+                RaisePrefsCommands();
+
+                if (SelectedFriend is null || e.CatchUps.Count == 0)
+                    return;
+
+                var conversationId = ConversationId.CreateDirect(
+                    _chatSession.CurrentUserId,
+                    SelectedFriend.FriendId);
+                var catchUp = e.CatchUps.FirstOrDefault(c =>
+                    string.Equals(c.ConversationId, conversationId, StringComparison.Ordinal));
+                if (catchUp is not null)
+                    _messageViewModel.ApplyCatchUp(catchUp.Items);
+            });
+
+            await RefreshPresenceAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "鉴权后同步引导失败");
+            Log.Warning(ex, "同步完成处理失败");
         }
     }
 
@@ -407,62 +442,6 @@ public class ChatViewModel : ViewModelBase, IDisposable
             _friendListState.ApplyConversationChanged(e, _chatSession.CurrentUserId);
             RaisePrefsCommands();
         });
-    }
-
-    private async Task RefreshAfterAuthAsync(CancellationToken ct)
-    {
-        if (!_chatSession.IsAuthenticated)
-            return;
-
-        // 从本地 DB 加载持久化的同步水位，重连只拉取缺失数据（阶段 1-2）。
-        IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null;
-        try
-        {
-            watermarks = await _messageStore.GetSyncWatermarksAsync(ct).ConfigureAwait(false);
-            if (watermarks.Count == 0)
-                watermarks = null;
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "加载本地同步水位失败，回退到空水位");
-            watermarks = null;
-        }
-
-        var sync = await _chatSession.QuerySyncBootstrapAsync(
-                listLimit: 100,
-                historyLimitPerConversation: 30,
-                maxConversationsWithHistory: 10,
-                watermarks: watermarks,
-                ct)
-            .ConfigureAwait(false);
-
-        if (!sync.Succeeded)
-        {
-            Log.Warning("同步引导失败: {Code} {Message}", sync.ErrorCode, sync.ErrorMessage);
-            // 回退到会话列表，至少恢复置顶/免打扰。
-            await RefreshConversationPrefsAsync(ct).ConfigureAwait(false);
-            await RefreshPresenceAsync(ct).ConfigureAwait(false);
-            return;
-        }
-
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-            _friendListState.ApplyConversationPrefs(sync.Conversations, _chatSession.CurrentUserId);
-            RaisePrefsCommands();
-
-            if (SelectedFriend is null || sync.CatchUps.Count == 0)
-                return;
-
-            var conversationId = ConversationId.CreateDirect(
-                _chatSession.CurrentUserId,
-                SelectedFriend.FriendId);
-            var catchUp = sync.CatchUps.FirstOrDefault(c =>
-                string.Equals(c.ConversationId, conversationId, StringComparison.Ordinal));
-            if (catchUp is not null)
-                _messageViewModel.ApplyCatchUp(catchUp.Items);
-        });
-
-        await RefreshPresenceAsync(ct).ConfigureAwait(false);
     }
 
     private async Task RefreshConversationPrefsAsync(CancellationToken ct)
