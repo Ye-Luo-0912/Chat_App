@@ -186,7 +186,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
             return;
 
         Log.Debug("导航到通讯录页面");
-        _friendsViewModel.Init();
+        await _friendsViewModel.InitAsync();
         CurrentPage = _friendsViewModel;
         UpdateSelectionStates(SelectedItem.Contacts);
 
@@ -222,6 +222,9 @@ public class HomeViewModel : ViewModelBase, IDisposable
         await _settingsViewModel.InitAsync(ct).ConfigureAwait(true);
     }
 
+    /// <summary>强制落盘当前会话完整草稿（窗口关闭前调用）。</summary>
+    public Task FlushDraftAsync() => _chatViewModel.FlushDraftsAsync();
+
     private async Task LogoutAsync(CancellationToken ct)
     {
         Log.Information("开始退出登录");
@@ -233,6 +236,16 @@ public class HomeViewModel : ViewModelBase, IDisposable
         catch (Exception ex)
         {
             Log.Warning(ex, "断开 TCP 连接失败（继续退出）");
+        }
+
+        try
+        {
+            // 退出登录前强制落盘当前会话完整草稿
+            await _chatViewModel.FlushDraftsAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "落盘草稿失败（继续退出）");
         }
 
         try

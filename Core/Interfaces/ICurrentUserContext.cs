@@ -1,12 +1,20 @@
 using System;
+using Core.Models;
 
 namespace Core.Interfaces
 {
     /// <summary>
     /// 当前登录用户的只读上下文。由 TokenInfo/ChatConnectionCoordinator 写入，供持久化层做账户隔离。
+    /// 内部为原子替换的不可变快照，读方永远拿到一致状态。
     /// </summary>
     public interface ICurrentUserContext
     {
+        /// <summary>当前会话快照（原子读取）。</summary>
+        UserSessionSnapshot Snapshot { get; }
+
+        /// <summary>会话代际：每次登录/退出/切换账户递增，用于异步回调校验。</summary>
+        long Generation { get; }
+
         /// <summary>当前用户 Id；未登录时为 null。</summary>
         long? UserId { get; }
 

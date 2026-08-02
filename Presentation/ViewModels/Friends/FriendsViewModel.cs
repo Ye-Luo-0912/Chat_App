@@ -18,7 +18,7 @@ namespace Chat_App.Presentation.ViewModels.Friends;
 /// 包含：好友列表、好友申请（收/发）、黑名单。
 /// 通过 FriendsPageService 进行数据加载和操作。
 /// </summary>
-public class FriendsViewModel : ViewModelBase
+public class FriendsViewModel : ViewModelBase, IDisposable
 {
     private readonly IFriendsPageService _pageService;
     private readonly INotificationService _notificationService;
@@ -60,6 +60,7 @@ public class FriendsViewModel : ViewModelBase
             if (SetProperty(ref _searchText, value))
             {
                 _searchDebounceCts?.Cancel();
+                _searchDebounceCts?.Dispose();
                 _searchDebounceCts = new CancellationTokenSource();
                 var token = _searchDebounceCts.Token;
                 _ = Task.Delay(200, token).ContinueWith(_ =>
@@ -175,6 +176,10 @@ public class FriendsViewModel : ViewModelBase
 
     #endregion
 
+    // 页面代际：每次激活递增，旧加载结果在更新集合前校验代际，防止过期数据覆盖新页面。
+    private long _pageGeneration;
+    private CancellationTokenSource? _pageCts;
+
     public FriendsViewModel(
         IFriendsPageService pageService,
         INotificationService notificationService)
@@ -219,27 +224,38 @@ public class FriendsViewModel : ViewModelBase
         UnblockCommand = new AsyncRelayCommand<LocalBlockedUser>(UnblockAsync, onException: HandleError);
     }
 
-    /// <summary>页面激活时调用。</summary>
-    public async void Init()
+    /// <summary>页面激活时调用。UI 线程发起，await 保持 UI 同步上下文，集合更新不跨线程。</summary>
+    public async Task InitAsync(CancellationToken ct = default)
     {
         Log.Information("初始化通讯录页面");
-        IsLoading = true;
+        _pageCts?.Cancel();
+        _pageCts?.Dispose();
+        _pageCts = new CancellationTokenSource();
+        var generation = ++_pageGeneration;
+        var pageToken = _pageCts.Token;
 
+        IsLoading = true;
         try
         {
-            // 并行加载好友、请求、黑名单
-            var friendsTask = _pageService.LoadFriendsAsync();
-            var incomingTask = _pageService.LoadIncomingRequestsAsync();
-            var outgoingTask = _pageService.LoadOutgoingRequestsAsync();
-            var blockedTask = _pageService.LoadBlockedUsersAsync();
+            // 并行加载好友、请求、黑名单（不逃逸同步上下文，恢复后仍在 UI 线程）
+            var friendsTask = _pageService.LoadFriendsAsync(pageToken);
+            var incomingTask = _pageService.LoadIncomingRequestsAsync(pageToken);
+            var outgoingTask = _pageService.LoadOutgoingRequestsAsync(pageToken);
+            var blockedTask = _pageService.LoadBlockedUsersAsync(pageToken);
 
-            await Task.WhenAll(friendsTask, incomingTask, outgoingTask, blockedTask).ConfigureAwait(false);
+            await Task.WhenAll(friendsTask, incomingTask, outgoingTask, blockedTask);
 
-            // 更新 UI 集合
-            UpdateCollection(_allFriends, await friendsTask.ConfigureAwait(false));
-            UpdateCollection(IncomingRequests, await incomingTask.ConfigureAwait(false));
-            UpdateCollection(OutgoingRequests, await outgoingTask.ConfigureAwait(false));
-            UpdateCollection(BlockedUsers, await blockedTask.ConfigureAwait(false));
+            // 代际校验：本次页面激活已被更新的激活取代则放弃更新集合
+            if (generation != _pageGeneration)
+            {
+                Log.Debug("通讯录初始化已过期，放弃更新");
+                return;
+            }
+
+            ReplaceCollection(_allFriends, await friendsTask, f => f.FriendId);
+            ReplaceCollection(IncomingRequests, await incomingTask, r => r.RequesterId);
+            ReplaceCollection(OutgoingRequests, await outgoingTask, r => r.RequesterId);
+            ReplaceCollection(BlockedUsers, await blockedTask, b => b.BlockedUserId);
 
             // 初始过滤
             FilterFriends();
@@ -258,16 +274,34 @@ public class FriendsViewModel : ViewModelBase
 	// ── 私有方法 ─────────────────────────────────────────
 
 	/// <summary>
-	/// 由于 ObservableCollection 没有 Reset 方法，直接 Clear + AddRange 的方式会导致 UI 频繁刷新。
+	/// 按 key 增量替换集合：删除消失项、就地更新已有项、追加新增项，
+	/// 避免 Clear+Add 重建全部 item container 导致 UI 频繁刷新。
 	/// </summary>
-	/// <typeparam name="T"></typeparam>
-	/// <param name="collection"></param>
-	/// <param name="items"></param>
-	private static void UpdateCollection<T>(ObservableCollection<T> collection, IReadOnlyList<T> items)
+	private static void ReplaceCollection<T>(
+        ObservableCollection<T> collection, IReadOnlyList<T> items, Func<T, long> keyOf)
     {
-        collection.Clear();
+        var ids = new HashSet<long>(items.Count);
         foreach (var item in items)
-            collection.Add(item);
+            ids.Add(keyOf(item));
+
+        for (var i = collection.Count - 1; i >= 0; i--)
+        {
+            if (!ids.Contains(keyOf(collection[i])))
+                collection.RemoveAt(i);
+        }
+
+        var index = new Dictionary<long, int>(collection.Count);
+        for (var i = 0; i < collection.Count; i++)
+            index[keyOf(collection[i])] = i;
+
+        foreach (var item in items)
+        {
+            var key = keyOf(item);
+            if (index.TryGetValue(key, out var idx))
+                collection[idx] = item;
+            else
+                collection.Add(item);
+        }
     }
 
 	/// <summary>
@@ -311,7 +345,7 @@ public class FriendsViewModel : ViewModelBase
             return;
         }
 
-        var result = await _pageService.SendFriendRequestAsync(targetUserId, AddFriendMessage, ct).ConfigureAwait(false);
+        var result = await _pageService.SendFriendRequestAsync(targetUserId, AddFriendMessage, ct);
 
         if (result.IsSuccess)
         {
@@ -322,8 +356,8 @@ public class FriendsViewModel : ViewModelBase
             AddFriendMessage = string.Empty;
 
             // 刷新发出的申请列表
-            var outgoing = await _pageService.LoadOutgoingRequestsAsync(ct).ConfigureAwait(false);
-            UpdateCollection(OutgoingRequests, outgoing);
+            var outgoing = await _pageService.LoadOutgoingRequestsAsync(ct);
+            ReplaceCollection(OutgoingRequests, outgoing, r => r.RequesterId);
         }
         else
         {
@@ -335,7 +369,7 @@ public class FriendsViewModel : ViewModelBase
     {
         if (friend == null) return;
 
-        var result = await _pageService.DeleteFriendAsync(friend.FriendId, ct).ConfigureAwait(false);
+        var result = await _pageService.DeleteFriendAsync(friend.FriendId, ct);
 
         if (result.IsSuccess)
         {
@@ -354,7 +388,7 @@ public class FriendsViewModel : ViewModelBase
     {
         if (request == null) return;
 
-        var result = await _pageService.AcceptRequestAsync(request.RequesterId, ct).ConfigureAwait(false);
+        var result = await _pageService.AcceptRequestAsync(request.RequesterId, ct);
 
         if (result.IsSuccess)
         {
@@ -362,8 +396,8 @@ public class FriendsViewModel : ViewModelBase
             _notificationService.ShowSuccess("已接受好友请求");
 
             // 刷新好友列表
-            var friends = await _pageService.LoadFriendsAsync(ct).ConfigureAwait(false);
-            UpdateCollection(_allFriends, friends);
+            var friends = await _pageService.LoadFriendsAsync(ct);
+            ReplaceCollection(_allFriends, friends, f => f.FriendId);
             FilterFriends();
         }
         else
@@ -376,7 +410,7 @@ public class FriendsViewModel : ViewModelBase
     {
         if (request == null) return;
 
-        var result = await _pageService.DeclineRequestAsync(request.RequesterId, ct).ConfigureAwait(false);
+        var result = await _pageService.DeclineRequestAsync(request.RequesterId, ct);
 
         if (result.IsSuccess)
         {
@@ -393,7 +427,7 @@ public class FriendsViewModel : ViewModelBase
     {
         if (user == null) return;
 
-        var result = await _pageService.UnblockUserAsync(user.BlockedUserId, ct).ConfigureAwait(false);
+        var result = await _pageService.UnblockUserAsync(user.BlockedUserId, ct);
 
         if (result.IsSuccess)
         {
@@ -404,5 +438,16 @@ public class FriendsViewModel : ViewModelBase
         {
             _notificationService.ShowError(result.Message ?? "解除失败");
         }
+    }
+
+    public void Dispose()
+    {
+        _pageCts?.Cancel();
+        _pageCts?.Dispose();
+        _pageCts = null;
+        _searchDebounceCts?.Cancel();
+        _searchDebounceCts?.Dispose();
+        _searchDebounceCts = null;
+        GC.SuppressFinalize(this);
     }
 }

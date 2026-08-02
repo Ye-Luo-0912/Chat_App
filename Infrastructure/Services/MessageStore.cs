@@ -135,64 +135,34 @@ public sealed class MessageStore : IMessageStore
 
         var owner = session.OwnerUserId;
 
-        foreach (var item in items)
-        {
-            var existing = string.IsNullOrEmpty(item.MessageId)
-                ? null
-                : await _db.GetMessageByServerIdAsync(owner, item.MessageId);
-            if (existing is not null)
-                continue;
-
-            var message = new LocalMessage
-            {
-                OwnerUserId = owner,
-                MessageId = item.MessageId,
-                ClientMessageId = string.IsNullOrEmpty(item.ClientMessageId) ? null : item.ClientMessageId,
-                ConversationId = conversationId,
-                SenderUserId = item.SenderUserId,
-                ReceiverUserId = item.ReceiverUserId,
-                Content = item.Content ?? string.Empty,
-                ReceivedAtMs = item.ReceivedAtMs,
-                DeliveredAtMs = item.DeliveredAtMs,
-                ReadAtMs = item.ReadAtMs,
-                RecalledAtMs = item.RecalledAtMs,
-                EditVersion = item.EditVersion <= 0 ? 1 : item.EditVersion,
-                EditedAtMs = item.EditedAtMs,
-                AttachmentsJson = AttachmentJson.Serialize(item.Attachments),
-                ReplyToMessageId = item.ReplyToMessageId,
-                ReplyToSenderUserId = item.ReplyToSenderUserId,
-                ReplyToPreview = item.ReplyToPreview,
-                ForwardedFromMessageId = item.ForwardedFromMessageId,
-                ForwardedFromSenderUserId = item.ForwardedFromSenderUserId,
-                ForwardedFromPreview = item.ForwardedFromPreview,
-                Status = item.RecalledAtMs.HasValue ? MessageStatus.Recalled : MessageStatus.Delivered,
-                FailureReason = null,
-                RetryCount = 0,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-
-            await _db.UpsertMessageAsync(message);
-        }
-
+        // 批次最大时间戳：目标水位（批量方法内做单调判断，旧水位不回退）。
         var maxItem = items[0];
-        for (int i = 1; i < items.Count; i++)
+        for (var i = 1; i < items.Count; i++)
         {
             if (items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
                 maxItem = items[i];
         }
 
-        var cursor = await _db.GetSyncCursorAsync(owner, conversationId)
-            ?? new LocalSyncCursor { OwnerUserId = owner, ConversationId = conversationId };
-        // 仅当前向 catch-up（批次最大时间戳超过已存水位）时才推进游标；
-        // 向后拉取更早历史时不得回退水位。
-        if (maxItem.ReceivedAtMs > cursor.AfterReceivedAtMs)
+        var cursor = new LocalSyncCursor
         {
-            cursor.AfterReceivedAtMs = maxItem.ReceivedAtMs;
-            cursor.AfterMessageId = maxItem.MessageId;
-            cursor.UpdatedAt = DateTime.UtcNow;
-            await _db.UpsertSyncCursorAsync(cursor);
-        }
+            OwnerUserId = owner,
+            ConversationId = conversationId,
+            AfterReceivedAtMs = maxItem.ReceivedAtMs,
+            AfterMessageId = maxItem.MessageId
+        };
+
+        // 单 DbContext + 单事务批量应用：插入/合并 + 附件 + 会话摘要 + 水位一次完成。
+        await _db.ApplyHistoryBatchAsync(owner, conversationId, items, cursor).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task ApplyHistoryBatchAsync(SessionStamp session, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, LocalSyncCursor? cursor, CancellationToken ct = default)
+    {
+        if (items is null || items.Count == 0)
+            return;
+
+        // cursor 为空表示不推进水位；否则由批量方法做单调判断后落库。
+        await _db.ApplyHistoryBatchAsync(session.OwnerUserId, conversationId, items, cursor).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -242,7 +212,11 @@ public sealed class MessageStore : IMessageStore
     public async Task HandleRecalledAsync(SessionStamp session, MessageRecalledUpdateDto update, CancellationToken ct = default)
     {
         var owner = session.OwnerUserId;
-        await _db.MarkMessageRecalledAsync(owner, update.MessageId, update.RecalledAtMs);
+        var result = await _db.MarkMessageRecalledAsync(owner, update.MessageId, update.RecalledAtMs);
+
+        // 仅真实状态变化才发布领域事件，避免 UI 重复/回退处理。
+        if (result != MessageMutationResult.Applied)
+            return;
 
         var conversationId = ResolveConversationId(update.ConversationId, owner, update.SenderUserId, update.ReceiverUserId);
         if (conversationId is not null)
@@ -253,7 +227,11 @@ public sealed class MessageStore : IMessageStore
     public async Task HandleEditedAsync(SessionStamp session, MessageEditedUpdateDto update, CancellationToken ct = default)
     {
         var owner = session.OwnerUserId;
-        await _db.ApplyMessageEditAsync(owner, update.MessageId, update.Content, update.EditVersion, update.EditedAtMs);
+        var result = await _db.ApplyMessageEditAsync(owner, update.MessageId, update.Content, update.EditVersion, update.EditedAtMs);
+
+        // 仅真实状态变化才发布领域事件（数据库拒绝的旧编辑不再广播给 UI）。
+        if (result != MessageMutationResult.Applied)
+            return;
 
         var conversationId = ResolveConversationId(update.ConversationId, owner, update.SenderUserId, update.ReceiverUserId);
         if (conversationId is not null)

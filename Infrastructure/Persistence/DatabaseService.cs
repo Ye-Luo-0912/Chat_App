@@ -1,7 +1,9 @@
 using Core.Contracts.Auth;
 using Core.Models;
+using Core.Models.DTO;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Models.Context;
+using Chat_App.Infrastructure.Serialization;
 using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
@@ -68,9 +70,20 @@ public class DatabaseService(
                 OwnerUserId = f.OwnerUserId,
                 FriendId = f.FriendId,
                 FriendName = f.FriendName,
-                Status = f.Status,
                 AvatarUrl = f.AvatarUrl,
-                LastSynced = f.LastSynced
+                Note = f.Note,
+                Status = f.Status,
+                IsDeleted = f.IsDeleted,
+                GroupId = f.GroupId,
+                GroupName = f.GroupName,
+                CreatedAt = f.CreatedAt,
+                LastSynced = f.LastSynced,
+                IsOnline = f.IsOnline,
+                IsPinned = f.IsPinned,
+                PinnedAtMs = f.PinnedAtMs,
+                IsMuted = f.IsMuted,
+                MutedUntilMs = f.MutedUntilMs,
+                LastMessagePreview = f.LastMessagePreview
             }).ToListAsync(None);
     }
 
@@ -97,10 +110,14 @@ public class DatabaseService(
         {
             if (existingMap.TryGetValue((f.OwnerUserId, f.FriendId), out var ent))
             {
+                // 全字段同步（含备注/分组/删除标记复活），保持本地与服务端一致。
                 ent.FriendName = f.FriendName;
                 ent.Note = f.Note;
                 ent.Status = f.Status;
                 ent.AvatarUrl = f.AvatarUrl;
+                ent.GroupId = f.GroupId;
+                ent.GroupName = f.GroupName;
+                ent.IsDeleted = f.IsDeleted;
                 ent.LastSynced = DateTime.UtcNow;
             }
             else
@@ -130,16 +147,32 @@ public class DatabaseService(
                 .SetProperty(f => f.Note, updatedFriend.Note)
                 .SetProperty(f => f.Status, updatedFriend.Status)
                 .SetProperty(f => f.AvatarUrl, updatedFriend.AvatarUrl)
+                .SetProperty(f => f.GroupId, updatedFriend.GroupId)
+                .SetProperty(f => f.GroupName, updatedFriend.GroupName)
+                .SetProperty(f => f.IsDeleted, updatedFriend.IsDeleted)
                 .SetProperty(f => f.IsOnline, updatedFriend.IsOnline)
                 .SetProperty(f => f.LastSynced, DateTime.UtcNow), None);
     }
 
-    public async Task DeleteFriendAsync(long id)
+    /// <summary>物理删除好友（按账户 + 服务端 FriendId，修复原按本地自增 Id 删不中的问题）。</summary>
+    public async Task DeleteFriendAsync(long ownerUserId, long friendId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         await db.Friends
-            .Where(f => f.Id == id)
+            .Where(f => f.OwnerUserId == ownerUserId && f.FriendId == friendId)
             .ExecuteDeleteAsync(None);
+
+    }
+
+    /// <summary>Tombstone 删除好友：标记 IsDeleted，保留行以支撑历史会话与已读回执。</summary>
+    public async Task MarkFriendDeletedAsync(long ownerUserId, long friendId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Friends
+            .Where(f => f.OwnerUserId == ownerUserId && f.FriendId == friendId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(f => f.IsDeleted, true)
+                .SetProperty(f => f.LastSynced, DateTime.UtcNow), None);
     }
 
     // ---- 用户信息 ----
@@ -334,6 +367,29 @@ public class DatabaseService(
             .ExecuteUpdateAsync(s => s.SetProperty(c => c.Draft, draft), None);
     }
 
+    public Task<bool> UpdateConversationDraftAsync(
+        long ownerUserId, string conversationId, string? draft, string? draftState,
+        long updatedAtMs, int revision) =>
+        WriteAsync(() => UpdateConversationDraftAsyncImpl(ownerUserId, conversationId, draft, draftState, updatedAtMs, revision));
+
+    private async Task<bool> UpdateConversationDraftAsyncImpl(
+        long ownerUserId, string conversationId, string? draft, string? draftState,
+        long updatedAtMs, int revision)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        // 乐观并发：仅当数据库版本旧于本次写入时更新（null 视为初始状态），新窗口的草稿不会被旧窗口覆盖。
+        var rows = await db.Conversations
+            .Where(c => c.OwnerUserId == ownerUserId
+                     && c.ConversationId == conversationId
+                     && (c.DraftUpdatedAtMs == null || c.DraftUpdatedAtMs < updatedAtMs))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Draft, draft)
+                .SetProperty(c => c.DraftState, draftState)
+                .SetProperty(c => c.DraftUpdatedAtMs, updatedAtMs)
+                .SetProperty(c => c.DraftRevision, revision), None);
+        return rows > 0;
+    }
+
     public async Task DeleteConversationAsync(long ownerUserId, string conversationId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
@@ -486,38 +542,47 @@ public class DatabaseService(
         }
     }
 
-    public Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs) => WriteAsync(() => MarkMessageRecalledAsyncImpl(ownerUserId, messageId, recalledAtMs));
+    public Task<MessageMutationResult> MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs) => WriteAsync(() => MarkMessageRecalledAsyncImpl(ownerUserId, messageId, recalledAtMs));
 
-    private async Task MarkMessageRecalledAsyncImpl(long ownerUserId, string messageId, long recalledAtMs)
+    private async Task<MessageMutationResult> MarkMessageRecalledAsyncImpl(long ownerUserId, string messageId, long recalledAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        // 撤回具有最高优先级。仅当尚未撤回，或入站 RecalledAtMs 更新时才写入。
-        await db.Messages
-            .Where(m => m.OwnerUserId == ownerUserId
-                     && m.MessageId == messageId
-                     && (m.RecalledAtMs == null || m.RecalledAtMs < recalledAtMs))
-            .ExecuteUpdateAsync(m
-                => m.SetProperty(x => x.Status, MessageStatus.Recalled)
-                    .SetProperty(x => x.RecalledAtMs, recalledAtMs)
-                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        var existing = await db.Messages.FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId, None);
+        if (existing is null)
+            return MessageMutationResult.MessageMissing;
+
+        // 撤回具有最高优先级：仅当尚未撤回，或入站 RecalledAtMs 更新时才写入。
+        if (existing.RecalledAtMs is > 0 && existing.RecalledAtMs >= recalledAtMs)
+            return MessageMutationResult.IgnoredStale;
+
+        existing.Status = MessageStatus.Recalled;
+        existing.RecalledAtMs = recalledAtMs;
+        existing.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(None);
+        return MessageMutationResult.Applied;
     }
 
-    public Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs) => WriteAsync(() => ApplyMessageEditAsyncImpl(ownerUserId, messageId, content, editVersion, editedAtMs));
+    public Task<MessageMutationResult> ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs) => WriteAsync(() => ApplyMessageEditAsyncImpl(ownerUserId, messageId, content, editVersion, editedAtMs));
 
-    private async Task ApplyMessageEditAsyncImpl(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
+    private async Task<MessageMutationResult> ApplyMessageEditAsyncImpl(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        // 编辑版本单调递增：仅当入站 EditVersion 严格大于已存版本、且消息未撤回时才应用。
-        await db.Messages
-            .Where(m => m.OwnerUserId == ownerUserId
-                     && m.MessageId == messageId
-                     && m.EditVersion < editVersion
-                     && m.Status != MessageStatus.Recalled)
-            .ExecuteUpdateAsync(m
-                => m.SetProperty(x => x.Content, content)
-                    .SetProperty(x => x.EditVersion, editVersion)
-                    .SetProperty(x => x.EditedAtMs, editedAtMs)
-                    .SetProperty(x => x.UpdatedAt, DateTime.UtcNow), None);
+        var existing = await db.Messages.FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId && m.MessageId == messageId, None);
+        if (existing is null)
+            return MessageMutationResult.MessageMissing;
+        if (existing.Status == MessageStatus.Recalled)
+            return MessageMutationResult.AlreadyRecalled;
+
+        // 编辑版本单调递增：仅当入站 EditVersion 严格大于已存版本时才应用。
+        if (existing.EditVersion >= editVersion)
+            return MessageMutationResult.IgnoredStale;
+
+        existing.Content = content;
+        existing.EditVersion = editVersion;
+        existing.EditedAtMs = editedAtMs;
+        existing.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(None);
+        return MessageMutationResult.Applied;
     }
 
     public async Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100)
@@ -700,6 +765,218 @@ public class DatabaseService(
         {
             // 幂等：并发写入导致唯一索引冲突，行已存在，忽略（事务自动回滚）。
         }
+    }
+
+    /// <summary>
+    /// 批量应用历史同步条目：单 DbContext + 单事务完成
+    /// 批量幂等插入（撤回最高优先级 + 编辑版本单调合并 + MessageId 回填）
+    /// + 附件批量 upsert + 会话摘要单调更新（不递增未读）+ 同步水位推进。
+    /// cursor 非空且单调更新时才推进水位；传 null 表示不推进。
+    /// </summary>
+    public Task ApplyHistoryBatchAsync(long ownerUserId, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, LocalSyncCursor? cursor)
+        => WriteAsync(() => ApplyHistoryBatchAsyncImpl(ownerUserId, conversationId, items, cursor));
+
+    private async Task ApplyHistoryBatchAsyncImpl(long ownerUserId, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, LocalSyncCursor? cursor)
+    {
+        if (items is null || items.Count == 0)
+            return;
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        // 一次加载该会话已有消息/附件，建立内存索引，杜绝逐条往返。
+        var existingMessages = await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId && m.ConversationId == conversationId)
+            .ToListAsync(None);
+        var messagesByServerId = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
+        var messagesByClientId = new Dictionary<string, LocalMessage>(StringComparer.Ordinal);
+        foreach (var m in existingMessages)
+        {
+            if (m.MessageId is not null) messagesByServerId[m.MessageId] = m;
+            if (m.ClientMessageId is not null) messagesByClientId[m.ClientMessageId] = m;
+        }
+
+        var existingAttachments = await db.Attachments
+            .Where(a => a.OwnerUserId == ownerUserId && a.ConversationId == conversationId)
+            .ToListAsync(None);
+        var attachmentsByServerId = new Dictionary<string, LocalAttachment>(StringComparer.Ordinal);
+        var attachmentsByClientId = new Dictionary<string, LocalAttachment>(StringComparer.Ordinal);
+        foreach (var a in existingAttachments)
+        {
+            if (a.AttachmentId is not null) attachmentsByServerId[a.AttachmentId] = a;
+            if (a.ClientAttachmentId is not null) attachmentsByClientId[a.ClientAttachmentId] = a;
+        }
+
+        // 批次最大时间戳：水位与会话摘要推进依据（内存单循环）。
+        var maxItem = items[0];
+        for (var i = 1; i < items.Count; i++)
+        {
+            if (items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
+                maxItem = items[i];
+        }
+
+        foreach (var item in items)
+        {
+            var messageId = string.IsNullOrWhiteSpace(item.MessageId) ? null : item.MessageId;
+            var clientId = string.IsNullOrWhiteSpace(item.ClientMessageId) ? null : item.ClientMessageId;
+
+            LocalMessage? existing = null;
+            if (messageId is not null) existing = messagesByServerId.GetValueOrDefault(messageId);
+            if (existing is null && clientId is not null) existing = messagesByClientId.GetValueOrDefault(clientId);
+
+            if (existing is not null)
+            {
+                // 单调合并（镜像 UpsertMessageAsyncImpl）：撤回最高优先级、编辑版本单调、MessageId 回填。
+                existing.ReceivedAtMs = item.ReceivedAtMs;
+                existing.DeliveredAtMs = item.DeliveredAtMs;
+                existing.ReadAtMs = item.ReadAtMs;
+                if (existing.Status != MessageStatus.Recalled && item.RecalledAtMs is > 0)
+                {
+                    existing.Status = MessageStatus.Recalled;
+                    existing.RecalledAtMs = item.RecalledAtMs;
+                }
+                if (item.EditVersion > existing.EditVersion)
+                {
+                    existing.EditVersion = item.EditVersion;
+                    existing.EditedAtMs = item.EditedAtMs;
+                    existing.Content = item.Content ?? string.Empty;
+                }
+                if (string.IsNullOrEmpty(existing.MessageId) && messageId is not null)
+                    existing.MessageId = messageId;
+                existing.AttachmentsJson = AttachmentJson.Serialize(item.Attachments);
+                existing.UpdatedAt = DateTime.UtcNow;
+            }
+            else
+            {
+                var message = new LocalMessage
+                {
+                    OwnerUserId = ownerUserId,
+                    MessageId = messageId,
+                    ClientMessageId = clientId,
+                    ConversationId = conversationId,
+                    SenderUserId = item.SenderUserId,
+                    ReceiverUserId = item.ReceiverUserId,
+                    Content = item.Content ?? string.Empty,
+                    ReceivedAtMs = item.ReceivedAtMs,
+                    DeliveredAtMs = item.DeliveredAtMs,
+                    ReadAtMs = item.ReadAtMs,
+                    RecalledAtMs = item.RecalledAtMs,
+                    EditVersion = item.EditVersion <= 0 ? 1 : item.EditVersion,
+                    EditedAtMs = item.EditedAtMs,
+                    AttachmentsJson = AttachmentJson.Serialize(item.Attachments),
+                    ReplyToMessageId = item.ReplyToMessageId,
+                    ReplyToSenderUserId = item.ReplyToSenderUserId,
+                    ReplyToPreview = item.ReplyToPreview,
+                    ForwardedFromMessageId = item.ForwardedFromMessageId,
+                    ForwardedFromSenderUserId = item.ForwardedFromSenderUserId,
+                    ForwardedFromPreview = item.ForwardedFromPreview,
+                    Status = item.RecalledAtMs.HasValue ? MessageStatus.Recalled : MessageStatus.Delivered,
+                    FailureReason = null,
+                    RetryCount = 0,
+                    CreatedAt = DateTime.UtcNow,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                await db.Messages.AddAsync(message, None);
+                if (messageId is not null) messagesByServerId[messageId] = message;
+                if (clientId is not null) messagesByClientId[clientId] = message;
+            }
+
+            // 附件批量 upsert（镜像 ApplyIncomingMessageAsyncImpl：先 AttachmentId，回退 ClientAttachmentId）。
+            if (item.Attachments is { Count: > 0 })
+            {
+                foreach (var a in item.Attachments)
+                {
+                    var attachmentId = string.IsNullOrWhiteSpace(a.AttachmentId) ? null : a.AttachmentId;
+                    LocalAttachment? existingAttachment = null;
+                    if (attachmentId is not null)
+                        existingAttachment = attachmentsByServerId.GetValueOrDefault(attachmentId!);
+                    if (existingAttachment is null && clientId is not null)
+                        existingAttachment = attachmentsByClientId.GetValueOrDefault(clientId);
+
+                    var now = DateTime.UtcNow;
+                    if (existingAttachment is not null)
+                    {
+                        existingAttachment.AttachmentId = attachmentId ?? existingAttachment.AttachmentId;
+                        existingAttachment.MessageId = messageId ?? existingAttachment.MessageId;
+                        existingAttachment.ConversationId = conversationId;
+                        existingAttachment.FileName = a.FileName ?? existingAttachment.FileName;
+                        existingAttachment.ContentType = a.ContentType;
+                        existingAttachment.SizeBytes = a.SizeBytes;
+                        existingAttachment.DownloadPath = a.DownloadApiHint ?? existingAttachment.DownloadPath;
+                        existingAttachment.UpdatedAt = now;
+                    }
+                    else
+                    {
+                        var attachment = new LocalAttachment
+                        {
+                            OwnerUserId = ownerUserId,
+                            AttachmentId = attachmentId,
+                            ClientAttachmentId = clientId,
+                            MessageId = messageId,
+                            ConversationId = conversationId,
+                            FileName = a.FileName,
+                            ContentType = a.ContentType,
+                            SizeBytes = a.SizeBytes,
+                            DownloadPath = a.DownloadApiHint,
+                            Status = AttachmentStatus.Available,
+                            CreatedAt = now,
+                            UpdatedAt = now
+                        };
+                        await db.Attachments.AddAsync(attachment, None);
+                        if (attachmentId is not null) attachmentsByServerId[attachmentId] = attachment;
+                    }
+                }
+            }
+        }
+
+        // 会话摘要单调更新（历史同步不递增未读数）。
+        var conversation = await db.Conversations
+            .FirstOrDefaultAsync(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId, None);
+        if (conversation is not null && maxItem.ReceivedAtMs > (conversation.LastMessageAtMs ?? 0))
+        {
+            conversation.LastMessageId = maxItem.MessageId;
+            conversation.LastMessagePreview = TruncatePreview(maxItem.Content);
+            conversation.LastMessageAtMs = maxItem.ReceivedAtMs;
+            conversation.LastSenderUserId = maxItem.SenderUserId;
+            conversation.LastSynced = DateTime.UtcNow;
+        }
+
+        // 同步水位推进（单调：仅当批次最大时间戳超过已存水位，由调用方保证 cursor 语义）。
+        if (cursor is not null)
+        {
+            var existingCursor = await db.SyncCursors
+                .FirstOrDefaultAsync(c => c.OwnerUserId == ownerUserId && c.ConversationId == conversationId, None);
+            if (existingCursor is null)
+            {
+                cursor.OwnerUserId = ownerUserId;
+                cursor.ConversationId = conversationId;
+                cursor.UpdatedAt = DateTime.UtcNow;
+                await db.SyncCursors.AddAsync(cursor, None);
+            }
+            else if (cursor.AfterReceivedAtMs > existingCursor.AfterReceivedAtMs)
+            {
+                existingCursor.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
+                existingCursor.AfterMessageId = cursor.AfterMessageId;
+                existingCursor.UpdatedAt = DateTime.UtcNow;
+            }
+        }
+
+        try
+        {
+            await db.SaveChangesAsync(None);
+            await transaction.CommitAsync(None);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // 幂等：并发写入唯一索引冲突，行已存在，忽略（事务自动回滚）。
+        }
+    }
+
+    private static string TruncatePreview(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return string.Empty;
+        return content.Length <= 200 ? content : content[..200];
     }
 
     // ---- Outbox----

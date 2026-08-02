@@ -1,8 +1,10 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using Avalonia.Threading;
 using Chat_App.Presentation.ViewModels.Auth;
 using Chat_App.Presentation.ViewModels.Shell;
+using Serilog;
 using System.ComponentModel;
 
 namespace Chat_App.Presentation.Views;
@@ -32,6 +34,24 @@ public partial class MainWindow : Window
             }
         };
 
+    }
+
+    protected override void OnClosing(WindowClosingEventArgs e)
+    {
+        base.OnClosing(e);
+
+        // 窗口关闭前强制落盘草稿：DB 写为毫秒级且不依赖 UI 线程，同步等待安全。
+        if (DataContext is MainWindowViewModel vm && vm.CurrentPage is HomeViewModel home)
+        {
+            try
+            {
+                home.FlushDraftAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "窗口关闭前落盘草稿失败");
+            }
+        }
     }
 
     private void UpdateWindowStyle(object? page)

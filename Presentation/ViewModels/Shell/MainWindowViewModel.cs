@@ -30,11 +30,14 @@ public class MainWindowViewModel : ViewModelBase
     /// </summary>
     public RelayCommand ToggleThemeCommand { get; }
 
+    public HomeViewModel HomeViewModel { get; }
+
     public MainWindowViewModel(
         LoginViewModel loginViewModel,
         RegisterViewModel registerViewModel,
         HomeViewModel homeViewModel)
     {
+        HomeViewModel = homeViewModel;
         ToggleThemeCommand = new RelayCommand(() =>
         {
             var app = Application.Current;

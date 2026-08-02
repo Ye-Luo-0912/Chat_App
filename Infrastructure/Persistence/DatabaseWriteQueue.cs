@@ -1,8 +1,8 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Serilog;
 
 namespace Chat_App.Infrastructure.Persistence;
 
@@ -11,6 +11,12 @@ namespace Chat_App.Infrastructure.Persistence;
 /// 使用有界 Channel 串行化所有写入操作，消除 SQLite WAL 模式下的 SQLITE_BUSY 并发冲突。
 /// 委托为自包含操作：内部自行管理 DbContext 生命周期与 SaveChangesAsync（含幂等冲突处理），
 /// 队列只负责单消费者串行调度。不跨操作共享 DbContext，避免读-改-写竞态与批处理回滚污染。
+///
+/// 取消语义：
+/// - 入队等待空位时 ct 取消：操作不入队、不执行（WriteAsync 抛 OperationCanceledException）。
+/// - 入队成功后调用方取消等待：操作已被消费者 claim，仍会执行完毕（CancellationToken.None），
+///   调用方只能放弃等待；DB 副作用必然发生。
+/// - 队列关闭：先完成通道写入，已入队操作仍执行完毕（限时等待），消费者随后退出。
 /// </summary>
 public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
 {
@@ -18,9 +24,10 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
     private readonly Task _consumerTask;
     private readonly CancellationTokenSource _cts = new();
 
-    /// <summary>写入操作封装：自包含执行并通过 TCS 通知完成。</summary>
+    /// <summary>写入操作封装：携带唯一 Id 便于诊断，自包含执行并通过 TCS 通知完成。</summary>
     private abstract class WriteOperation
     {
+        public Guid Id { get; } = Guid.NewGuid();
         public abstract Task ExecuteAsync(CancellationToken ct);
         public abstract void SetResult();
         public abstract void SetException(Exception ex);
@@ -74,26 +81,26 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
         _consumerTask = Task.Run(ConsumeLoopAsync);
     }
 
-    public Task EnqueueAsync(Func<CancellationToken, Task> operation, CancellationToken ct = default)
+    public async Task EnqueueAsync(Func<CancellationToken, Task> operation, CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var op = new WriteOperationVoid(operation, tcs);
-        if (!_channel.Writer.TryWrite(op))
-            tcs.SetException(new InvalidOperationException("写入队列已关闭"));
-        return tcs.Task.WaitAsync(ct);
+        // 真等待背压：队列满时等待空位；入队前 ct 取消则操作不执行。
+        await _channel.Writer.WriteAsync(op, ct).ConfigureAwait(false);
+        await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
     }
 
-    public Task<T> EnqueueAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct = default)
+    public async Task<T> EnqueueAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         var op = new WriteOperation<T>(operation, tcs);
-        if (!_channel.Writer.TryWrite(op))
-            tcs.SetException(new InvalidOperationException("写入队列已关闭"));
-        return tcs.Task.WaitAsync(ct);
+        await _channel.Writer.WriteAsync(op, ct).ConfigureAwait(false);
+        return await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>
     /// 消费者循环：单消费者逐个执行写入操作，保证串行化。
+    /// 已入队的操作必须完成（执行不随队列关闭/调用方取消而中断），
     /// 单个操作失败不影响队列继续运行（按操作隔离）。
     /// </summary>
     private async Task ConsumeLoopAsync()
@@ -102,12 +109,12 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
         {
             try
             {
-                await op.ExecuteAsync(_cts.Token);
+                await op.ExecuteAsync(CancellationToken.None).ConfigureAwait(false);
                 op.SetResult();
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"写入队列操作失败: {ex.Message}");
+                Log.Error(ex, "写入队列操作失败 OperationId={OperationId}", op.Id);
                 op.SetException(ex);
             }
         }
@@ -118,13 +125,14 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
         _channel.Writer.TryComplete();
         try
         {
-            await _consumerTask.ConfigureAwait(false);
+            // 已入队操作必须完成：限时等待消费者耗尽队列，超时后强停兜底。
+            await _consumerTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
         }
         catch
         {
-            // 消费者循环异常不影响释放
+            _cts.Cancel();
+            try { await _consumerTask.ConfigureAwait(false); } catch { /* 消费者异常忽略 */ }
         }
-        _cts.Cancel();
         _cts.Dispose();
     }
 }

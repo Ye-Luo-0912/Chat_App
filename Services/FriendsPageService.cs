@@ -199,7 +199,7 @@ public class FriendsPageService : IFriendsPageService
         if (result.IsSuccess)
         {
             _friendsCache.RemoveAll(f => f.FriendId == friendId);
-            await _db.DeleteFriendAsync(friendId).ConfigureAwait(false);
+            await _db.DeleteFriendAsync(_currentUser.RequireUserId(), friendId).ConfigureAwait(false);
             Log.Information("删除好友成功: {FriendId}", friendId);
         }
         else

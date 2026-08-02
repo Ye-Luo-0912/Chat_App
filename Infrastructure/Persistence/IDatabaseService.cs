@@ -1,5 +1,6 @@
 using Core.Contracts.Auth;
 using Core.Models;
+using Core.Models.DTO;
 using Chat_App.Infrastructure.Models;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -13,7 +14,10 @@ public interface IDatabaseService
     Task AddFriendAsync(List<LocalFriend> friend);
     Task<LocalFriend?> GetFriendByIdAsync(long id);
     Task UpdateFriendAsync(LocalFriend updatedFriend);
-    Task DeleteFriendAsync(long id);
+    /// <summary>物理删除好友（按账户 + 服务端 FriendId）。</summary>
+    Task DeleteFriendAsync(long ownerUserId, long friendId);
+    /// <summary>Tombstone 删除好友：标记 IsDeleted，保留行支撑历史会话。</summary>
+    Task MarkFriendDeletedAsync(long ownerUserId, long friendId);
 
     // 用户信息相关
     Task SaveUserAsync(LocalUser user);
@@ -40,6 +44,14 @@ public interface IDatabaseService
     /// <summary>仅更新会话草稿（轻量写入，切换会话时保存输入框文本）。</summary>
     Task UpdateConversationDraftAsync(long ownerUserId, string conversationId, string? draft);
 
+    /// <summary>
+    /// 完整草稿写入（乐观并发）：仅当本地保存版本旧于当前时写入，防止多窗口旧草稿覆盖新草稿。
+    /// 返回是否实际写入（false = 数据库已有更新版本，本次丢弃）。
+    /// </summary>
+    Task<bool> UpdateConversationDraftAsync(
+        long ownerUserId, string conversationId, string? draft, string? draftState,
+        long updatedAtMs, int revision);
+
     // ---- 消息----
     /// <summary>分页拉取会话历史消息（向后翻页， newest-first）。</summary>
     /// <param name="limit">单页条数上限。</param>
@@ -56,8 +68,11 @@ public interface IDatabaseService
     /// <param name="ackServerMessageId">ACK 接受时回填的服务端消息 Id（仅 status=Sent 时有意义）。</param>
     /// <param name="failureReason">status=Failed 时的失败原因。</param>
     Task UpdateMessageStatusAsync(long ownerUserId, string? messageId, string? clientMessageId, MessageStatus status, string? failureReason = null, string? ackServerMessageId = null);
-    Task MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs);
-    Task ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs);
+    /// <summary>标记消息撤回（条件时间单调）。返回应用结果，仅 Applied 表示真实变化。</summary>
+    Task<MessageMutationResult> MarkMessageRecalledAsync(long ownerUserId, string messageId, long recalledAtMs);
+
+    /// <summary>应用消息编辑（版本单调 + 未撤回）。返回应用结果，仅 Applied 表示真实变化。</summary>
+    Task<MessageMutationResult> ApplyMessageEditAsync(long ownerUserId, string messageId, string content, int editVersion, long editedAtMs);
     /// <summary>前向增量拉取：返回 ReceivedAtMs &gt; afterReceivedAtMs 的消息，用于重连后 catch-up。</summary>
     Task<List<LocalMessage>> GetMessagesAfterAsync(long ownerUserId, string conversationId, long afterReceivedAtMs, int limit = 100);
 
@@ -66,6 +81,13 @@ public interface IDatabaseService
     /// 消息 upsert + 附件批量 upsert + 会话摘要原子更新 + 未读数递增。
     /// </summary>
     Task ApplyIncomingMessageAsync(LocalMessage message, List<LocalAttachment> attachments, LocalConversation? conversationUpdate);
+
+    /// <summary>
+    /// 批量应用历史同步：单 DbContext + 单事务完成幂等插入/单调合并、附件 upsert、
+    /// 会话摘要单调更新与水位推进。cursor 为 null 不推进水位；
+    /// 非空时仅当其 AfterReceivedAtMs 大于已存水位才覆盖。
+    /// </summary>
+    Task ApplyHistoryBatchAsync(long ownerUserId, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, LocalSyncCursor? cursor);
 
     // ---- Outbox----
     Task<long> EnqueueOutboxAsync(LocalOutboxMessage outbox);

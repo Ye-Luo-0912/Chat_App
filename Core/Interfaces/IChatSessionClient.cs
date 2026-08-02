@@ -139,6 +139,7 @@ public interface IChatSessionClient : IDisposable
     event EventHandler? Connected;
     event EventHandler<long>? Authenticated;
     event EventHandler<string>? AuthenticationFailed;
+    event EventHandler<ProtocolErrorDto>? ProtocolError;
     event EventHandler<ChatMessageDto>? ChatMessageReceived;
     event EventHandler<MessageAcknowledgementDto>? MessageAcknowledged;
     event EventHandler<ConversationChangedDto>? ConversationChanged;

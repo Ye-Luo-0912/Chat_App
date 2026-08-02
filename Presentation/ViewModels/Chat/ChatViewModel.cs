@@ -27,6 +27,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly ISyncEngine _syncEngine;
     private readonly ChatFriendListState _friendListState;
     private readonly SemaphoreSlim _initLock = new(1, 1);
+    private readonly SemaphoreSlim _friendSyncLock = new(1, 1);
+    private IReadOnlyList<ConversationListItemDto>? _lastConversations;
     private bool _disposed;
     private Message? _pendingForwardMessage;
     private long[] _watchedPresenceUserIds = [];
@@ -388,6 +390,41 @@ public class ChatViewModel : ViewModelBase, IDisposable
     {
         // 同步全部移交 SyncEngine：水位 → Bootstrap → 持久化 → Completed 事件投影 UI。
         _syncEngine.Start(_chatSession.CurrentSession);
+
+        // 后台增量同步好友：服务端为权威，刷新备注/分组/删除变化。
+        _ = SyncFriendsFromServerAsync();
+    }
+
+    /// <summary>
+    /// 后台好友同步（防重入）：全量比对后增量替换列表，
+    /// 完成后重放会话预置，恢复会话条目承载的历史会话与置顶/免打扰状态。
+    /// </summary>
+    private async Task SyncFriendsFromServerAsync()
+    {
+        if (!await _friendSyncLock.WaitAsync(0))
+            return; // 已有同步在进行
+
+        try
+        {
+            var synced = await _friendLoader.SyncFromServerAsync();
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                _friendListState.ReplaceFriends(synced);
+                RebuildFriendsIndex();
+
+                if (_lastConversations is { Count: > 0 })
+                    _friendListState.ApplyConversationPrefs(_lastConversations, _chatSession.CurrentUserId);
+            });
+            Log.Information("好友后台同步完成，UI 已刷新");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "好友后台同步失败");
+        }
+        finally
+        {
+            _friendSyncLock.Release();
+        }
     }
 
     private async void OnSyncCompleted(object? sender, SyncCompletedEventArgs e)
@@ -400,10 +437,12 @@ public class ChatViewModel : ViewModelBase, IDisposable
             if (!e.Succeeded)
             {
                 // 同步失败：回退到会话列表，至少恢复置顶/免打扰。
-                await RefreshConversationPrefsAsync(CancellationToken.None).ConfigureAwait(false);
+                _lastConversations = await RefreshConversationPrefsAsync(CancellationToken.None).ConfigureAwait(false);
                 await RefreshPresenceAsync(CancellationToken.None).ConfigureAwait(false);
                 return;
             }
+
+            _lastConversations = e.Conversations;
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -444,10 +483,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
         });
     }
 
-    private async Task RefreshConversationPrefsAsync(CancellationToken ct)
+    private async Task<List<ConversationListItemDto>> RefreshConversationPrefsAsync(CancellationToken ct)
     {
         if (!_chatSession.IsAuthenticated)
-            return;
+            return [];
 
         var allItems = new List<ConversationListItemDto>();
         bool? beforeIsPinned = null;
@@ -484,13 +523,15 @@ public class ChatViewModel : ViewModelBase, IDisposable
         }
 
         if (allItems.Count == 0)
-            return;
+            return allItems;
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
             _friendListState.ApplyConversationPrefs(allItems, _chatSession.CurrentUserId);
             RaisePrefsCommands();
         });
+
+        return allItems;
     }
 
     private async Task SetPrefsAsync(LocalFriend? friend, bool? pinned = null, bool? muted = null)
@@ -541,6 +582,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
         MuteFriendCommand.RaiseCanExecuteChanged();
         UnmuteFriendCommand.RaiseCanExecuteChanged();
     }
+
+    /// <summary>强制落盘当前会话草稿（退出登录/窗口关闭前调用）。</summary>
+    public Task FlushDraftsAsync() => _messageViewModel.FlushDraftAsync();
 
     /// <summary>
     /// 退出登录时重置会话状态：清空好友列表、消息视图与初始化标志，

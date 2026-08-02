@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
@@ -93,6 +94,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             if (!SetProperty(ref _newMessage, value))
                 return;
             _ = NotifyTypingFromComposerAsync();
+            ScheduleDraftSave();
         }
     }
 
@@ -307,6 +309,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ReplyDraftPreview = string.IsNullOrWhiteSpace(msg.Content)
                 ? (msg.HasAttachments ? msg.AttachmentSummary : "原消息")
                 : PreviewText.Truncate(msg.Content, 80);
+            ScheduleDraftSave();
         });
 
         ForwardMessageCommand = new RelayCommand(param =>
@@ -347,6 +350,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 OnPropertyChanged(nameof(EditDraftPreview));
                 OnPropertyChanged(nameof(SendButtonText));
                 ClearEditDraftCommand.RaiseCanExecuteChanged();
+                ScheduleDraftSave();
             },
             param => param is Message msg
                      && msg is { IsSentByMe: true, IsRecalled: false }
@@ -458,7 +462,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         if (CurrConversationId is null || e.ConversationId != CurrConversationId)
             return;
-        PostIfCurrent(() => ApplyRecalled(e.MessageId));
+        PostIfCurrent(() => ApplyRecalled(e.MessageId, e.RecalledAtMs));
     }
 
     private void OnMessageEditedPersisted(MessageEditedEvent e)
@@ -535,7 +539,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (!TouchesCurrentConversation(update.SenderUserId, update.ReceiverUserId))
             return;
 
-        PostIfCurrent(() => ApplyRecalled(update.MessageId));
+        PostIfCurrent(() => ApplyRecalled(update.MessageId, update.RecalledAtMs));
     }
 
     private void OnMessageEdited(object? sender, MessageEditedUpdateDto update)
@@ -590,7 +594,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        ApplyRecalled(message.MessageId);
+        ApplyRecalled(message.MessageId, null);
         if (_editingMessage is not null
             && string.Equals(_editingMessage.MessageId, message.MessageId, StringComparison.Ordinal))
         {
@@ -625,28 +629,28 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Cancelled, null));
     }
 
-    private void ApplyRecalled(string messageId)
+    private void ApplyRecalled(string messageId, long? recalledAtMs)
     {
         var existing = FindMessage(messageId, null);
-        existing?.ApplyRecalled();
+        existing?.TryApply(new MessageMutation(MessageMutationKind.Recall, RecalledAtMs: recalledAtMs));
         BeginEditMessageCommand.RaiseCanExecuteChanged();
     }
 
     private void ApplyEdited(string messageId, string content, int editVersion, long editedAtMs)
     {
         var existing = FindMessage(messageId, null);
-        existing?.ApplyEdited(content, editVersion, editedAtMs);
+        existing?.TryApply(new MessageMutation(
+            MessageMutationKind.Edit, content, editVersion, editedAtMs));
     }
 
     public void Init(LocalFriend selectedFriend)
     {
-        // 保存上一会话草稿到 DB（fire-and-forget，不阻塞切换）
+        // 强制 flush 上一会话完整草稿（在清空输入状态前捕获快照，异步落库不阻塞切换）
         if (CurrConversationId is not null && _currentUserContext.HasUserId)
         {
             var prevConv = CurrConversationId;
             var prevOwner = _currentUserContext.UserId!.Value;
-            var prevDraft = _newMessage;
-            _ = Task.Run(() => _dbService.UpdateConversationDraftAsync(prevOwner, prevConv, prevDraft));
+            _ = SaveDraftSnapshotAsync(prevOwner, prevConv);
         }
 
         var previousPeerId = CurrFriend?.FriendId ?? 0;
@@ -707,6 +711,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             if (generation != _conversationGeneration) return;
             _newMessage = conv?.Draft ?? string.Empty;
             OnPropertyChanged(nameof(NewMessage));
+            RestoreDraftState(conv?.DraftState, generation);
         }
         catch
         {
@@ -714,6 +719,182 @@ public class MessageViewModel : ViewModelBase, IDisposable
             OnPropertyChanged(nameof(NewMessage));
         }
     }
+
+    /// <summary>
+    /// 恢复完整草稿状态：文本、回复目标、编辑目标、待发送附件。
+    /// 附件已上传到服务端，仅恢复元数据即可直接发送。
+    /// </summary>
+    private void RestoreDraftState(string? json, long generation)
+    {
+        if (generation != _conversationGeneration || string.IsNullOrWhiteSpace(json))
+            return;
+
+        DraftState? state;
+        try
+        {
+            state = JsonSerializer.Deserialize<DraftState>(json);
+        }
+        catch
+        {
+            Log.Warning("草稿状态解析失败，忽略恢复");
+            return;
+        }
+        if (state is null)
+            return;
+
+        _draftRevision = state.Revision;
+        _draftUpdatedAtMs = state.UpdatedAtMs;
+
+        if (state.Attachments is { Count: > 0 })
+        {
+            foreach (var a in state.Attachments)
+                AddPendingAttachment(new PendingAttachment
+                {
+                    AttachmentId = a.AttachmentId,
+                    FileName = a.FileName,
+                    ContentType = a.ContentType,
+                    SizeBytes = a.SizeBytes
+                });
+        }
+
+        if (state.ReplyTarget is { } reply)
+        {
+            _replyToMessageId = reply.MessageId;
+            _replyToSenderUserId = reply.SenderUserId;
+            ReplyDraftPreview = reply.Preview ?? "原消息";
+        }
+
+        if (state.EditTarget is { } edit)
+        {
+            _editingMessage = new Message
+            {
+                MessageId = edit.MessageId,
+                Content = edit.Content,
+                EditVersion = edit.EditVersion,
+                IsSentByMe = true,
+                Sender = EmptyUser
+            };
+            OnPropertyChanged(nameof(HasEditDraft));
+            OnPropertyChanged(nameof(EditDraftPreview));
+            OnPropertyChanged(nameof(SendButtonText));
+            ClearEditDraftCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    // ── 完整草稿保存（500ms 防抖 + 切换/退出/关闭强制 flush） ──────────
+
+    private const int DraftDebounceMs = 500;
+    private CancellationTokenSource? _draftSaveCts;
+    private bool _draftDirty;
+    private int _draftRevision;
+    private long _draftUpdatedAtMs;
+
+    /// <summary>输入状态变化：取消进行中的防抖定时器，500ms 后保存完整草稿。</summary>
+    private void ScheduleDraftSave()
+    {
+        _draftDirty = true;
+        _draftSaveCts?.Cancel();
+        _draftSaveCts?.Dispose();
+        _draftSaveCts = new CancellationTokenSource();
+        var token = _draftSaveCts.Token;
+        _ = Task.Delay(DraftDebounceMs, token).ContinueWith(_ =>
+        {
+            if (!token.IsCancellationRequested)
+                _ = SaveDraftAsync();
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>防抖保存：捕获当前输入状态，序列化为 DraftState 写入 DB。</summary>
+    private async Task SaveDraftAsync()
+    {
+        if (!_draftDirty)
+            return;
+        await SaveDraftSnapshotAsync(_currentUserContext.UserId, CurrConversationId).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 强制保存指定会话的草稿快照（切换会话/退出登录/窗口关闭时调用）。
+    /// 捕获调用时点上的完整输入状态，与后续界面变化无关。
+    /// </summary>
+    private async Task SaveDraftSnapshotAsync(long? ownerUserId, string? conversationId)
+    {
+        if (ownerUserId is not long owner || string.IsNullOrEmpty(conversationId))
+            return;
+        _draftSaveCts?.Cancel();
+
+        var text = _newMessage;
+        DraftReplyTarget? reply = null;
+        if (_replyToMessageId is { } replyId)
+        {
+            reply = new DraftReplyTarget
+            {
+                MessageId = replyId,
+                Preview = _replyDraftPreview,
+                SenderUserId = _replyToSenderUserId
+            };
+        }
+
+        DraftEditTarget? edit = null;
+        if (_editingMessage is { MessageId: not null } em)
+        {
+            edit = new DraftEditTarget
+            {
+                MessageId = em.MessageId,
+                Content = em.Content,
+                EditVersion = em.EditVersion
+            };
+        }
+
+        List<DraftAttachment>? attachments = null;
+        if (_pendingAttachments.Count > 0)
+        {
+            attachments = [.. _pendingAttachments.Select(a => new DraftAttachment
+            {
+                AttachmentId = a.AttachmentId,
+                FileName = a.FileName,
+                ContentType = a.ContentType,
+                SizeBytes = a.SizeBytes
+            })];
+        }
+
+        var updatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var revision = _draftRevision + 1;
+        var state = new DraftState
+        {
+            Text = text,
+            ReplyTarget = reply,
+            EditTarget = edit,
+            Attachments = attachments,
+            UpdatedAtMs = updatedAtMs,
+            Revision = revision
+        };
+
+        try
+        {
+            var written = await _dbService.UpdateConversationDraftAsync(
+                owner, conversationId, text, JsonSerializer.Serialize(state), updatedAtMs, revision)
+                .ConfigureAwait(false);
+            if (written)
+            {
+                _draftRevision = revision;
+                _draftUpdatedAtMs = updatedAtMs;
+                _draftDirty = false;
+            }
+            else
+            {
+                // 数据库已有更新版本（多窗口场景）：丢弃本地版本，避免旧草稿覆盖新草稿。
+                Log.Warning("草稿写入被忽略（数据库已有更新版本），会话: {ConversationId}", conversationId);
+                _draftDirty = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "保存草稿失败，会话: {ConversationId}", conversationId);
+        }
+    }
+
+    /// <summary>强制 flush 当前会话草稿（退出登录/窗口关闭时调用）。</summary>
+    public Task FlushDraftAsync() => SaveDraftAsync();
 
     private async Task InitializeConversationAsync(string? conversationId, long generation, CancellationToken ct)
     {
@@ -928,9 +1109,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         };
 
         if (lm.RecalledAtMs is > 0)
-            msg.ApplyRecalled();
-        else if (lm.EditVersion > 1 || lm.EditedAtMs is > 0)
-            msg.IsEdited = true;
+        {
+            msg.TryApply(new MessageMutation(MessageMutationKind.Recall, RecalledAtMs: lm.RecalledAtMs));
+        }
+        // IsEdited 由 EditVersion/EditedAtMs 自动推导，无需手动赋值。
 
         return msg;
     }
@@ -962,12 +1144,18 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 if (existingMessage is not null)
                 {
                     if (item.RecalledAtMs is > 0)
-                        existingMessage.ApplyRecalled();
+                    {
+                        existingMessage.TryApply(new MessageMutation(
+                            MessageMutationKind.Recall, RecalledAtMs: item.RecalledAtMs));
+                    }
                     else if (item.EditVersion > 1 || item.EditedAtMs is > 0)
-                        existingMessage.ApplyEdited(
+                    {
+                        existingMessage.TryApply(new MessageMutation(
+                            MessageMutationKind.Edit,
                             item.Content?.Trim() ?? string.Empty,
                             item.EditVersion,
-                            item.EditedAtMs ?? 0);
+                            item.EditedAtMs));
+                    }
                     continue;
                 }
             }
@@ -991,9 +1179,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 EditedAtMs = item.EditedAtMs
             };
             if (item.RecalledAtMs is > 0)
-                message.ApplyRecalled();
-            else if (item.EditVersion > 1 || item.EditedAtMs is > 0)
-                message.IsEdited = true;
+            {
+                message.TryApply(new MessageMutation(MessageMutationKind.Recall, RecalledAtMs: item.RecalledAtMs));
+            }
             AddMessage(message);
         }
     }
@@ -1031,7 +1219,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         // 撤回具有最高优先级
         if ((src.RecalledAtMs is > 0 || src.Status == MessageStatus.Recalled) && !target.IsRecalled)
         {
-            target.ApplyRecalled();
+            target.TryApply(new MessageMutation(MessageMutationKind.Recall, RecalledAtMs: src.RecalledAtMs));
             return;
         }
 
@@ -1039,10 +1227,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (src.Status != target.Status && (byte)src.Status > (byte)target.Status)
             target.Status = src.Status;
 
-        // 编辑版本单调递增：仅当 DB 编辑版本更新时应用
+        // 编辑版本单调递增：仅当 DB 编辑版本更新时应用（TryApply 内部拒绝旧版本）
         var dbEditVersion = src.EditVersion > 0 ? src.EditVersion : 1;
         if (dbEditVersion > target.EditVersion)
-            target.ApplyEdited(src.Content ?? string.Empty, dbEditVersion, src.EditedAtMs ?? 0);
+        {
+            target.TryApply(new MessageMutation(
+                MessageMutationKind.Edit, src.Content ?? string.Empty, dbEditVersion, src.EditedAtMs));
+        }
     }
 
     private async Task SendMessage(CancellationToken ct)
@@ -1686,6 +1877,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(HasPendingAttachment));
         OnPropertyChanged(nameof(PendingAttachmentSummary));
         ClearPendingAttachmentCommand.RaiseCanExecuteChanged();
+        ScheduleDraftSave();
     }
 
     private void AddPendingAttachment(PendingAttachment attachment)
@@ -1695,6 +1887,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(HasPendingAttachment));
         OnPropertyChanged(nameof(PendingAttachmentSummary));
         ClearPendingAttachmentCommand.RaiseCanExecuteChanged();
+        ScheduleDraftSave();
     }
 
     private void ClearReplyDraft()
@@ -1702,6 +1895,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _replyToMessageId = null;
         _replyToSenderUserId = null;
         ReplyDraftPreview = null;
+        ScheduleDraftSave();
     }
 
     private void ClearEditDraft()
@@ -1713,6 +1907,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(EditDraftPreview));
         OnPropertyChanged(nameof(SendButtonText));
         ClearEditDraftCommand.RaiseCanExecuteChanged();
+        ScheduleDraftSave();
     }
 
     public void Clear()

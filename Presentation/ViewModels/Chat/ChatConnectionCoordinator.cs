@@ -5,6 +5,7 @@ using Avalonia.Threading;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Services;
 using Core.Interfaces;
+using Core.Models.DTO;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
@@ -25,6 +26,8 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
     private bool _reconnectLoopRunning;
     private bool _intentionalDisconnect;
     private int _attempt;
+    private string? _pendingSessionId;
+    private ulong? _pendingDeviceIdHash;
     private CancellationTokenSource? _lifecycleCts;
     private CancellationTokenSource? _heartbeatCts;
     private ChatConnectionStatus _status = ChatConnectionStatus.Disconnected;
@@ -69,6 +72,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         _chatSessionClient.Authenticated += OnAuthenticated;
         _chatSessionClient.AuthenticationFailed += OnAuthenticationFailed;
+        _chatSessionClient.ProtocolError += OnProtocolError;
         _chatSessionClient.ConnectionClosed += OnConnectionClosed;
         _chatSessionClient.Connected += OnConnected;
         _eventHandlersRegistered = true;
@@ -81,6 +85,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         _chatSessionClient.Authenticated -= OnAuthenticated;
         _chatSessionClient.AuthenticationFailed -= OnAuthenticationFailed;
+        _chatSessionClient.ProtocolError -= OnProtocolError;
         _chatSessionClient.ConnectionClosed -= OnConnectionClosed;
         _chatSessionClient.Connected -= OnConnected;
         _eventHandlersRegistered = false;
@@ -162,6 +167,8 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
         await _chatSessionClient.ConnectAsync(serverInfo, ct).ConfigureAwait(false);
 
         Status = ChatConnectionStatus.Authenticating;
+        _pendingSessionId = authToken.SessionId;
+        _pendingDeviceIdHash = deviceIdHash;
         await _chatSessionClient.AuthenticateAsync(
                 authToken.AccessToken,
                 userId,
@@ -176,6 +183,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
         _attempt = 0;
         Status = ChatConnectionStatus.Connected;
         _currentUserState.SetCurrentUser(userId, _currentUserState.UserName);
+        _currentUserState.SetSession(_pendingSessionId, _pendingDeviceIdHash);
         Log.Information("TCP 鉴权成功 OwnerUserId={Id}", userId);
         StartHeartbeat();
         Dispatcher.UIThread.Post(() =>
@@ -192,6 +200,18 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         // 鉴权失败通常需要重新登录，停止自动重连。
         _autoReconnectEnabled = false;
+    }
+
+    /// <summary>
+    /// 普通协议错误（非致命）：仅提示用户，不影响心跳与重连。
+    /// 致命错误已由 AuthenticationFailed 流程处理。
+    /// </summary>
+    private void OnProtocolError(object? sender, ProtocolErrorDto error)
+    {
+        Log.Warning("协议错误 Code={Code} Command={Command} Message={Message}",
+            error.ErrorCode, error.Command, error.ErrorMessage);
+        Dispatcher.UIThread.Post(() =>
+            _notificationService.ShowError($"服务器错误: {error.ErrorMessage ?? error.ErrorCode ?? "未知错误"}"));
     }
 
     private void OnConnectionClosed(object? sender, string reason)

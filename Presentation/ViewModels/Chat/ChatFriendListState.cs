@@ -56,7 +56,10 @@ public sealed class ChatFriendListState : IDisposable
     {
         // 增量同步 _friends：按 FriendId 对比，删除消失项、就地更新已有项字段、追加新增项。
         // 保留已有对象引用，避免 Clear+Add 重建全部 item container 并丢失会话派生状态（置顶/免打扰/预览/在线）。
-        var incoming = friends as IList<LocalFriend> ?? friends.ToList();
+        // Tombstone 项（IsDeleted）不进入列表：已删除好友退出聊天列表。
+        var incoming = (friends as IList<LocalFriend> ?? friends.ToList())
+            .Where(f => !f.IsDeleted)
+            .ToList();
         var incomingById = new Dictionary<long, LocalFriend>(incoming.Count);
         foreach (var f in incoming)
             incomingById[f.FriendId] = f;
@@ -114,8 +117,9 @@ public sealed class ChatFriendListState : IDisposable
                 continue;
 
             _friendsById.TryGetValue(friendId, out var friend);
+            // 好友缺失（已删除/从未是好友）时以会话条目承载：创建合成项，保证历史会话不消失。
             if (friend is null)
-                continue;
+                friend = CreateSessionEntry(friendId, selfUserId);
 
             friend.IsPinned = item.IsPinned;
             friend.PinnedAtMs = item.PinnedAtMs;
@@ -136,8 +140,9 @@ public sealed class ChatFriendListState : IDisposable
             return;
 
         _friendsById.TryGetValue(friendId, out var friend);
+        // 好友缺失时同样以会话条目承载，保持会话变更可见。
         if (friend is null)
-            return;
+            friend = CreateSessionEntry(friendId, selfUserId);
 
         if (changed.IsPinned is bool pinned)
         {
@@ -158,6 +163,26 @@ public sealed class ChatFriendListState : IDisposable
             friend.LastMessagePreview = changed.LastMessagePreview;
 
         ApplyFilter();
+    }
+
+    /// <summary>
+    /// 会话条目承载：本地无好友记录时创建合成项（FriendId 恒为 peerId），
+    /// 使历史会话不依赖好友数据即可显示。好友同步回来后在 ReplaceFriends 中就地升级为真实好友。
+    /// </summary>
+    private LocalFriend CreateSessionEntry(long friendId, long selfUserId)
+    {
+        var display = $"用户 {friendId}";
+        var entry = new LocalFriend
+        {
+            OwnerUserId = selfUserId,
+            FriendId = friendId,
+            FriendName = display,
+            DisplayName = display,
+            Status = FriendshipStatus.Approved
+        };
+        _friendsById[friendId] = entry;
+        _friends.Add(entry);
+        return entry;
     }
 
     public void ApplyFilter()

@@ -21,13 +21,19 @@ public interface IMessageStore
     /// <summary>持久化同步 catch-up 的历史消息条目。</summary>
     Task PersistHistoryAsync(SessionStamp session, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, CancellationToken ct = default);
 
+    /// <summary>
+    /// 批量应用历史同步：单 DbContext + 单事务完成幂等插入/单调合并、附件 upsert、
+    /// 会话摘要更新与水位推进（cursor 语义由调用方保证单调）。
+    /// </summary>
+    Task ApplyHistoryBatchAsync(SessionStamp session, string conversationId, IReadOnlyList<MessageHistoryItemDto> items, LocalSyncCursor? cursor, CancellationToken ct = default);
+
     /// <summary>处理 MessageAck：单事务更新 outbox + message 状态（单调状态机）。</summary>
     Task HandleAckAsync(SessionStamp session, MessageAcknowledgementDto ack, CancellationToken ct = default);
 
-    /// <summary>处理 MessageRecalled 通知。</summary>
+    /// <summary>处理 MessageRecalled 通知。仅数据库真实变化（Applied）时发布领域事件。</summary>
     Task HandleRecalledAsync(SessionStamp session, MessageRecalledUpdateDto update, CancellationToken ct = default);
 
-    /// <summary>处理 MessageEdited 通知。</summary>
+    /// <summary>处理 MessageEdited 通知。仅数据库真实变化（Applied）时发布领域事件。</summary>
     Task HandleEditedAsync(SessionStamp session, MessageEditedUpdateDto update, CancellationToken ct = default);
 
     /// <summary>处理 ConversationChanged 通知：更新会话摘要。</summary>

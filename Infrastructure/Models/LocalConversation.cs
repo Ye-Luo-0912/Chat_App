@@ -76,6 +76,15 @@ public class LocalConversation : INotifyPropertyChanged
     /// <summary>会话输入框草稿（未发送的文本），持久化到 DB，切换会话后恢复。</summary>
     public string? Draft { get; set; }
 
+    /// <summary>完整草稿 JSON（文本/回复目标/编辑目标/待发送附件），见 <see cref="DraftState"/>。</summary>
+    public string? DraftState { get; set; }
+
+    /// <summary>草稿最后更新时间（Unix 毫秒），乐观并发比较基准。</summary>
+    public long? DraftUpdatedAtMs { get; set; }
+
+    /// <summary>草稿修订号，单调递增，防止旧草稿覆盖新草稿。</summary>
+    public int DraftRevision { get; set; }
+
     public DateTime LastSynced { get; set; }
 
     public bool HasUnread => UnreadCount > 0;

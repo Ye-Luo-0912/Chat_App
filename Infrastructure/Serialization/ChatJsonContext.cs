@@ -51,6 +51,7 @@ namespace Chat_App.Infrastructure.Serialization;
 [JsonSerializable(typeof(AuthRequestDto))]
 [JsonSerializable(typeof(AuthResponseDto))]
 [JsonSerializable(typeof(ErrorResponseDto))]
+[JsonSerializable(typeof(ProtocolErrorDto))]
 public partial class ChatJsonContext : JsonSerializerContext
 {
 }

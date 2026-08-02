@@ -14,7 +14,7 @@ namespace Core.Services
     {
         private readonly ITcpClient _tcpClient;
         private readonly IMessagePacketCodec _codec;
-        private TaskCompletionSource<bool>? _authTcs;
+        private TaskCompletionSource<AuthResponseDto>? _authTcs;
         private readonly IPacketBodySerializer _bodySerializer;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationSetPrefsResponseDto>> _prefsPending = new(StringComparer.Ordinal);
@@ -70,6 +70,7 @@ namespace Core.Services
         public event EventHandler? Connected;
         public event EventHandler<long>? Authenticated;
         public event EventHandler<string>? AuthenticationFailed;
+        public event EventHandler<ProtocolErrorDto>? ProtocolError;
         public event EventHandler<ChatMessageDto>? ChatMessageReceived;
         public event EventHandler<MessageAcknowledgementDto>? MessageAcknowledged;
         public event EventHandler<ConversationChangedDto>? ConversationChanged;
@@ -132,6 +133,8 @@ namespace Core.Services
             {
                 IsAuthenticated = false;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
+                // 鉴权中的请求必须显式结束，否则等待方只能靠超时兜底。
+                _authTcs?.TrySetException(new IOException(e.Reason ?? "连接已断开"));
                 FailPendingRequests(new IOException(e.Reason ?? "连接已断开"));
                 ConnectionClosed?.Invoke(this, e.Reason ?? "连接已断开");
             }
@@ -142,7 +145,10 @@ namespace Core.Services
             if (!IsConnected)
                 throw new InvalidOperationException("TCP 尚未连接！");
 
-            _authTcs = new TaskCompletionSource<bool>();
+            // 单一请求状态机：与普通请求一致，CAS 防止并发鉴权覆盖旧 TCS。
+            var tcs = new TaskCompletionSource<AuthResponseDto>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (Interlocked.CompareExchange(ref _authTcs, tcs, null) is not null)
+                throw new InvalidOperationException("鉴权请求已在进行中");
 
             var authRequest = new AuthRequestDto
             {
@@ -152,19 +158,33 @@ namespace Core.Services
                 DeviceIdHash = deviceIdHash
             };
 
-            await SendPacketAsync(PacketCommand.AuthRequest, authRequest, ct);
-
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(AuthTimeoutSec));
-
             try
             {
-                await _authTcs.Task.WaitAsync(timeoutCts.Token);
+                await SendPacketAsync(PacketCommand.AuthRequest, authRequest, ct).ConfigureAwait(false);
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(AuthTimeoutSec));
+                try
+                {
+                    await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // 外部取消：静默重抛，不触发事件。
+                    throw;
+                }
+                catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+                {
+                    // 内部超时：明确区分于外部取消。
+                    AuthenticationFailed?.Invoke(this, "鉴权超时，服务器未响应");
+                    throw new TimeoutException("鉴权超时，服务器未响应");
+                }
+                // 成功/服务端拒绝：由 HandleAuthResponse 完成 TCS 并触发对应事件。
             }
-            catch (TimeoutException)
+            finally
             {
-                AuthenticationFailed?.Invoke(this, "鉴权超时，服务器未响应");
-                throw;
+                // 仅清空仍属于本次请求的引用，避免误清后续请求。
+                Interlocked.CompareExchange(ref _authTcs, null, tcs);
             }
         }
 
@@ -814,11 +834,112 @@ namespace Core.Services
                         UnreadCountChanged?.Invoke(this, unreadChanged);
                     return;
                 case PacketCommand.Error:
-                    // 零拷贝：codec 以单段 byte[] 构造 Body，直接用 FirstSpan 解码，避免 ToArray 堆分配
-                    var errorMsg = Encoding.UTF8.GetString(packet.Body.FirstSpan);
-                    AuthenticationFailed?.Invoke(this, $"服务器错误：{errorMsg}");
+                    HandleErrorCommand(packet.Body);
                     return;
             }
+        }
+
+        /// <summary>
+        /// 处理服务器 Error 命令：优先按 ProtocolErrorDto 反序列化，
+        /// 兼容旧格式（ErrorResponseDto / 裸 UTF-8 文本）。
+        /// 有 RequestId 时完成对应在途请求；鉴权阶段直接结束鉴权；
+        /// IsFatal 才触发 AuthenticationFailed，普通业务错误仅发布 ProtocolError 事件。
+        /// </summary>
+        private void HandleErrorCommand(ReadOnlySequence<byte> body)
+        {
+            ProtocolErrorDto? error = null;
+            try { error = _bodySerializer.Deserialize<ProtocolErrorDto>(body); } catch { /* 非结构化错误体 */ }
+
+            if (error is null)
+            {
+                // 兼容旧格式：ErrorResponseDto 或裸文本。
+                ErrorResponseDto? legacy = null;
+                try { legacy = _bodySerializer.Deserialize<ErrorResponseDto>(body); } catch { /* 忽略 */ }
+                error = new ProtocolErrorDto
+                {
+                    RequestId = null,
+                    Command = PacketCommand.Error,
+                    ErrorCode = legacy is null ? "UNKNOWN" : legacy.StatusCode.ToString(),
+                    ErrorMessage = legacy is null || string.IsNullOrWhiteSpace(legacy.ErrorMessage)
+                        ? (body.IsSingleSegment ? Encoding.UTF8.GetString(body.FirstSpan) : Encoding.UTF8.GetString(body.ToArray()))
+                        : legacy.ErrorMessage,
+                    IsFatal = false
+                };
+            }
+
+            // 关联在途请求：完成对应 TCS，调用方自行处理，不弹全局错误。
+            if (FailByRequestId(error))
+                return;
+
+            // 鉴权阶段错误：显式结束鉴权 TCS（连接级失败）。
+            if (_authTcs is not null)
+            {
+                _authTcs.TrySetException(new ProtocolRequestException(error));
+                if (error.IsFatal)
+                    AuthenticationFailed?.Invoke(this, error.ErrorMessage ?? "鉴权失败");
+                return;
+            }
+
+            ProtocolError?.Invoke(this, error);
+
+            // 致命错误：与鉴权失败同等级，停止心跳与自动重连。
+            if (error.IsFatal)
+                AuthenticationFailed?.Invoke(this, error.ErrorMessage ?? "服务器致命错误");
+        }
+
+        /// <summary>按 RequestId 在全部在途请求中查找并完成对应 TCS。</summary>
+        private bool FailByRequestId(ProtocolErrorDto error)
+        {
+            if (string.IsNullOrWhiteSpace(error.RequestId))
+                return false;
+            var requestId = error.RequestId;
+
+            if (_listPending.TryRemove(requestId, out var listTcs))
+            {
+                listTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_prefsPending.TryRemove(requestId, out var prefsTcs))
+            {
+                prefsTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_recallPending.TryRemove(requestId, out var recallTcs))
+            {
+                recallTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_editPending.TryRemove(requestId, out var editTcs))
+            {
+                editTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_syncPending.TryRemove(requestId, out var syncTcs))
+            {
+                syncTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_presencePending.TryRemove(requestId, out var presenceTcs))
+            {
+                presenceTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_historyPending.TryRemove(requestId, out var historyTcs))
+            {
+                historyTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_receiptPending.TryRemove(requestId, out var receiptTcs))
+            {
+                receiptTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_markReadPending.TryRemove(requestId, out var markReadTcs))
+            {
+                markReadTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -841,7 +962,7 @@ namespace Core.Services
                 IsAuthenticated = true;
                 CurrentUserId = response.UserId.Value;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
-                _authTcs?.TrySetResult(true);
+                _authTcs?.TrySetResult(response);
                 Authenticated?.Invoke(this, CurrentUserId);
 
             }

@@ -222,7 +222,23 @@ public sealed class SyncEngine : ISyncEngine
         var cursor = await _db.GetSyncCursorAsync(session.OwnerUserId, cu.ConversationId).ConfigureAwait(false);
         if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, cu.Items))
             return;
-        await _messageStore.PersistHistoryAsync(session, cu.ConversationId, cu.Items, ct).ConfigureAwait(false);
+
+        // 目标水位：批次最大时间戳（批量方法内做单调判断，不回退旧水位）。
+        var maxItem = cu.Items[0];
+        for (var i = 1; i < cu.Items.Count; i++)
+        {
+            if (cu.Items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
+                maxItem = cu.Items[i];
+        }
+        var target = new LocalSyncCursor
+        {
+            OwnerUserId = session.OwnerUserId,
+            ConversationId = cu.ConversationId,
+            AfterReceivedAtMs = maxItem.ReceivedAtMs,
+            AfterMessageId = maxItem.MessageId
+        };
+
+        await _messageStore.ApplyHistoryBatchAsync(session, cu.ConversationId, cu.Items, target, ct).ConfigureAwait(false);
         _diagnostics.AddMessages(cu.Items.Count);
     }
 }
