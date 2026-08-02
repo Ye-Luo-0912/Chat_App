@@ -38,6 +38,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IDatabaseService _dbService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IAttachmentStorageService _storage;
+    private readonly IAttachmentDownloadService _downloadService;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
     private LocalFriend? CurrFriend { get; set; }
@@ -201,12 +202,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IEventBus eventBus,
         IDatabaseService dbService,
         ICurrentUserContext currentUserContext,
-        IAttachmentStorageService storage)
+        IAttachmentStorageService storage,
+        IAttachmentDownloadService downloadService)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
         _attachments = attachmentClientService;
         _storage = storage;
+        _downloadService = downloadService;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -1719,60 +1722,23 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ? attachment.FileName
             : $"{attachment.AttachmentId}.bin";
 
-        // 1. 查本地缓存（阶段 3-4）
+        // 下载协调服务：缓存命中直接返回；未命中时"网络下载 → 校验 → 缓存落盘"，
+        // 同附件并发调用共享同一次网络请求。
         string? cachedPath = null;
         try
         {
-            cachedPath = _storage.GetDownloadCachePath(attachment.AttachmentId, fileName);
+            cachedPath = await _downloadService.GetOrDownloadAsync(
+                    attachment.AttachmentId, fileName, attachment.DownloadApiHint, ct)
+                .ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "查询下载缓存失败");
+            Log.Warning(ex, "获取附件缓存路径失败");
         }
 
         Stream? content = null;
         try
         {
-            if (cachedPath is null)
-            {
-                // 缓存未命中，从服务端下载并写入磁盘缓存
-                var hint = !string.IsNullOrWhiteSpace(attachment.DownloadApiHint)
-                    ? attachment.DownloadApiHint!
-                    : attachment.AttachmentId;
-
-                Stream? downloaded = null;
-                try
-                {
-                    var result = await _attachments.DownloadAsync(hint, ct: ct).ConfigureAwait(true);
-                    downloaded = result.Content;
-
-                    try
-                    {
-                        var expectedSha256 = await TryGetAttachmentSha256Async(attachment.AttachmentId).ConfigureAwait(true);
-                        cachedPath = await _storage.WriteToDownloadsAsync(
-                            attachment.AttachmentId, fileName, downloaded, ct, expectedSha256).ConfigureAwait(true);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "写入下载缓存失败");
-                    }
-                }
-                finally
-                {
-                    downloaded?.Dispose();
-                }
-
-                // 下载缓存成功后更新 LocalAttachment.LocalCachePath（阶段 3-4）
-                if (cachedPath is not null)
-                {
-                    await TryUpdateAttachmentCachePathAsync(attachment.AttachmentId, cachedPath).ConfigureAwait(true);
-                }
-            }
-            else
-            {
-                Log.Information("下载缓存命中 AttachmentId={AttachmentId}", attachment.AttachmentId);
-            }
-
             // 弹保存对话框：优先从缓存文件读取
             if (cachedPath is not null)
                 content = File.OpenRead(cachedPath);
@@ -1804,41 +1770,6 @@ public class MessageViewModel : ViewModelBase, IDisposable
         finally
         {
             content?.Dispose();
-        }
-    }
-
-    private async Task TryUpdateAttachmentCachePathAsync(string attachmentId, string cachedPath)
-    {
-        try
-        {
-            var owner = _currentUserContext.RequireUserId();
-            var existing = await _dbService.GetAttachmentByAttachmentIdAsync(owner, attachmentId).ConfigureAwait(true);
-            if (existing is not null && string.IsNullOrEmpty(existing.LocalCachePath))
-            {
-                existing.LocalCachePath = Path.GetFileName(cachedPath);
-                existing.UpdatedAt = DateTime.UtcNow;
-                await _dbService.UpsertAttachmentAsync(existing).ConfigureAwait(true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "更新附件缓存路径失败");
-        }
-    }
-
-    private async Task<string?> TryGetAttachmentSha256Async(string attachmentId)
-    {
-        if (!_currentUserContext.TryGetUserId(out var owner))
-            return null;
-        try
-        {
-            var existing = await _dbService.GetAttachmentByAttachmentIdAsync(owner, attachmentId).ConfigureAwait(true);
-            return string.IsNullOrWhiteSpace(existing?.Sha256) ? null : existing.Sha256;
-        }
-        catch (Exception ex)
-        {
-            Log.Debug(ex, "读取附件 SHA-256 失败，跳过哈希校验");
-            return null;
         }
     }
 

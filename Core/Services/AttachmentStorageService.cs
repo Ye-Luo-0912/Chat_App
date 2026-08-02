@@ -25,6 +25,8 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     private const string CacheVersionFile = "cache.version";
     // 同一 AttachmentId 的并发下载合并：key = attachmentId, value = 进行中的写入任务。
     private static readonly ConcurrentDictionary<string, Task<string>> _inFlightDownloads = new();
+    // 每账户缓存版本只校验一次：登录前 UserId=0 的目录不能抢占首次校验。
+    private readonly ConcurrentDictionary<long, byte> _cacheVersionChecked = new();
 
     public AttachmentStorageService(ICurrentUserContext currentUserContext)
     {
@@ -33,26 +35,30 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
             "Attachments");
-        EnsureCacheVersion();
     }
 
-    /// <summary>缓存版本失效：版本不匹配时清空下载缓存重建。</summary>
-    private void EnsureCacheVersion()
+    /// <summary>缓存版本失效：版本不匹配时清空下载缓存重建，并清扫崩溃残留的 .partial 半成品。</summary>
+    private void EnsureCacheVersion(string downloadsDir)
     {
         try
         {
-            var dir = GetDownloadsDir();
-            var versionPath = Path.Combine(dir, CacheVersionFile);
+            var versionPath = Path.Combine(downloadsDir, CacheVersionFile);
             int? current = null;
             if (File.Exists(versionPath) && int.TryParse(File.ReadAllText(versionPath).Trim(), out var v))
                 current = v;
             if (current != CacheVersion)
             {
-                foreach (var f in Directory.GetFiles(dir))
+                foreach (var f in Directory.GetFiles(downloadsDir))
                 {
                     try { File.Delete(f); } catch { /* 忽略 */ }
                 }
                 File.WriteAllText(versionPath, CacheVersion.ToString());
+            }
+
+            // .partial 写入中断（进程崩溃）可能残留，随版本校验一并清扫。
+            foreach (var f in Directory.GetFiles(downloadsDir, "*.partial"))
+            {
+                try { File.Delete(f); } catch { /* 忽略 */ }
             }
         }
         catch
@@ -85,6 +91,10 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         var dir = Path.Combine(OwnerDir, "downloads");
         Directory.CreateDirectory(dir);
+        // 版本校验延迟到首次使用（登录后）执行：登录前 UserId 为 0，
+        // 若在构造时校验会针对用户 0 目录误操作真实用户缓存。
+        if (_cacheVersionChecked.TryAdd(_currentUserContext.UserId ?? 0, 0))
+            EnsureCacheVersion(dir);
         return dir;
     }
 
@@ -177,6 +187,10 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             File.Move(srcPath, destPath, overwrite: true);
         }
 
+        // 移动即访问：更新元数据并触发容量淘汰，避免新缓存被立即淘汰。
+        try { File.SetLastAccessTimeUtc(destPath, DateTime.UtcNow); } catch { /* 忽略 */ }
+        EvictIfOverCapacity();
+
         return Path.GetFileName(destPath);
     }
 
@@ -185,7 +199,13 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         var downloadsDir = GetDownloadsDir();
         var safeName = SanitizeFileName(fileName);
         var path = Path.Combine(downloadsDir, $"{HashAttachmentName(attachmentId)}_{safeName}");
-        return File.Exists(path) ? path : null;
+        if (File.Exists(path))
+        {
+            // 缓存命中即更新访问元数据，保证 LRU 淘汰按真实使用顺序执行。
+            try { File.SetLastAccessTimeUtc(path, DateTime.UtcNow); } catch { /* 忽略 */ }
+            return path;
+        }
+        return null;
     }
 
     public async Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null)

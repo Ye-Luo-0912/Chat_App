@@ -219,6 +219,23 @@ public sealed class AttachmentApiService : IAttachmentClientService
                     OriginalName = originalName
                 };
             }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                // HttpClient 内部超时（用户未取消）：视为可重试的超时。
+                lastError = new TimeoutException("上传超时", ex);
+                if (ticket is not null)
+                {
+                    await TryAbandonQuietlyAsync(ticket.AttachmentId, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    ticket = null;
+                }
+                if (attempt < maxAttempts)
+                {
+                    Log.Warning(ex, "附件上传超时，准备重试 Attempt={Attempt}/{Max}", attempt, maxAttempts);
+                    await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), ct).ConfigureAwait(false);
+                    continue;
+                }
+            }
             catch (OperationCanceledException)
             {
                 if (ticket is not null)
@@ -226,7 +243,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
                         .ConfigureAwait(false);
                 throw;
             }
-            catch (Exception ex) when (attempt < maxAttempts)
+            catch (Exception ex) when (IsRetryable(ex) && attempt < maxAttempts)
             {
                 lastError = ex;
                 Log.Warning(ex, "附件上传失败，准备重试 Attempt={Attempt}/{Max}", attempt, maxAttempts);
@@ -239,9 +256,46 @@ public sealed class AttachmentApiService : IAttachmentClientService
 
                 await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), ct).ConfigureAwait(false);
             }
+            catch (Exception ex)
+            {
+                // 不可重试错误，或最后一次失败：同样放弃服务端临时对象，避免残留。
+                lastError = ex;
+                Log.Warning(ex, "附件上传失败，放弃重试 Attempt={Attempt}/{Max}", attempt, maxAttempts);
+                if (ticket is not null)
+                {
+                    await TryAbandonQuietlyAsync(ticket.AttachmentId, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    ticket = null;
+                }
+            }
         }
 
         throw lastError ?? new InvalidOperationException("附件上传失败");
+    }
+
+    /// <summary>
+    /// 是否可重试：仅超时、网络中断、408 请求超时、429 限流、5xx 服务端故障。
+    /// 400/401（含刷新失败）/403/413/不支持类型等业务性错误不重试。
+    /// </summary>
+    private static bool IsRetryable(Exception ex)
+    {
+        switch (ex)
+        {
+            case HttpRequestException hre when hre.StatusCode is System.Net.HttpStatusCode st:
+                return st == System.Net.HttpStatusCode.RequestTimeout
+                    || st == System.Net.HttpStatusCode.TooManyRequests
+                    || (int)st >= 500;
+            case HttpRequestException:
+                // 无状态码：连接中断/网络不可达。
+                return true;
+            case TimeoutException:
+                return true;
+            case IOException:
+                // 传输流中断（网络断开）。
+                return true;
+            default:
+                return false;
+        }
     }
 
     public async Task AbandonAsync(string attachmentId, CancellationToken ct = default)
