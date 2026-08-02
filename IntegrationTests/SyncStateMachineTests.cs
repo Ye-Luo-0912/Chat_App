@@ -269,6 +269,132 @@ public class SyncStateMachineTests : IDisposable
 
     // ── 辅助 ────────────────────────────────────────────
 
+    /// <summary>跨设备漫游：新设备（无本地水位）首次同步完整漫游历史——编辑/撤回状态、会话摘要、已读水位。</summary>
+    [Fact]
+    public async Task NewDevice_Roams_All_History()
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        SetupSyncServer(tcp, serializer, () => new SyncBootstrapResponseDto
+        {
+            Succeeded = true,
+            Conversations = new[]
+            {
+                new ConversationListItemDto
+                {
+                    ConversationId = ConvId,
+                    Type = ConversationTypeDto.Direct,
+                    PeerUserId = PeerId,
+                    LastMessageId = "svr-3",
+                    LastMessagePreview = "消息 3",
+                    LastMessageAtMs = nowMs,
+                    LastSenderUserId = PeerId,
+                    UnreadCount = 2,
+                    LastReadMessageId = "svr-1",
+                    LastReadAtMs = nowMs - 2000,
+                    IsPinned = true,
+                    PinnedAtMs = nowMs - 10000,
+                    IsMuted = false
+                }
+            },
+            ConversationsHasMore = false,
+            CatchUps = new[]
+            {
+                new ConversationHistoryCatchUpDto
+                {
+                    ConversationId = ConvId,
+                    Items = new[]
+                    {
+                        NewHistoryItem("svr-1", "", "消息 1", nowMs - 3000),
+                        NewHistoryItem("svr-2", "", "消息 2（已编辑）", nowMs - 2000, editVersion: 2),
+                        NewHistoryItem("svr-3", "", "消息 3（已撤回）", nowMs - 1000, recalledAtMs: nowMs)
+                    }
+                }
+            }
+        });
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        var eventBus = new InMemoryEventBus();
+        var store = new MessageStore(_db, eventBus, session);
+        var engine = new SyncEngine(session, store, _db, new SyncCheckpointStore(store, _db), new SyncConflictResolver());
+
+        var result = await RunSyncAsync(engine, expectSuccess: true);
+
+        // 完整漫游：3 条消息全部入库，编辑/撤回状态保留
+        var all = await _db.GetMessagesAsync(OwnerId, ConvId, 100);
+        Assert.Equal(3, all.Count);
+        var edited = await _db.GetMessageByServerIdAsync(OwnerId, "svr-2");
+        Assert.Equal(2, edited!.EditVersion);
+        Assert.Equal("消息 2（已编辑）", edited.Content);
+        var recalled = await _db.GetMessageByServerIdAsync(OwnerId, "svr-3");
+        Assert.Equal(MessageStatus.Recalled, recalled!.Status);
+
+        // 会话摘要漫游：未读数/已读水位/置顶
+        var conv = await _db.GetConversationAsync(OwnerId, ConvId);
+        Assert.NotNull(conv);
+        Assert.Equal(2, conv!.UnreadCount);
+        Assert.Equal("svr-1", conv.LastReadMessageId);
+        Assert.True(conv.IsPinned);
+
+        // 水位推进到最新
+        var cursor = await _db.GetSyncCursorAsync(OwnerId, ConvId);
+        Assert.Equal("svr-3", cursor!.AfterMessageId);
+    }
+
+    /// <summary>跨设备冲突解决：本地编辑版本与服务器版本按版本号单调合并——旧版本不回退、新版本覆盖。</summary>
+    [Fact]
+    public async Task CrossDevice_Conflict_Edit_Version_Is_Monotonic()
+    {
+        // 设备 A：先同步 v1，再本地离线编辑为 v2（同一条消息）
+        await _db.ApplyHistoryBatchAsync(OwnerId, ConvId,
+            new[] { NewHistoryItem("svr-1", "", "原始内容", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 3000, editVersion: 1) },
+            null);
+        var editResult = await _db.ApplyMessageEditAsync(
+            OwnerId, "svr-1", "设备 A 本地编辑 v2", editVersion: 2,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        Assert.Equal(MessageMutationResult.Applied, editResult);
+
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        var stale = new List<MessageHistoryItemDto>
+        {
+            NewHistoryItem("svr-1", "", "服务器旧版本 v1", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 3000, editVersion: 1)
+        };
+        SetupSyncServer(tcp, serializer, () => new SyncBootstrapResponseDto
+        {
+            Succeeded = true,
+            ConversationsHasMore = false,
+            CatchUps = new[] { new ConversationHistoryCatchUpDto { ConversationId = ConvId, Items = stale } }
+        });
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        var eventBus = new InMemoryEventBus();
+        var store = new MessageStore(_db, eventBus, session);
+        var engine = new SyncEngine(session, store, _db, new SyncCheckpointStore(store, _db), new SyncConflictResolver());
+
+        // 设备 B 拉回的旧版本（v1）不得覆盖设备 A 的本地编辑（v2）
+        await RunSyncAsync(engine, expectSuccess: true);
+        var afterStale = await _db.GetMessageByServerIdAsync(OwnerId, "svr-1");
+        Assert.Equal(2, afterStale!.EditVersion);
+        Assert.Equal("设备 A 本地编辑 v2", afterStale.Content);
+
+        // 服务器新版本（v3）到达：版本号单调 → 覆盖本地 v2
+        stale[0] = NewHistoryItem("svr-1", "", "服务器新版本 v3", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 3000, editVersion: 3);
+        await RunSyncAsync(engine, expectSuccess: true);
+        var afterNew = await _db.GetMessageByServerIdAsync(OwnerId, "svr-1");
+        Assert.Equal(3, afterNew!.EditVersion);
+        Assert.Equal("服务器新版本 v3", afterNew.Content);
+    }
+
     /// <summary>历史滚动分页：游标递减逐页拉取 → 增量入库 → 无重复；同游标重复拉取幂等。</summary>
     [Fact]
     public async Task History_Paging_Incremental_And_Idempotent()
