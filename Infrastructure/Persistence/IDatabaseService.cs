@@ -35,6 +35,13 @@ public interface IDatabaseService
     Task<ServerEndpoint?> GetServerInfoAsync();
     Task DeleteServerInfoAsync();
 
+    /// <summary>
+    /// 登录会话原子持久化：Token + 用户画像 + 服务器端点（可选）在单个事务内提交。
+    /// 任一写入失败则整体回滚，杜绝内存状态与数据库状态分叉。
+    /// 调用方在任务成功返回后再发布 SessionStarted 并启动会话。
+    /// </summary>
+    Task PersistLoginSessionAsync(AuthToken token, LocalUser user, ServerEndpoint? endpoint);
+
     // ---- 会话（持久化聊天系统）----
     Task<List<LocalConversation>> GetConversationsAsync(long ownerUserId);
     Task<LocalConversation?> GetConversationAsync(long ownerUserId, string conversationId);

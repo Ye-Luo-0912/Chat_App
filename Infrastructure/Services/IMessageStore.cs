@@ -51,19 +51,19 @@ public interface IMessageStore
     /// <summary>获取指定账户所有会话的同步水位（用于 SyncBootstrap 请求的 watermarks）。</summary>
     Task<IReadOnlyList<ConversationSyncWatermarkDto>> GetSyncWatermarksAsync(SessionStamp session, CancellationToken ct = default);
 
-    /// <summary>处理对端已读回执（103）：更新本地消息状态为 Read。</summary>
+    /// <summary>处理对端已读回执：更新本地消息状态为 Read。</summary>
     Task HandleReceiptAsync(SessionStamp session, MessageReceiptDto dto, CancellationToken ct = default);
 
-    /// <summary>处理已读状态更新推送（105）：批量更新消息 Read 状态与未读数。</summary>
+    /// <summary>处理已读状态更新推送：批量更新消息 Read 状态与未读数。</summary>
     Task HandleReceiptUpdatedAsync(SessionStamp session, MessageReceiptUpdatedDto dto, CancellationToken ct = default);
 
-    /// <summary>处理未读数变更推送（113）。</summary>
+    /// <summary>处理未读数变更推送。</summary>
     Task HandleUnreadCountChangedAsync(SessionStamp session, UnreadCountChangedDto dto, CancellationToken ct = default);
 
     /// <summary>通过网络拉取会话历史（106/107），持久化到本地 DB 并返回。</summary>
     Task<List<LocalMessage>> FetchAndPersistHistoryAsync(SessionStamp session, string conversationId, int limit = 50, long? beforeReceivedAtMs = null, string? beforeMessageId = null, CancellationToken ct = default);
 
-    /// <summary>主动标记会话已读（110）：本地落库 + 上行网络请求。</summary>
+    /// <summary>主动标记会话已读：本地落库 + 上行网络请求。</summary>
     Task MarkConversationReadAndNotifyAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default);
 
     void Reset();

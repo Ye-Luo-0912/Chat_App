@@ -4,7 +4,7 @@ using Xunit;
 namespace UnitTests;
 
 /// <summary>
-/// 敏感令牌静态保护器测试（P0-10 整改）。
+/// 敏感令牌静态保护器测试。
 /// Windows：DPAPI 加解密往返一致；空值直通；密文与明文不同（非 Base64 的明文不落库）。
 /// 非 Windows：不支持 DPAPI，原样直通（开发环境）。
 /// </summary>

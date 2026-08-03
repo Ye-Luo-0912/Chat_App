@@ -28,9 +28,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly ISyncEngine _syncEngine;
     private readonly IDatabaseService _dbService;
     private readonly ICurrentUserContext _currentUserContext;
+    private readonly IFriendStore _friendStore;
     private readonly ChatFriendListState _friendListState;
     private readonly SemaphoreSlim _initLock = new(1, 1);
-    private readonly SemaphoreSlim _friendSyncLock = new(1, 1);
     private IReadOnlyList<ConversationListItemDto>? _lastConversations;
     private bool _disposed;
     private Message? _pendingForwardMessage;
@@ -230,7 +230,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
         IChatSessionClient chatSessionClient,
         ISyncEngine syncEngine,
         IDatabaseService dbService,
-        ICurrentUserContext currentUserContext)
+        ICurrentUserContext currentUserContext,
+        IFriendStore friendStore)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
@@ -240,6 +241,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _syncEngine = syncEngine;
         _dbService = dbService;
         _currentUserContext = currentUserContext;
+        _friendStore = friendStore;
         _friendListState = new ChatFriendListState(Conversations, FilteredConversations);
 
         PinConversationCommand = new AsyncRelayCommand<LocalConversation>(
@@ -291,9 +293,30 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _connectionCoordinator.StatusChanged += OnConnectionStatusChanged;
         ConnectionStatus = _connectionCoordinator.Status;
         _chatSession.ConversationChanged += OnConversationChanged;
-        _chatSession.Authenticated += OnAuthenticatedRefreshPrefs;
+        // 鉴权后的会话服务（SyncEngine/好友同步/附件恢复）由 UserSessionOrchestrator 统一启动，
+        // ChatViewModel 仅订阅好友投影变化刷新会话列表。
+        _friendStore.FriendsChanged += OnFriendsChanged;
         _chatSession.PresenceChanged += OnPresenceChanged;
         _syncEngine.Completed += OnSyncCompleted;
+    }
+
+    private void OnFriendsChanged(object? sender, EventArgs e)
+    {
+        // 好友增量同步完成：重新投影会话列表好友（本地快照立即展示，远端变化后台刷新）。
+        Dispatcher.UIThread.Post(async () =>
+        {
+            try
+            {
+                var synced = _friendStore.Snapshot;
+                _friendListState.ApplyFriends(synced);
+                if (_lastConversations is { Count: > 0 })
+                    _friendListState.ApplyConversationPrefs(_lastConversations, _chatSession.CurrentUserId);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "好友变化投影刷新失败");
+            }
+        });
     }
 
     private void OnPresenceChanged(object? sender, Core.Models.DTO.PresenceChangedDto e)
@@ -420,15 +443,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
             {
                 _notificationService.ShowError($"加载会话列表失败: {ex.Message}");
             }
-
-            try
-            {
-                await _connectionCoordinator.ConnectAsync(ct);
-            }
-            catch (Exception ex)
-            {
-                _notificationService.ShowError($"服务器连接失败，聊天功能可能不可用: {ex.Message}");
-            }
+            // TCP 连接与会话服务（SyncEngine/Outbox/附件恢复/好友同步/通知）
+            // 由 UserSessionOrchestrator 在登录成功后统一启动，页面导航不再承担连接职责。
         }
         finally
         {
@@ -436,44 +452,22 @@ public class ChatViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private void OnAuthenticatedRefreshPrefs(object? sender, long userId)
-    {
-        // 同步全部移交 SyncEngine：水位 → Bootstrap → 持久化 → Completed 事件投影 UI。
-        _syncEngine.Start(_chatSession.CurrentSession);
-
-        // 后台增量同步好友：服务端为权威，刷新备注/分组/删除变化。
-        _ = SyncFriendsFromServerAsync();
-    }
-
     /// <summary>
-    /// 后台好友同步（防重入）：全量比对后增量替换列表，
-    /// 完成后重放会话预置，恢复会话条目承载的历史会话与置顶/免打扰状态。
+    /// 后台好友同步（防重入）：由 FriendStore 统一执行，
+    /// 变化经 FriendsChanged 事件回流到本页。此处仅保留方法入口供保留原有语义，
+    /// 实际同步在 FriendStore.SyncFromServerAsync 中完成。
     /// </summary>
     private async Task SyncFriendsFromServerAsync()
     {
-        if (!await _friendSyncLock.WaitAsync(0))
-            return; // 已有同步在进行
+        var synced = await _friendLoader.SyncFromServerAsync();
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            _friendListState.ApplyFriends(synced);
 
-        try
-        {
-            var synced = await _friendLoader.SyncFromServerAsync();
-            await Dispatcher.UIThread.InvokeAsync(() =>
-            {
-                _friendListState.ApplyFriends(synced);
-
-                if (_lastConversations is { Count: > 0 })
-                    _friendListState.ApplyConversationPrefs(_lastConversations, _chatSession.CurrentUserId);
-            });
-            Log.Information("好友后台同步完成，UI 已刷新");
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "好友后台同步失败");
-        }
-        finally
-        {
-            _friendSyncLock.Release();
-        }
+            if (_lastConversations is { Count: > 0 })
+                _friendListState.ApplyConversationPrefs(_lastConversations, _chatSession.CurrentUserId);
+        });
+        Log.Information("好友后台同步完成，UI 已刷新");
     }
 
     private async void OnSyncCompleted(object? sender, SyncCompletedEventArgs e)
@@ -733,7 +727,6 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
         _disposed = true;
         _chatSession.ConversationChanged -= OnConversationChanged;
-        _chatSession.Authenticated -= OnAuthenticatedRefreshPrefs;
         _chatSession.PresenceChanged -= OnPresenceChanged;
         _connectionCoordinator.StatusChanged -= OnConnectionStatusChanged;
         _ = UnwatchPresenceSubscriptionsAsync();

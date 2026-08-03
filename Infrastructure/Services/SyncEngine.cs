@@ -73,6 +73,22 @@ public sealed class SyncEngine : ISyncEngine
         }
     }
 
+    /// <summary>
+    /// 停止当前同步任务：取消旧 CTS 并清引用，供会话停止/退出登录/应用退出调用。
+    /// 与 Start 幂等：未运行时调用无副作用。
+    /// </summary>
+    public void Stop()
+    {
+        lock (_startLock)
+        {
+            var oldCts = _syncCts;
+            _syncCts = null;
+            _syncTask = null;
+            oldCts?.Cancel();
+            oldCts?.Dispose();
+        }
+    }
+
     private async Task RunAsync(SessionStamp session, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();

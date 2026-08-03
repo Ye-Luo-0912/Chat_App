@@ -14,7 +14,7 @@ namespace Core.Services
     {
         private readonly ITcpClient _tcpClient;
         private readonly IMessagePacketCodec _codec;
-        private TaskCompletionSource<AuthResponseDto>? _authTcs;
+        private AuthRequestState? _authState;
         private readonly IPacketBodySerializer _bodySerializer;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationSetPrefsResponseDto>> _prefsPending = new(StringComparer.Ordinal);
@@ -134,7 +134,13 @@ namespace Core.Services
                 IsAuthenticated = false;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
                 // 鉴权中的请求必须显式结束，否则等待方只能靠超时兜底。
-                _authTcs?.TrySetException(new IOException(e.Reason ?? "连接已断开"));
+                // 仅当前代际的鉴权请求会被失败：旧连接的断线事件不得误杀新连接的鉴权。
+                var authState = Volatile.Read(ref _authState);
+                if (authState is not null
+                    && authState.Generation == Volatile.Read(ref _connectionGeneration))
+                {
+                    authState.Tcs.TrySetException(new IOException(e.Reason ?? "连接已断开"));
+                }
                 FailPendingRequests(new IOException(e.Reason ?? "连接已断开"));
                 ConnectionClosed?.Invoke(this, e.Reason ?? "连接已断开");
             }
@@ -145,9 +151,14 @@ namespace Core.Services
             if (!IsConnected)
                 throw new InvalidOperationException("TCP 尚未连接！");
 
-            // 单一请求状态机：与普通请求一致，CAS 防止并发鉴权覆盖旧 TCS。
-            var tcs = new TaskCompletionSource<AuthResponseDto>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (Interlocked.CompareExchange(ref _authTcs, tcs, null) is not null)
+            // 鉴权请求状态对象：记录代际，供响应/断线按代际关联，杜绝跨连接误配。
+            var state = new AuthRequestState
+            {
+                Generation = Volatile.Read(ref _connectionGeneration),
+                Tcs = new TaskCompletionSource<AuthResponseDto>(TaskCreationOptions.RunContinuationsAsynchronously)
+            };
+            // CAS 防并发：新鉴权不得覆盖在途鉴权。
+            if (Interlocked.CompareExchange(ref _authState, state, null) is not null)
                 throw new InvalidOperationException("鉴权请求已在进行中");
 
             var authRequest = new AuthRequestDto
@@ -166,7 +177,7 @@ namespace Core.Services
                 timeoutCts.CancelAfter(TimeSpan.FromSeconds(AuthTimeoutSec));
                 try
                 {
-                    await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                    await state.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -179,12 +190,12 @@ namespace Core.Services
                     AuthenticationFailed?.Invoke(this, "鉴权超时，服务器未响应");
                     throw new TimeoutException("鉴权超时，服务器未响应");
                 }
-                // 成功/服务端拒绝：由 HandleAuthResponse 完成 TCS 并触发对应事件。
+                // 成功/服务端拒绝/协议错误/断线：由 HandleAuthResponse / HandleErrorCommand / 断线处理器完成 TCS。
             }
             finally
             {
-                // 仅清空仍属于本次请求的引用，避免误清后续请求。
-                Interlocked.CompareExchange(ref _authTcs, null, tcs);
+                // 仅清空仍指向本次请求的引用，避免误清后续请求（完成后不留悬垂引用）。
+                Interlocked.CompareExchange(ref _authState, null, state);
             }
         }
 
@@ -869,12 +880,13 @@ namespace Core.Services
             if (FailByRequestId(error))
                 return;
 
-            // 鉴权阶段错误：显式结束鉴权 TCS（连接级失败）。
-            if (_authTcs is not null)
+            // 鉴权阶段：仅连接级/致命错误显式结束鉴权。
+            // 普通业务错误与鉴权请求无关，只广播 ProtocolError，继续等待鉴权响应（超时兜底）。
+            var authState = Volatile.Read(ref _authState);
+            if (authState is not null && error.IsFatal)
             {
-                _authTcs.TrySetException(new ProtocolRequestException(error));
-                if (error.IsFatal)
-                    AuthenticationFailed?.Invoke(this, error.ErrorMessage ?? "鉴权失败");
+                authState.Tcs.TrySetException(new ProtocolRequestException(error));
+                AuthenticationFailed?.Invoke(this, error.ErrorMessage ?? "鉴权失败");
                 return;
             }
 
@@ -941,35 +953,56 @@ namespace Core.Services
         }
 
         /// <summary>
-        /// HandleAuthResponse 方法负责处理服务器返回的认证响应消息，根据响应内容更新 ChatSessionClient 的认证状态，并触发相应的事件通知外部订阅者。如果认证成功，则将 IsAuthenticated 设置为 true，更新 CurrentUserId，并触发 Authenticated 事件；如果认证失败，则将 IsAuthenticated 设置为 false，并触发 AuthenticationFailed 事件，传递错误消息给订阅者。这个方法是 ChatSessionClient 中处理认证结果的核心逻辑，通过它可以根据服务器的响应来确定认证是否成功，并及时通知外部订阅者相关的状态变化和错误信息。
+        /// HandleAuthResponse 方法负责处理服务器返回的认证响应消息。
+        /// 按代际关联在途鉴权请求：迟到/串线的响应不得更新状态或触发事件。
         /// </summary>
         /// <param name="response"></param>
         private void HandleAuthResponse(AuthResponseDto? response)
         {
-            // 处理服务器返回的认证响应消息，根据响应内容更新 ChatSessionClient 的认证状态，并触发相应的事件通知外部订阅者。如果认证成功，则将 IsAuthenticated 设置为 true，更新 CurrentUserId，并触发 Authenticated 事件；如果认证失败，则将 IsAuthenticated 设置为 false，并触发 AuthenticationFailed 事件，传递错误消息给订阅者。这个方法是 ChatSessionClient 中处理认证结果的核心逻辑，通过它可以根据服务器的响应来确定认证是否成功，并及时通知外部订阅者相关的状态变化和错误信息。
+            var state = Volatile.Read(ref _authState);
+            // 无在途鉴权（已完成/超时/未发起）或代际不符（旧连接迟到响应）：整体忽略。
+            if (state is null || state.Generation != Volatile.Read(ref _connectionGeneration))
+                return;
+
             if (response is null)
             {
-                _authTcs?.TrySetException(new InvalidOperationException("服务器返回的认证响应无效"));
+                state.Tcs.TrySetException(new InvalidOperationException("服务器返回的认证响应无效"));
                 AuthenticationFailed?.Invoke(this, "服务器返回的认证响应无效");
                 return;
             }
 
-            
             if (response.Success is true && response.UserId.HasValue)
             {
+                // 首次完成本次 TCS 才允许推进状态；重复响应不重复触发。
+                if (!state.Tcs.TrySetResult(response))
+                    return;
+
                 IsAuthenticated = true;
                 CurrentUserId = response.UserId.Value;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
-                _authTcs?.TrySetResult(response);
                 Authenticated?.Invoke(this, CurrentUserId);
-
             }
             else
             {
                 IsAuthenticated = false;
-                _authTcs?.TrySetException(new UnauthorizedAccessException(response.ErrorMessage ?? "认证失败，未知错误"));
+                state.Tcs.TrySetException(new UnauthorizedAccessException(response.ErrorMessage ?? "认证失败，未知错误"));
                 AuthenticationFailed?.Invoke(this, response.ErrorMessage ?? "认证失败，未知错误");
             }
+        }
+
+        /// <summary>
+        /// 鉴权请求状态：TCS + 发起时的连接代际。
+        /// 结果区分：
+        /// - 外部取消：OperationCanceledException（原样重抛，不触发事件）
+        /// - 内部超时：TimeoutException（触发 AuthenticationFailed）
+        /// - 连接断开：IOException（断线处理器完成，仅同代际）
+        /// - 服务端拒绝：UnauthorizedAccessException（HandleAuthResponse）
+        /// - 协议错误：ProtocolRequestException（仅致命错误完成鉴权）
+        /// </summary>
+        private sealed class AuthRequestState
+        {
+            public required long Generation { get; init; }
+            public required TaskCompletionSource<AuthResponseDto> Tcs { get; init; }
         }
     }
 }

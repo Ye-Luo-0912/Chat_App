@@ -138,7 +138,7 @@ public partial class MessageView : UserControl
         if (length <= 0)
             return null;
 
-        // P0-9：选择阶段不读取文件内容（避免整个文件复制进内存后再判大小），
+        // 选择阶段不读取文件内容（避免整个文件复制进内存后再判大小），
         // 大小取自文件系统元数据；上传阶段才打开流。
         return new PickedAttachmentFile
         {

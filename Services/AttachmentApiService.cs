@@ -75,7 +75,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
         if (contentLength > 0)
             streamContent.Headers.ContentLength = contentLength;
 
-        // 九5: 流式上传内容不可自动缓冲重放。为 401 重试提供请求体重建工厂：
+        // 流式上传内容不可自动缓冲重放。为 401 重试提供请求体重建工厂：
         // 重置底层 seekable 流位置，重新包装 ProgressReadStream + StreamContent。
         Func<CancellationToken, Task<HttpContent?>> replayFactory = _ =>
         {
@@ -113,7 +113,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
 
             using var putRequest = new HttpRequestMessage(HttpMethod.Put, relative);
             putRequest.Content = streamContent;
-            // 九5: 提供请求体重建工厂，流式上传遇 401 时由拦截器重建流而非发送空 body。
+            // 提供请求体重建工厂，流式上传遇 401 时由拦截器重建流而非发送空 body。
             putRequest.Options.Set(RequestOptionKeys.ReplayFactory, replayFactory);
 
             response = await _httpClient

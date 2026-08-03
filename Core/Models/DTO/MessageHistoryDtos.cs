@@ -2,7 +2,7 @@ using System.Collections.Generic;
 
 namespace Core.Models.DTO;
 
-/// <summary>显式历史消息拉取请求（106）。注意：SyncBootstrap 内嵌的 catch-up 不用此 DTO。</summary>
+/// <summary>显式历史消息拉取请求。注意：SyncBootstrap 内嵌的 catch-up 不用此 DTO。</summary>
 public sealed class MessageHistoryRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
@@ -17,7 +17,7 @@ public sealed class MessageHistoryRequestDto : IRequestDto
     public int Limit { get; set; } = 50;
 }
 
-/// <summary>显式历史消息分页响应（107）。复用 MessageHistoryItemDto 与 MessageHistoryCursorDto。</summary>
+/// <summary>显式历史消息分页响应。复用 MessageHistoryItemDto 与 MessageHistoryCursorDto。</summary>
 public sealed class MessageHistoryPageDto
 {
     public string? RequestId { get; set; }

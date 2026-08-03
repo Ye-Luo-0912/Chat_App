@@ -46,8 +46,9 @@ public sealed class OutboxProcessor : IDisposable
     private readonly IChatSessionClient _chatSession;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IEventBus _eventBus;
-    private readonly CancellationTokenSource _cts = new();
+    private CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _drainLock = new(1, 1);
+    private readonly SemaphoreSlim _startLock = new(1, 1);
     private readonly IDisposable _enqueuedSubscription;
     private Task? _loopTask;
     private DateTime _lastCleanupUtc = DateTime.MinValue;
@@ -69,10 +70,35 @@ public sealed class OutboxProcessor : IDisposable
         _enqueuedSubscription = _eventBus.Subscribe<OutboxEnqueuedEvent>(OnOutboxEnqueued);
     }
 
-    /// <summary>启动后台排空循环。</summary>
+    /// <summary>启动后台排空循环。幂等：已在运行则无操作；被 Stop 后可重新 Start（换新 CTS）。</summary>
     public void Start()
     {
-        _loopTask = Task.Run(DrainLoopAsync);
+        lock (_startLock)
+        {
+            if (_loopTask is { IsCompleted: false })
+                return;
+            if (_cts.IsCancellationRequested)
+                _cts = new CancellationTokenSource();
+            _loopTask = Task.Run(DrainLoopAsync);
+        }
+    }
+
+    /// <summary>停止后台排空循环并等待退出。幂等。</summary>
+    public void Stop()
+    {
+        lock (_startLock)
+        {
+            _cts.Cancel();
+            try
+            {
+                _loopTask?.Wait(TimeSpan.FromSeconds(StopTimeoutSec));
+            }
+            catch
+            {
+                // 忽略关闭时的等待异常
+            }
+            _loopTask = null;
+        }
     }
 
     private void OnAuthenticated(object? sender, long userId)
@@ -253,17 +279,9 @@ public sealed class OutboxProcessor : IDisposable
 
         _chatSession.Authenticated -= OnAuthenticated;
         _enqueuedSubscription.Dispose();
-        _cts.Cancel();
-        try
-        {
-            _loopTask?.Wait(TimeSpan.FromSeconds(StopTimeoutSec));
-        }
-        catch
-        {
-            // 忽略关闭时的等待异常
-        }
-
+        Stop();
         _cts.Dispose();
         _drainLock.Dispose();
+        _startLock.Dispose();
     }
 }

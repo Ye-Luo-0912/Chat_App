@@ -32,6 +32,8 @@ public class MainWindowViewModel : ViewModelBase
 
     public HomeViewModel HomeViewModel { get; }
 
+    private readonly LoginViewModel _loginViewModel;
+
     public MainWindowViewModel(
         LoginViewModel loginViewModel,
         RegisterViewModel registerViewModel,
@@ -68,7 +70,13 @@ public class MainWindowViewModel : ViewModelBase
         // 初始页 = 登录
         CurrentPage = loginViewModel;
 
-        // 启动自动登录检查（不等待，失败时 LoginViewModel 内部自行处理）
-        _ = loginViewModel.InitAsync();
+        _loginViewModel = loginViewModel;
     }
+
+    /// <summary>
+    /// 应用启动后显式调用（App.OnFrameworkInitializationCompleted）：
+    /// 启动自动登录检查。不放在构造函数中，保证任务可观察、可取消。
+    /// </summary>
+    public Task InitializeAsync(CancellationToken ct = default) =>
+        _loginViewModel.InitAsync(ct);
 }

@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Presentation.ViewModels.Chat;
 using Chat_App.Presentation.ViewModels.Friends;
+using Chat_App.Presentation.Services;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
@@ -53,6 +54,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
     private readonly TokenInfo _tokenInfo;
     private readonly IChatConnectionCoordinator _connectionCoordinator;
     private readonly INotificationService _notifications;
+    private readonly UserSessionOrchestrator _sessionOrchestrator;
 
     #endregion
 
@@ -123,7 +125,8 @@ public class HomeViewModel : ViewModelBase, IDisposable
         IAuthClientService authClient,
         TokenInfo tokenInfo,
         IChatConnectionCoordinator connectionCoordinator,
-        INotificationService notifications)
+        INotificationService notifications,
+        UserSessionOrchestrator sessionOrchestrator)
     {
         _chatViewModel = chatViewModel;
         _friendsViewModel = friendsViewModel;
@@ -132,6 +135,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         _tokenInfo = tokenInfo;
         _connectionCoordinator = connectionCoordinator;
         _notifications = notifications;
+        _sessionOrchestrator = sessionOrchestrator;
 
         NavigateToContactsCommand = new AsyncRelayCommand(NavigateToContacts);
         NavigateToFriendsCommand = new AsyncRelayCommand(() => NavigateToFriends(CancellationToken.None));
@@ -231,11 +235,12 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
         try
         {
-            await _connectionCoordinator.StopAsync().ConfigureAwait(true);
+            // 统一停止会话（SyncEngine/Outbox/TCP/好友快照），而非只断开连接。
+            await _sessionOrchestrator.StopSessionAsync("logout", ct).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "断开 TCP 连接失败（继续退出）");
+            Log.Warning(ex, "停止会话失败（继续退出）");
         }
 
         try
@@ -259,8 +264,9 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
         await _tokenInfo.ClearLocalSessionAsync(ct).ConfigureAwait(true);
 
-        // 重置聊天会话状态，避免下一账户复用上一账户的好友列表与初始化标志。
+        // 重置聊天与通讯录状态，避免下一账户复用上一账户的好友列表与初始化标志。
         _chatViewModel.Reset();
+        _friendsViewModel.Reset();
 
         CurrentPage = _friendsViewModel;
         UpdateSelectionStates(SelectedItem.Contacts);

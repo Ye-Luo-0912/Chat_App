@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace Core.Models.DTO;
 
-/// <summary>已读回执（103）。对端已读我的消息时，服务端下发；也用于上行告知服务端我已读。</summary>
+/// <summary>已读回执。对端已读我的消息时，服务端下发；也用于上行告知服务端我已读。</summary>
 public sealed class MessageReceiptDto : IRequestDto
 {
     /// <summary>请求 Id（上行时携带，用于匹配 MessageReceiptAck）。</summary>
@@ -25,7 +25,7 @@ public sealed class MessageReceiptDto : IRequestDto
     public long? ReceiverUserId { get; set; }
 }
 
-/// <summary>已读回执 ACK（104）。服务端对我们上行 MessageReceipt 的确认。</summary>
+/// <summary>已读回执 ACK。服务端对我们上行 MessageReceipt 的确认。</summary>
 public sealed class MessageReceiptAckDto
 {
     public string? RequestId { get; set; }
@@ -34,7 +34,7 @@ public sealed class MessageReceiptAckDto
     public string? ErrorMessage { get; set; }
 }
 
-/// <summary>已读状态更新推送（105）。服务端推送批量已读水位变更。</summary>
+/// <summary>已读状态更新推送。服务端推送批量已读水位变更。</summary>
 public sealed class MessageReceiptUpdatedDto
 {
     public string? ConversationId { get; set; }

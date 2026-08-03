@@ -8,7 +8,7 @@ using Xunit;
 namespace IntegrationTests;
 
 /// <summary>
-/// 附件恢复查询测试（P0-8 整改）。
+/// 附件恢复查询测试。
 /// 验收场景：可恢复附件 = Uploading（上传中）+ Failed（可重试失败）；
 /// Available（已可用）与 Abandoned（已放弃）不得进入恢复队列。
 /// </summary>

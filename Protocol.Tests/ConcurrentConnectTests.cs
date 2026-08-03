@@ -10,7 +10,7 @@ using Xunit;
 namespace Protocol.Tests;
 
 /// <summary>
-/// 并发 ConnectAsync 串行化测试（P0-4 整改）。
+/// 并发 ConnectAsync 串行化测试。
 /// 验收场景：两个 ConnectAsync 同时发起时由互斥门串行执行——
 /// 后到者等待前一次连接流程完全结束，再关闭刚建立的会话重连；
 /// 最终只有最后建立的连接活跃，先建立的连接被静默关闭（服务端收到 EOF），

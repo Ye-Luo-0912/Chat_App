@@ -122,14 +122,14 @@ public interface IChatSessionClient : IDisposable
         string? beforeMessageId = null,
         CancellationToken ct = default);
 
-    /// <summary>发送已读回执（103）。告知服务端我已读到某条消息。</summary>
+    /// <summary>发送已读回执。告知服务端我已读到某条消息。</summary>
     Task<MessageReceiptAckDto> SendMessageReceiptAsync(
         string conversationId,
         string? lastReadMessageId,
         long? lastReadAtMs,
         CancellationToken ct = default);
 
-    /// <summary>标记会话已读（110）。</summary>
+    /// <summary>标记会话已读。</summary>
     Task<ConversationMarkReadResponseDto> MarkConversationReadAsync(
         string conversationId,
         string? lastReadMessageId = null,

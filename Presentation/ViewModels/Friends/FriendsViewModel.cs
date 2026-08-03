@@ -62,13 +62,24 @@ public class FriendsViewModel : ViewModelBase, IDisposable
                 _searchDebounceCts?.Cancel();
                 _searchDebounceCts?.Dispose();
                 _searchDebounceCts = new CancellationTokenSource();
-                var token = _searchDebounceCts.Token;
-                _ = Task.Delay(200, token).ContinueWith(_ =>
-                {
-                    if (!token.IsCancellationRequested)
-                        Dispatcher.UIThread.Post(FilterFriends);
-                }, TaskScheduler.Default);
+                _ = DebounceFilterAsync(_searchDebounceCts.Token);
             }
+        }
+    }
+
+    /// <summary>搜索防抖：延迟后重算过滤结果；令牌已取消（新输入/页面重置）则直接放弃。</summary>
+    private async Task DebounceFilterAsync(CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(200, token).ConfigureAwait(true);
+            if (token.IsCancellationRequested)
+                return;
+            FilterFriends();
+        }
+        catch (OperationCanceledException)
+        {
+            // 新的输入已接管防抖计时，旧延迟被取消。
         }
     }
 
@@ -245,20 +256,30 @@ public class FriendsViewModel : ViewModelBase, IDisposable
 
             await Task.WhenAll(friendsTask, incomingTask, outgoingTask, blockedTask);
 
-            // 代际校验：本次页面激活已被更新的激活取代则放弃更新集合
-            if (generation != _pageGeneration)
+            var friends = await friendsTask;
+            var incoming = await incomingTask;
+            var outgoing = await outgoingTask;
+            var blocked = await blockedTask;
+
+            // 集合更新统一发布到 UI 线程：InitAsync 可能在后台线程被调用
+            // （如退出登录后再次进入通讯录页），避免跨线程修改 ObservableCollection。
+            await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                Log.Debug("通讯录初始化已过期，放弃更新");
-                return;
-            }
+                // 代际校验：本次页面激活已被更新的激活取代则放弃更新集合
+                if (generation != _pageGeneration)
+                {
+                    Log.Debug("通讯录初始化已过期，放弃更新");
+                    return;
+                }
 
-            ReplaceCollection(_allFriends, await friendsTask, f => f.FriendId);
-            ReplaceCollection(IncomingRequests, await incomingTask, r => r.RequesterId);
-            ReplaceCollection(OutgoingRequests, await outgoingTask, r => r.RequesterId);
-            ReplaceCollection(BlockedUsers, await blockedTask, b => b.BlockedUserId);
+                ReplaceCollection(_allFriends, friends, f => f.FriendId);
+                ReplaceCollection(IncomingRequests, incoming, r => r.RequesterId);
+                ReplaceCollection(OutgoingRequests, outgoing, r => r.RequesterId);
+                ReplaceCollection(BlockedUsers, blocked, b => b.BlockedUserId);
 
-            // 初始过滤
-            FilterFriends();
+                // 初始过滤
+                FilterFriends();
+            });
         }
         catch (Exception ex)
         {
@@ -269,6 +290,30 @@ public class FriendsViewModel : ViewModelBase, IDisposable
         {
             IsLoading = false;
         }
+    }
+
+    /// <summary>
+    /// 退出登录/切账户时重置页面状态：取消在途加载与搜索防抖，清空所有集合，
+    /// 代际 +1 使任何迟到的加载结果失效。
+    /// </summary>
+    public void Reset()
+    {
+        _pageCts?.Cancel();
+        _pageCts?.Dispose();
+        _pageCts = null;
+        _pageGeneration++;
+
+        _searchDebounceCts?.Cancel();
+        _searchDebounceCts?.Dispose();
+        _searchDebounceCts = null;
+
+        _allFriends.Clear();
+        FilteredFriends.Clear();
+        IncomingRequests.Clear();
+        OutgoingRequests.Clear();
+        BlockedUsers.Clear();
+        SelectedFriend = null;
+        IsLoading = false;
     }
 
 	// ── 私有方法 ─────────────────────────────────────────

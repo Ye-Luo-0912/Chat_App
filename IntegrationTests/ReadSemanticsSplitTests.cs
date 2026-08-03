@@ -16,7 +16,7 @@ using Xunit;
 namespace IntegrationTests;
 
 /// <summary>
-/// 已读语义拆分测试（P0-7 整改）。
+/// 已读语义拆分测试。
 /// 验收场景：本地打开会话清未读（MarkConversationReadAsync）只发布 LocalUnreadClearedEvent，
 /// 绝不发布对端已读事件，UI 不得借此伪造"对方已读"；
 /// 对端已读只能由服务端序列水位推进（103 MessageReceipt / 105 MessageReceiptUpdated）
@@ -67,7 +67,7 @@ public class ReadSemanticsSplitTests : IDisposable
         Assert.Empty(advanced);
     }
 
-    /// <summary>对端已读回执（103）：仅发布 PeerReadWatermarkAdvancedEvent，携带水位与 LastReadMessageId。</summary>
+    /// <summary>对端已读回执：仅发布 PeerReadWatermarkAdvancedEvent，携带水位与 LastReadMessageId。</summary>
     [Fact]
     public async Task Peer_Receipt103_Publishes_Watermark_Advanced()
     {
@@ -93,7 +93,7 @@ public class ReadSemanticsSplitTests : IDisposable
         Assert.Empty(cleared);
     }
 
-    /// <summary>对端批量已读水位（105）：仅发布 PeerReadWatermarkAdvancedEvent。</summary>
+    /// <summary>对端批量已读水位：仅发布 PeerReadWatermarkAdvancedEvent。</summary>
     [Fact]
     public async Task Peer_ReceiptUpdated105_Publishes_Watermark_Advanced()
     {

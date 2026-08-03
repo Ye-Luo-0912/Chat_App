@@ -84,7 +84,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         {
             await session.Socket.ConnectAsync(endpoint.ServerIpAddress, endpoint.ServerPort, cts.Token).ConfigureAwait(false);
 
-            // P0-10：TLS 传输。UseTls 时用 SslStream 包装 TCP 流并完成 TLS 握手；
+            // TLS 传输。UseTls 时用 SslStream 包装 TCP 流并完成 TLS 握手；
             // 明文端口（如本地开发 127.0.0.1）保持裸流。此后收发全部走 session.Stream。
             Stream stream = new NetworkStream(session.Socket, ownsSocket: false);
             if (endpoint.UseTls)

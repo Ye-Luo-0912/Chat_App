@@ -13,7 +13,7 @@ namespace Chat_App.Infrastructure.Services;
 
 /// <summary>
 /// 恢复失败的附件上传：鉴权成功事件触发，也支持启动时（已登录）主动调用。
-/// 恢复路径只使用调用方显式传入的 ownerUserId，不读可变全局上下文（P0-8）；
+/// 恢复路径只使用调用方显式传入的 ownerUserId，不读可变全局上下文；
 /// 同用户并发恢复由 per-user 去重防止重复，不同用户可并行恢复。
 /// </summary>
 public sealed class AttachmentRecoveryService

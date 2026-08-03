@@ -214,7 +214,7 @@ public class DatabaseService(
 
     public async Task SaveTokenAsync(AuthToken token)
     {
-        // P0-10：令牌以 DPAPI 密文落库，明文不出现在 SQLite 文件中。
+        // 令牌以 DPAPI 密文落库，明文不出现在 SQLite 文件中。
         var secret = new AuthToken
         {
             UserId = token.UserId,
@@ -246,15 +246,15 @@ public class DatabaseService(
     public async Task<Token?> GetAccessTokenAsync()
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        return await db.Tokens
-            .AsNoTracking()
-            .Select(t => new Token
-            {
-                TokenExpires = t.AccessTokenExpires,
-                TokenValue = t.AccessToken
-            })
-            .FirstOrDefaultAsync(None)
-            .ConfigureAwait(false);
+        // 密文行不能直接返回，需按存储介质解密（Windows DPAPI / 非 Windows 明文）。
+        var stored = await db.Tokens.AsNoTracking().FirstOrDefaultAsync(None);
+        if (stored is null)
+            return null;
+        return new Token
+        {
+            TokenExpires = stored.AccessTokenExpires,
+            TokenValue = SecretProtector.Unprotect(stored.AccessToken) ?? string.Empty
+        };
     }
 
     public async Task<int> UpdateTokenAsync(AuthToken token)
@@ -335,7 +335,93 @@ public class DatabaseService(
     public async Task<ServerEndpoint?> GetServerInfoAsync()
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        return await db.Servers.AsNoTracking().FirstOrDefaultAsync(None);
+        // 优先主服务器，其次最近连接过的服务器；绝不再"任意取第一行"。
+        return await db.Servers
+            .AsNoTracking()
+            .OrderByDescending(s => s.IsPrimary)
+            .ThenByDescending(s => s.LastConnected)
+            .FirstOrDefaultAsync(None);
+    }
+
+    /// <summary>
+    /// 登录会话原子持久化：Token（DPAPI 密文）+ 用户画像 + 服务器端点
+    /// 在单个 DbContext + 单个事务内提交，任一失败整体回滚。
+    /// </summary>
+    public async Task PersistLoginSessionAsync(AuthToken token, LocalUser user, ServerEndpoint? endpoint)
+    {
+        var secret = new AuthToken
+        {
+            UserId = token.UserId,
+            AccessToken = SecretProtector.Protect(token.AccessToken) ?? string.Empty,
+            RefreshToken = SecretProtector.Protect(token.RefreshToken) ?? string.Empty,
+            AccessTokenExpires = token.AccessTokenExpires,
+            RefreshTokenExpires = token.RefreshTokenExpires,
+            SessionId = token.SessionId,
+            DeviceIdHash = token.DeviceIdHash
+        };
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        // Token：单行 upsert。
+        var oldToken = await db.Tokens.FirstOrDefaultAsync(None);
+        if (oldToken is not null)
+        {
+            oldToken.UserId = secret.UserId;
+            oldToken.AccessToken = secret.AccessToken;
+            oldToken.RefreshToken = secret.RefreshToken ?? string.Empty;
+            oldToken.AccessTokenExpires = secret.AccessTokenExpires;
+            oldToken.RefreshTokenExpires = secret.RefreshTokenExpires;
+            oldToken.SessionId = secret.SessionId;
+            oldToken.DeviceIdHash = secret.DeviceIdHash;
+        }
+        else
+        {
+            await db.Tokens.AddAsync(secret, None);
+        }
+
+        // 用户画像 upsert。
+        var existingUser = await db.Users.FirstOrDefaultAsync(u => u.UserId == user.UserId, None);
+        if (existingUser is not null)
+        {
+            existingUser.Username = user.Username;
+            existingUser.AvatarUrl = user.AvatarUrl;
+            existingUser.Email = user.Email;
+            existingUser.Signature = user.Signature;
+            existingUser.Gender = user.Gender;
+            existingUser.Region = user.Region;
+            existingUser.Status = user.Status;
+            existingUser.PreviousLoginDate = user.PreviousLoginDate;
+            existingUser.LastLoginTime = user.LastLoginTime;
+        }
+        else
+        {
+            await db.Users.AddAsync(user, None);
+        }
+
+        // 服务器端点 upsert（按地址+端口匹配；本次登录即最近连接）。
+        if (endpoint is not null)
+        {
+            var existingServer = await db.Servers
+                .FirstOrDefaultAsync(s => s.ServerIpAddress == endpoint.ServerIpAddress
+                                       && s.ServerPort == endpoint.ServerPort, None);
+            if (existingServer is not null)
+            {
+                existingServer.ServerName = endpoint.ServerName;
+                existingServer.UseTls = endpoint.UseTls;
+                existingServer.TlsServerName = endpoint.TlsServerName;
+                existingServer.IsPrimary = endpoint.IsPrimary;
+                existingServer.LastConnected = DateTime.UtcNow;
+            }
+            else
+            {
+                endpoint.LastConnected = DateTime.UtcNow;
+                await db.Servers.AddAsync(endpoint, None);
+            }
+        }
+
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
     }
 
     public async Task DeleteServerInfoAsync()
@@ -538,8 +624,8 @@ public class DatabaseService(
             existing.AttachmentsJson = message.AttachmentsJson;
             existing.FailureReason   = message.FailureReason;
             existing.UpdatedAt       = message.UpdatedAt;
-            // 撤回具有最高优先级，不可被历史同步覆盖。
-            if (existing.Status != MessageStatus.Recalled)
+            // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
+            if (MessageStatusTransitions.CanTransition(existing.Status, message.Status))
                 existing.Status = message.Status;
             // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间。
             if (message.EditVersion > existing.EditVersion)
@@ -587,6 +673,9 @@ public class DatabaseService(
         {
             return;
         }
+        // 严格状态机：仅更新处于允许源状态的行（Read→Sent 等非法转换不生效）。
+        var allowedFrom = MessageStatusTransitions.AllowedFrom(status);
+        query = query.Where(m => allowedFrom.Contains(m.Status));
         if (!string.IsNullOrEmpty(ackServerMessageId))
         {
             await query.ExecuteUpdateAsync(m
@@ -698,8 +787,8 @@ public class DatabaseService(
             existingMessage.AttachmentsJson = message.AttachmentsJson;
             existingMessage.FailureReason   = message.FailureReason;
             existingMessage.UpdatedAt       = message.UpdatedAt;
-            // 撤回具有最高优先级，不可被历史同步覆盖。
-            if (existingMessage.Status != MessageStatus.Recalled)
+            // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
+            if (MessageStatusTransitions.CanTransition(existingMessage.Status, message.Status))
                 existingMessage.Status = message.Status;
             // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间。
             if (message.EditVersion > existingMessage.EditVersion)
@@ -1590,13 +1679,11 @@ public class DatabaseService(
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
         // 仅标记自己发出的消息为已读（对端已读回执表示对方读了我的消息）；
-        // 不覆盖已读、不标记撤回/失败消息。
+        // 严格状态机：仅 Sent/Delivered 可推进为 Read，覆盖不了 Queued/Sending/Failed/Recalled。
         var query = db.Messages.Where(m => m.OwnerUserId == ownerUserId
                                          && m.ConversationId == conversationId
                                          && m.SenderUserId == ownerUserId
-                                         && m.Status != MessageStatus.Recalled
-                                         && m.Status != MessageStatus.Failed
-                                         && m.Status != MessageStatus.Read);
+                                         && (m.Status == MessageStatus.Sent || m.Status == MessageStatus.Delivered));
         if (beforeReceivedAtMs.HasValue)
             query = query.Where(m => m.ReceivedAtMs <= beforeReceivedAtMs.Value);
 

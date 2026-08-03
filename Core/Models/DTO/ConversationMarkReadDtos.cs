@@ -2,7 +2,7 @@ using System.Collections.Generic;
 
 namespace Core.Models.DTO;
 
-/// <summary>标记会话已读请求（110）。</summary>
+/// <summary>标记会话已读请求。</summary>
 public sealed class ConversationMarkReadRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
@@ -11,7 +11,7 @@ public sealed class ConversationMarkReadRequestDto : IRequestDto
     public long? LastReadAtMs { get; set; }
 }
 
-/// <summary>标记会话已读响应（111）。</summary>
+/// <summary>标记会话已读响应。</summary>
 public sealed class ConversationMarkReadResponseDto
 {
     public string? RequestId { get; set; }
@@ -22,7 +22,7 @@ public sealed class ConversationMarkReadResponseDto
     public int UnreadCount { get; set; }
 }
 
-/// <summary>未读数变更推送（113）。</summary>
+/// <summary>未读数变更推送。</summary>
 public sealed class UnreadCountChangedDto
 {
     public required string ConversationId { get; set; }

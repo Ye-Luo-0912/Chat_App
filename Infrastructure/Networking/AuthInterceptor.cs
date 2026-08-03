@@ -19,35 +19,61 @@ public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIde
 
         var skipAuth = request.Options.TryGetValue(RequestOptionKeys.SkipAuthInterceptor, out var skipToken) && skipToken;
 
+        // 记录本次请求实际使用的 AccessToken：401 时据此判断是否已被并发刷新。
+        string? usedToken = null;
         if (!skipAuth && request.Headers.Authorization is null)
         {
-            var token = _tokenInfo.Token?.TokenValue;
-            if (!string.IsNullOrWhiteSpace(token))
+            usedToken = _tokenInfo.Token?.TokenValue;
+            if (!string.IsNullOrWhiteSpace(usedToken))
             {
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", usedToken);
             }
+        }
+        else if (request.Headers.Authorization is { Scheme: "Bearer" } auth)
+        {
+            usedToken = auth.Parameter;
         }
 
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        if (response.StatusCode == HttpStatusCode.Unauthorized && !skipAuth)
         {
-            var isRefreshed = await _tokenInfo.RefreshTokensAsync(cancellationToken);
+            var currentToken = _tokenInfo.Token?.TokenValue;
 
+            // 令牌已被并发刷新（与请求时不同）：不再触发刷新，直接用新令牌重放。
+            if (usedToken is not null
+                && currentToken is not null
+                && !string.Equals(usedToken, currentToken, StringComparison.Ordinal))
+            {
+                response.Dispose();
+                return await ReplayWithTokenAsync(request, currentToken, cancellationToken).ConfigureAwait(false);
+            }
+
+            // 请求使用的令牌即当前令牌：执行 single-flight 刷新后重放一次。
+            var isRefreshed = await _tokenInfo.RefreshTokensAsync(cancellationToken);
             if (isRefreshed)
             {
                 var newToken = _tokenInfo.Token?.TokenValue;
-
-                using var clonedRequest = await CloneRequestAsync(request, cancellationToken);
-                clonedRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", newToken);
-                EnsureDeviceHeaders(clonedRequest);
+                if (string.IsNullOrWhiteSpace(newToken))
+                    return response;
 
                 response.Dispose();
-                response = await base.SendAsync(clonedRequest, cancellationToken);
+                return await ReplayWithTokenAsync(request, newToken, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return response;
+    }
+
+    private async Task<HttpResponseMessage> ReplayWithTokenAsync(
+        HttpRequestMessage request,
+        string accessToken,
+        CancellationToken cancellationToken)
+    {
+        using var clonedRequest = await CloneRequestAsync(request, cancellationToken);
+        clonedRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        EnsureDeviceHeaders(clonedRequest);
+        return await base.SendAsync(clonedRequest, cancellationToken);
     }
 
     private void EnsureDeviceHeaders(HttpRequestMessage request)
@@ -69,7 +95,7 @@ public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIde
 
         if (req.Content != null)
         {
-            // 九5: 仅可缓冲重放的内容（字节数组/字符串/表单）才自动复制重放。
+            // 仅可缓冲重放的内容（字节数组/字符串/表单）才自动复制重放。
             if (req.Content is ByteArrayContent or StringContent or FormUrlEncodedContent)
             {
                 var bytes = await req.Content.ReadAsByteArrayAsync(cancellation).ConfigureAwait(false);

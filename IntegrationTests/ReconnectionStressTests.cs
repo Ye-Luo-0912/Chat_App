@@ -94,14 +94,15 @@ public class ReconnectionStressTests
 
     /// <summary>
     /// 设置自动鉴权响应：收到 AuthRequest 后立即注入 AuthResponse。
+    /// 重复调用会替换上一次的响应注入（避免旧轮次的响应串入新一轮）。
     /// </summary>
-    private static void SetupAutoAuth(
+    private static Action<PacketCommand, ReadOnlyMemory<byte>> SetupAutoAuth(
         ScriptedTcpClient tcp,
         IPacketBodySerializer serializer,
         long userId,
         bool success = true)
     {
-        tcp.OnFrameSent += (cmd, _) =>
+        Action<PacketCommand, ReadOnlyMemory<byte>> handler = (cmd, _) =>
         {
             if (cmd == PacketCommand.AuthRequest)
             {
@@ -109,6 +110,8 @@ public class ReconnectionStressTests
                     new AuthResponseDto { Success = success, UserId = userId });
             }
         };
+        tcp.OnFrameSent += handler;
+        return handler;
     }
 
     /// <summary>
@@ -124,10 +127,14 @@ public class ReconnectionStressTests
         var closeReasons = new ConcurrentBag<string>();
         session.ConnectionClosed += (_, reason) => closeReasons.Add(reason);
 
+        Action<PacketCommand, ReadOnlyMemory<byte>>? authHandler = null;
+
         for (var round = 0; round < 5; round++)
         {
             await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
-            SetupAutoAuth(tcp, serializer, 7000 + round);
+            if (authHandler is not null)
+                tcp.OnFrameSent -= authHandler;
+            authHandler = SetupAutoAuth(tcp, serializer, 7000 + round);
 
             await session.AuthenticateAsync("token", 7000 + round, null, null);
 

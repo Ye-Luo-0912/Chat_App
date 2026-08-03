@@ -15,7 +15,7 @@ using Xunit;
 namespace Protocol.Tests;
 
 /// <summary>
-/// TLS 加密传输测试（P0-10 整改）。
+/// TLS 加密传输测试。
 /// 验收场景：TcpClientExample UseTls=true 时在 TCP 之上完成 TLS 握手，
 /// 数据帧经 SslStream 加密传输，服务端 TLS 流能解码出完整帧（线路非明文）；
 /// 默认端点与服务端校验为系统信任链（严格校验，不信任自签）。

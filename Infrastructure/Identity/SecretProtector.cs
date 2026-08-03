@@ -6,7 +6,7 @@ using Serilog;
 namespace Chat_App.Infrastructure.Identity;
 
 /// <summary>
-/// 本地敏感信息（AccessToken/RefreshToken）的静态保护器（P0-10）。
+/// 本地敏感信息（AccessToken/RefreshToken）的静态保护器。
 /// Windows 平台使用 DPAPI（当前用户作用域 + 应用熵）加密后落库，
 /// 明文不出现在 SQLite 文件中；非 Windows 平台无 OS 级保护，保持原样并警告。
 /// 加密值以 Base64 存储；解密失败视为数据损坏，返回 null 交由上层走重新登录。

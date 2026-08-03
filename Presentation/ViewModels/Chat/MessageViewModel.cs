@@ -44,7 +44,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private long CurrPeerId { get; set; }
     private string? CurrConversationId { get; set; }
 
-    // 会话切换代际与取消令牌：防止快速切换 A→B 时 A 的异步历史/已读任务污染 B（七）。
+    // 会话切换代际与取消令牌：防止快速切换 A→B 时 A 的异步历史/已读任务污染 B。
     // 每次切换生成新代际，所有历史加载/附件加载/已读请求/Dispatcher 回调必须校验代际。
     private long _conversationGeneration;
     private CancellationTokenSource _conversationCts = new();
@@ -462,7 +462,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             var local = FindMessage(e.MessageId, e.ClientMessageId);
             if (local is null) return;
             local.FailedReason = e.FailureReason;
-            local.Status = e.NewStatus;
+            TryAdvanceStatus(local, e.NewStatus);
         });
     }
 
@@ -475,7 +475,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             var local = FindMessage(null, e.ClientMessageId);
             if (local is null) return;
             local.FailedReason = e.FailureReason;
-            local.Status = MapOutboxStatusToMessageStatus(e.NewStatus);
+            TryAdvanceStatus(local, MapOutboxStatusToMessageStatus(e.NewStatus));
             if (!string.IsNullOrWhiteSpace(e.ServerMessageId))
             {
                 local.MessageId = e.ServerMessageId;
@@ -501,7 +501,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     }
 
     /// <summary>
-    /// 在 UI 线程执行 action，回调真正执行时会话可能已切换，必须再次校验代际（七）。
+    /// 在 UI 线程执行 action，回调真正执行时会话可能已切换，必须再次校验代际。
     /// 统一 6 处领域事件订阅器的 generation 捕获 + Dispatcher.UIThread.Post + 代际复核模式。
     /// </summary>
     private void PostIfCurrent(Action action)
@@ -639,7 +639,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var ok = await _dbService.RetryOutboxAsync(selfId, message.ClientMessageId).ConfigureAwait(true);
         if (!ok)
             return;
-        message.Status = MessageStatus.Queued;
+        TryAdvanceStatus(message, MessageStatus.Queued);
         CancelSendCommand.RaiseCanExecuteChanged();
         _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Queued, null));
     }
@@ -653,7 +653,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var ok = await _dbService.CancelOutboxAsync(selfId, message.ClientMessageId).ConfigureAwait(true);
         if (!ok)
             return;
-        message.Status = MessageStatus.Failed;
+        TryAdvanceStatus(message, MessageStatus.Failed);
         _eventBus.Publish(new OutboxStatusChangedEvent(message.ClientMessageId, OutboxStatus.Cancelled, null));
     }
 
@@ -703,7 +703,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (previousPeerId > 0 && previousPeerId != targetPeerId)
             _ = UnwatchPeerPresenceAsync(previousPeerId);
 
-        // 取消上一会话所有进行中的加载/已读/同步任务，并提升代际（七）。
+        // 取消上一会话所有进行中的加载/已读/同步任务，并提升代际。
         CancelConversationOperations();
         var generation = ++_conversationGeneration;
         var ct = _conversationCts.Token;
@@ -737,7 +737,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (CurrPeerId > 0)
             _ = RefreshPeerPresenceAsync(CurrPeerId);
 
-        // 顺序：加载本地最新页 → 渲染 → 标记实际最后可见消息已读 → 后台同步缺失消息（七）。
+        // 顺序：加载本地最新页 → 渲染 → 标记实际最后可见消息已读 → 后台同步缺失消息。
         // 全程校验代际，代际不匹配即放弃，避免快速切换 A→B 时 A 的结果污染 B。
         _ = InitializeConversationAsync(CurrConversationId, generation, ct);
     }
@@ -981,7 +981,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (generation != _conversationGeneration)
             return;
 
-        // 2. 渲染完成后，标记实际最后可见消息已读（不再读取空集合）（七）
+        // 2. 渲染完成后，标记实际最后可见消息已读（不再读取空集合）
         await MarkCurrentConversationReadAsync(generation, ct);
 
         if (generation != _conversationGeneration)
@@ -1043,7 +1043,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
 
         // 仅对端真实已读（服务端 103/105 序列水位）才推进已读展示；
-        // 本地打开会话清未读（LocalUnreadClearedEvent）不得伪造对端已读（P0-7）。
+        // 本地打开会话清未读（LocalUnreadClearedEvent）不得伪造对端已读。
         var cutoff = DateTimeOffset.FromUnixTimeMilliseconds(e.ReadAtMs).LocalDateTime;
         PostIfCurrent(() =>
         {
@@ -1264,6 +1264,20 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// 严格状态机推进：仅接受 <see cref="MessageStatusTransitions"/> 定义的合法转换，
+    /// 已撤回消息不会被打回。
+    /// </summary>
+    private static bool TryAdvanceStatus(Message target, MessageStatus newStatus)
+    {
+        if (target.Status == newStatus)
+            return true;
+        if (!MessageStatusTransitions.CanTransition(target.Status, newStatus))
+            return false;
+        target.Status = newStatus;
+        return true;
+    }
+
     /// <summary>将 DB 最新状态同步到已存在的 UI 消息（状态/撤回/编辑单调推进，不回退）。</summary>
     private static void ApplyDbStateToMessage(Message target, LocalMessage src)
     {
@@ -1274,8 +1288,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        // 状态单调推进：仅当 DB 状态数值更大时才更新（Queued<Sent<Delivered<Read<Failed<Recalled）
-        if (src.Status != target.Status && (byte)src.Status > (byte)target.Status)
+        // 状态单调推进：仅接受状态机的合法转换（Failed 是发送分支状态，不覆盖 Read）
+        if (src.Status != target.Status && MessageStatusTransitions.CanTransition(target.Status, src.Status))
             target.Status = src.Status;
 
         // 编辑版本单调递增：仅当 DB 编辑版本更新时应用（TryApply 内部拒绝旧版本）
@@ -1297,7 +1311,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         if (!hasText && !hasAttachments) return;
 
         // 离线发送放开：纯文本消息即使未连接也事务化写入 Outbox+LocalMessage，
-        // 由 OutboxProcessor 在恢复连接后认领补发（P0-5）。
+        // 由 OutboxProcessor 在恢复连接后认领补发。
         // 附件消息的附件文件尚未上传到服务端，离线时无法发送。
         if (!_chatSession.IsConnected || !_chatSession.IsAuthenticated)
         {
@@ -2113,7 +2127,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     }
 }
 
-/// <summary>View 文件选择器返回的本地文件描述。选择阶段不读取文件内容（P0-9），</summary>
+/// <summary>View 文件选择器返回的本地文件描述。选择阶段不读取文件内容，</summary>
 /// 大小取自文件系统元数据；OpenReadAsync 延迟到上传阶段才真正打开流。
 public sealed class PickedAttachmentFile
 {

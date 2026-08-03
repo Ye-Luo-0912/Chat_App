@@ -21,7 +21,14 @@ public class TokenInfo
     private readonly IAuthClientService _loginService;
     private readonly ICurrentUserState _currentUserState;
 
-    private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    /// <summary>在途刷新任务：严格 single-flight，并发 401 共享同一轮刷新。</summary>
+    private Task<bool>? _inFlightRefresh;
+
+    /// <summary>
+    /// 会话失效事件：刷新令牌已过期/无效、或刷新失败时触发。
+    /// 订阅方（UserSessionOrchestrator）应停止 TCP/同步/Outbox 并回到登录页，而不是仅清空 Token。
+    /// </summary>
+    public event EventHandler? SessionExpired;
 
     public TokenInfo(IDatabaseService databaseService, IAuthClientService loginService, ICurrentUserState currentUserState)
     {
@@ -70,14 +77,45 @@ public class TokenInfo
 
     public Token? Token => _token;
 
-    public async Task<bool> RefreshTokensAsync(CancellationToken ct = default)
+    /// <summary>
+    /// 严格 single-flight 刷新：并发调用共享同一轮刷新任务，
+    /// 后续等待者拿到的是同一结果，不会各自再次使用已旋转的 RefreshToken。
+    /// </summary>
+    public Task<bool> RefreshTokensAsync(CancellationToken ct = default)
     {
-        await _refreshLock.WaitAsync(ct);
+        var inFlight = Volatile.Read(ref _inFlightRefresh);
+        if (inFlight is not null)
+            return inFlight;
+
+        var candidate = RefreshTokensCoreAsync(ct);
+        var raced = Interlocked.CompareExchange(ref _inFlightRefresh, candidate, null);
+        if (raced is not null)
+            return raced;
+
+        return AwaitAndClearAsync(candidate);
+    }
+
+    private async Task<bool> AwaitAndClearAsync(Task<bool> task)
+    {
+        try
+        {
+            return await task.ConfigureAwait(false);
+        }
+        finally
+        {
+            // 仅清空仍指向本轮刷新任务的引用，避免误清后续刷新。
+            _ = Interlocked.CompareExchange(ref _inFlightRefresh, null, task);
+        }
+    }
+
+    private async Task<bool> RefreshTokensCoreAsync(CancellationToken ct)
+    {
         try
         {
             var stored = await _databaseService.GetTokenAsync().ConfigureAwait(false);
             if (stored is null || stored.RefreshTokenExpires <= DateTime.UtcNow)
             {
+                Log.Warning("RefreshToken 缺失或已过期，会话失效");
                 await ClearTokensAsync();
                 return false;
             }
@@ -89,6 +127,7 @@ public class TokenInfo
                 || string.IsNullOrWhiteSpace(result.AccessToken)
                 || string.IsNullOrWhiteSpace(result.RefreshToken))
             {
+                Log.Warning("刷新令牌响应无效，会话失效");
                 await ClearTokensAsync();
                 return false;
             }
@@ -130,11 +169,8 @@ public class TokenInfo
         catch (Exception ex)
         {
             Log.Error(ex, "Token 刷新过程中发生异常");
+            await ClearTokensAsync();
             return false;
-        }
-        finally
-        {
-            _refreshLock.Release();
         }
     }
 
@@ -146,6 +182,10 @@ public class TokenInfo
         await _databaseService.DeleteTokenAsync().ConfigureAwait(false);
     }
 
-    private Task ClearTokensAsync() => ClearLocalSessionAsync();
+    private Task ClearTokensAsync()
+    {
+        SessionExpired?.Invoke(this, EventArgs.Empty);
+        return ClearLocalSessionAsync();
+    }
 }
 

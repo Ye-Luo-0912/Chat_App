@@ -23,6 +23,9 @@ public interface ISyncEngine
     /// <summary>启动一次完整同步。若已有任务在跑，先取消旧任务（旧任务静默退出，不触发事件）。</summary>
     void Start(SessionStamp session, CancellationToken ct = default);
 
+    /// <summary>停止当前同步任务（会话停止/退出登录/应用退出时调用）。幂等。</summary>
+    void Stop();
+
     /// <summary>同步完成（成功或失败）后触发。UI 层订阅此事件做投影更新。</summary>
     event EventHandler<SyncCompletedEventArgs>? Completed;
 }

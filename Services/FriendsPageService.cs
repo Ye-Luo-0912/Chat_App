@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
-using Chat_App.Shared.Extensions;
+using Chat_App.Infrastructure.Services;
+using Chat_App.Infrastructure.Extensions;
 using Core.Contracts.Friends;
 using Core.Interfaces;
 using Chat_App.Infrastructure.Models;
@@ -20,6 +21,7 @@ public class FriendsPageService : IFriendsPageService
     private readonly IFriendshipService _api;
     private readonly IDatabaseService _db;
     private readonly ICurrentUserContext _currentUser;
+    private readonly IFriendStore _friendStore;
 
     // 内存缓存
     private List<LocalFriend> _friendsCache = [];
@@ -30,11 +32,13 @@ public class FriendsPageService : IFriendsPageService
     public FriendsPageService(
         IFriendshipService api,
         IDatabaseService db,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        IFriendStore friendStore)
     {
         _api = api;
         _db = db;
         _currentUser = currentUser;
+        _friendStore = friendStore;
     }
 
     // ── 数据加载 ──────────────────────────────────────
@@ -43,31 +47,15 @@ public class FriendsPageService : IFriendsPageService
     {
         try
         {
-            var ownerUserId = _currentUser.RequireUserId();
-
-            // 从服务端获取
-            var friendDtos = new List<FriendDto>();
-            await foreach (var dto in _api.GetAllFriendsAsync(ct).ConfigureAwait(false))
-            {
-                friendDtos.Add(dto);
-            }
-
-            // 使用扩展方法批量转换为本地模型
-            _friendsCache = friendDtos.ToLocalFriends(ownerUserId);
-
-            // 更新本地数据库
-            if (_friendsCache.Count > 0)
-            {
-                await _db.AddFriendAsync(_friendsCache).ConfigureAwait(false);
-            }
-
+            // 好友列表与会话列表共享同一份投影（FriendStore）：
+            // 本地立即返回 + 后台服务端增量同步（Upsert/Tombstone 在 FriendStore 内完成）。
+            _friendsCache = [.. await _friendStore.LoadAsync(ct).ConfigureAwait(false)];
             Log.Information("加载好友列表完成，共 {Count} 人", _friendsCache.Count);
             return _friendsCache.AsReadOnly();
         }
         catch (Exception ex)
         {
             Log.Error(ex, "加载好友列表失败");
-            // 尝试从本地数据库加载
             var owner = _currentUser.TryGetUserId(out var oid) ? oid : 0L;
             var local = await _db.GetFriendsAsync(owner).ConfigureAwait(false);
             _friendsCache = local;

@@ -5,6 +5,7 @@ using Chat_App.Presentation.ViewModels.Chat;
 using Chat_App.Presentation.ViewModels.Friends;
 using Chat_App.Presentation.ViewModels.Shell;
 using Chat_App.Presentation.Views;
+using Chat_App.Presentation.Services;
 using Chat_App.Services;
 using Core.Interfaces;
 using Core.Protocol;
@@ -71,6 +72,10 @@ public partial class App : Application
         services.AddSingleton<MessageViewModel>();
         services.AddSingleton<IChatFriendLoader, ChatFriendLoader>();
         services.AddSingleton<IChatConnectionCoordinator, ChatConnectionCoordinator>();
+        services.AddSingleton<IFriendStore, FriendStore>();
+        services.AddSingleton<IFriendFetcher>(sp =>
+            new FriendFetcherAdapter(sp.GetRequiredService<IFriendshipService>()));
+        services.AddSingleton<UserSessionOrchestrator>();
         services.AddSingleton<MainWindowViewModel>();
         services.AddSingleton<HomeViewModel>();
         services.AddSingleton<SettingsViewModel>();
@@ -196,13 +201,58 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            var mainWindowViewModel = _services.GetRequiredService<MainWindowViewModel>();
             desktop.MainWindow = new MainWindow
             {
-                DataContext = _services.GetRequiredService<MainWindowViewModel>()
+                DataContext = mainWindowViewModel
             };
+            _ = mainWindowViewModel.InitializeAsync(CancellationToken.None);
+
+            // 统一应用关闭序列：草稿落盘 → 停止同步/Outbox/TCP → 排空数据库写入队列 → 关闭日志。
+            desktop.Exit += (_, _) => ShutdownApplication();
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// 应用退出前的统一收尾：停止会话服务（SyncEngine/Outbox/TCP/好友快照），
+    /// 再落盘草稿，最后排空数据库写入队列并关闭日志。任何一步失败都不阻断退出。
+    /// </summary>
+    private void ShutdownApplication()
+    {
+        try
+        {
+            var orchestrator = _services.GetRequiredService<UserSessionOrchestrator>();
+            orchestrator.StopSessionAsync("app_exit").GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "关闭应用：停止会话失败（继续退出）");
+        }
+
+        try
+        {
+            var chatViewModel = _services.GetRequiredService<ChatViewModel>();
+            chatViewModel.FlushDraftsAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "关闭应用：草稿落盘失败（继续退出）");
+        }
+
+        try
+        {
+            var dbWriteQueue = _services.GetRequiredService<IDatabaseWriteQueue>();
+            dbWriteQueue.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "关闭应用：数据库写入队列排空失败（继续退出）");
+        }
+
+        Log.Information("应用程序退出，日志已落盘");
+        Log.CloseAndFlush();
     }
 
     /// <summary>

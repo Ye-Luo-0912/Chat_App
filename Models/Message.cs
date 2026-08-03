@@ -146,7 +146,7 @@ public class Message : INotifyPropertyChanged
     /// <summary>仅我方消息且未撤回时展示状态字形。</summary>
     public bool StatusGlyphVisibility => IsSentByMe && !IsRecalled;
 
-    /// <summary>撤回时间（Unix 毫秒）；撤回状态的一部分真相。</summary>
+    /// <summary>撤回时间（Unix 毫秒）。RecalledAtMs > 0 时强制 Status=Recalled，保证单一真相。</summary>
     public long? RecalledAtMs
     {
         get => _recalledAtMs;
@@ -155,6 +155,9 @@ public class Message : INotifyPropertyChanged
             if (_recalledAtMs == value)
                 return;
             _recalledAtMs = value;
+            // 单一真相由 Status 承担：写入撤回时间时同步置为 Recalled。
+            if (value is > 0 && Status != MessageStatus.Recalled)
+                Status = MessageStatus.Recalled;
             OnPropertyChanged();
             OnPropertyChanged(nameof(IsRecalled));
             OnPropertyChanged(nameof(StatusGlyphVisibility));
@@ -182,7 +185,8 @@ public class Message : INotifyPropertyChanged
         }
     }
 
-    public bool IsRecalled => Status == MessageStatus.Recalled || RecalledAtMs is > 0;
+    /// <summary>单一真相：仅由 Status 决定，不再依赖独立的 RecalledAtMs 布尔通道。</summary>
+    public bool IsRecalled => Status == MessageStatus.Recalled;
 
     public int EditVersion
     {

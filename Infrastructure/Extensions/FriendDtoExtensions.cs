@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace Chat_App.Shared.Extensions;
+namespace Chat_App.Infrastructure.Extensions;
 
 /// <summary>
 /// 好友相关 DTO 的扩展方法，用于转换为本地模型。

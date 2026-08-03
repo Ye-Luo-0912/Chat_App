@@ -1,4 +1,5 @@
 using Chat_App.Infrastructure.Persistence;
+using Chat_App.Presentation.Services;
 using Chat_App.Presentation.ViewModels.Shell;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
@@ -28,8 +29,15 @@ public class LoginViewModel : ViewModelBase
     private readonly INotificationService _notificationService;
     private readonly TokenInfo _tokenInfo;
     private readonly ICurrentUserState _currentUserContext;
+    private readonly UserSessionOrchestrator _sessionOrchestrator;
     private readonly bool _useTls;
     private CancellationTokenSource? _cts;
+
+    /// <summary>单一登录互斥锁：自动登录与手动登录串行执行，杜绝 Token/页面导航竞争。</summary>
+    private readonly SemaphoreSlim _loginGate = new(1, 1);
+
+    /// <summary>自动登录的取消令牌：手动登录开始时取消在途自动登录。</summary>
+    private CancellationTokenSource? _autoLoginCts;
 
     /// <summary>
     /// 由 MainWindowViewModel 注入的导航回调，调用时传入目标 ViewModel。
@@ -83,7 +91,8 @@ public class LoginViewModel : ViewModelBase
         ICurrentUserState currentUserContext,
         HomeViewModel homeViewModel,
         INotificationService notificationService,
-        Microsoft.Extensions.Configuration.IConfiguration configuration)
+        Microsoft.Extensions.Configuration.IConfiguration configuration,
+        UserSessionOrchestrator sessionOrchestrator)
     {
         _authService = loginService;
         _dbService = dbService;
@@ -91,6 +100,7 @@ public class LoginViewModel : ViewModelBase
         _currentUserContext = currentUserContext;
         _homeViewModel = homeViewModel;
         _notificationService = notificationService;
+        _sessionOrchestrator = sessionOrchestrator;
         _useTls = configuration.GetValue<bool>("Tcp:UseTls", true);
         LoginCommand = new AsyncRelayCommand(OnLoginAsync, CanLogin);
         GoToRegisterCommand = new RelayCommand(() => NavigateTo?.Invoke("register"));
@@ -105,46 +115,86 @@ public class LoginViewModel : ViewModelBase
 
     /// <summary>
     /// 初始化登录页：检查已有 Token 是否有效，有效则自动跳转主页。
+    /// 自动登录受互斥锁保护，且可被手动登录取消。
     /// </summary>
-    public async Task InitAsync()
+    public async Task InitAsync(CancellationToken ct = default)
     {
+        await _loginGate.WaitAsync(ct);
         try
         {
-            await _tokenInfo.InitAsync();
-            var res = _tokenInfo.Token;
-
-            if (res is not null && !string.IsNullOrWhiteSpace(res.TokenValue) && res.TokenExpires > DateTime.UtcNow)
+            var autoCts = new CancellationTokenSource();
+            _autoLoginCts = autoCts;
+            try
             {
-                // Token 仍然有效，直接导航到主页
-                NavigateToHome();
-                Log.Information("自动登录成功，Token 仍然有效，导航到主页");
-                return;
+                await _tokenInfo.InitAsync(autoCts.Token);
+                var res = _tokenInfo.Token;
+
+                if (res is not null && !string.IsNullOrWhiteSpace(res.TokenValue) && res.TokenExpires > DateTime.UtcNow)
+                {
+                    // Token 仍然有效，直接导航到主页
+                    await NavigateToHomeAsync(autoCts.Token);
+                    Log.Information("自动登录成功，Token 仍然有效，导航到主页");
+                    return;
+                }
+
+                // 尝试使用 RefreshToken 刷新访问令牌
+                if (await _tokenInfo.RefreshTokensAsync(autoCts.Token))
+                {
+                    Log.Information("自动登录成功，使用 RefreshToken 刷新了访问令牌，导航到主页");
+                    await NavigateToHomeAsync(autoCts.Token);
+                }
             }
-
-            // 尝试使用 RefreshToken 刷新访问令牌
-            if (await _tokenInfo.RefreshTokensAsync())
+            catch (OperationCanceledException) when (autoCts.IsCancellationRequested)
             {
-                Log.Information("自动登录成功，使用 RefreshToken 刷新了访问令牌，导航到主页");
-                NavigateToHome();
+                Log.Information("自动登录已被手动登录取消");
+            }
+            catch (Exception ex)
+            {
+                // 自动登录失败（如服务器不可达），停留在登录页
+                ErrorMessage = $"自动登录失败: {ex.Message}";
+                _notificationService.ShowError(ErrorMessage, "自动登录失败");
+            }
+            finally
+            {
+                if (ReferenceEquals(_autoLoginCts, autoCts))
+                    _autoLoginCts = null;
+                autoCts.Dispose();
             }
         }
-        catch (Exception ex)
+        finally
         {
-            // 自动登录失败（如服务器不可达），停留在登录页
-            ErrorMessage = $"自动登录失败: {ex.Message}";
-            _notificationService.ShowError(ErrorMessage, "自动登录失败");
+            _loginGate.Release();
         }
     }
 
-    private void NavigateToHome()
+    private async Task NavigateToHomeAsync(CancellationToken ct)
     {
         _homeViewModel.Init();
+        // 会话编排器启动：TCP + 同步 + Outbox + 附件恢复 + 好友同步 + 通知。
+        await _sessionOrchestrator.StartSessionAsync(ct);
         NavigateTo?.Invoke(_homeViewModel);
         Log.Information("导航到首页成功");
     }
 
     /// <summary>执行手动登录操作。</summary>
     private async Task OnLoginAsync(CancellationToken cancellationToken)
+    {
+        // 手动登录开始时取消在途自动登录。
+        _autoLoginCts?.Cancel();
+
+        // 单一登录互斥：等待自动登录结束后再执行手动登录。
+        await _loginGate.WaitAsync(cancellationToken);
+        try
+        {
+            await OnLoginCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            _loginGate.Release();
+        }
+    }
+
+    private async Task OnLoginCoreAsync(CancellationToken cancellationToken)
     {
         _cts?.Cancel();
         _cts?.Dispose();
@@ -209,14 +259,6 @@ public class LoginViewModel : ViewModelBase
 
         var userId = loginResult.UserId.Value;
 
-        // 立即同步内存状态，无需等待 DB 写入完成
-        _tokenInfo.SetToken(new Token
-        {
-            TokenValue = loginResult.AccessToken,
-            TokenExpires = loginResult.AccessTokenExpiresAtUtc,
-        });
-        _currentUserContext.SetCurrentUser(userId, loginResult.UserName);
-
         Log.Information("用户 {UserId} 登录成功，正在持久化数据", userId);
 
         // DeviceIdHash：ulong → long（二进制位模式相同），避免 SQLite EF 类型问题
@@ -249,29 +291,32 @@ public class LoginViewModel : ViewModelBase
             LastLoginTime = loginResult.LoginAt.UtcDateTime,
         };
 
-        // 全量并行持久化（Token + 用户画像）
-        var saveTokenTask = _dbService.SaveTokenAsync(token);
-        var saveUserTask  = _dbService.SaveUserAsync(user);
-
+        ServerEndpoint? endpoint = null;
         if (loginResult.Server is { } server)
         {
-            var endpoint = new ServerEndpoint
+            endpoint = new ServerEndpoint
             {
                 ServerPort = server.Port,
                 ServerIpAddress = server.Host,
                 ServerName = server.Name,
-                // P0-10：TCP 传输默认启用 TLS（appsettings Tcp:UseTls）；明文端口需显式关闭。
+                // TCP 传输默认启用 TLS（appsettings Tcp:UseTls）；明文端口需显式关闭。
                 UseTls = _useTls
             };
-            await Task.WhenAll(saveTokenTask, saveUserTask, _dbService.SaveServerInfoAsync(endpoint))
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            await Task.WhenAll(saveTokenTask, saveUserTask).ConfigureAwait(false);
         }
 
+        // 原子持久化：Token + 用户画像 + 服务器端点单事务提交；
+        // 任一失败整体回滚，不会出现内存状态与数据库状态分叉。
+        await _dbService.PersistLoginSessionAsync(token, user, endpoint);
+
+        // 内存状态与会话启动在持久化成功后再进行。
+        _tokenInfo.SetToken(new Token
+        {
+            TokenValue = loginResult.AccessToken,
+            TokenExpires = loginResult.AccessTokenExpiresAtUtc,
+        });
+        _currentUserContext.SetCurrentUser(userId, loginResult.UserName);
+
         Password = string.Empty;
-        NavigateToHome();
+        await NavigateToHomeAsync(CancellationToken.None);
     }
 }

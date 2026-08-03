@@ -25,4 +25,10 @@ public interface IDatabaseWriteQueue
 
     /// <summary>将自包含写入操作排入队列并等待完成（有返回值）。</summary>
     Task<T> EnqueueAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct = default);
+
+    /// <summary>
+    /// 关闭队列并排空：已入队的操作仍会执行完毕，消费者随后退出。
+    /// 应用退出前调用，保证所有待落盘写入完成。
+    /// </summary>
+    ValueTask DisposeAsync();
 }
