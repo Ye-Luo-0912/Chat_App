@@ -97,6 +97,7 @@ public class TokenRefreshSingleFlightTests
             tasks.Add(tokenInfo.RefreshTokensAsync());
 
         var results = await Task.WhenAll(tasks);
+        Console.WriteLine($"DIAG refreshCalls={auth.RefreshCalls} trueCount={results.Count(r => r)} tokenNull={tokenInfo.Token is null} tokenValue='{tokenInfo.Token?.TokenValue}'");
         Assert.All(results, r => Assert.True(r));
         // 100 个并发 401 只产生一次 refresh HTTP 请求
         Assert.Equal(1, auth.RefreshCalls);
