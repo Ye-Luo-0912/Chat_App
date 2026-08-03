@@ -34,7 +34,6 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
     private long _processedCount;
     private long _failedCount;
     private long _inFlightCount;
-    private long _batchSize;
     private readonly LatencyHistogram _queueWait = new();
     private readonly LatencyHistogram _execution = new();
     private readonly LatencyHistogram _endToEnd = new();
@@ -161,7 +160,7 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
         ["failed"] = Volatile.Read(ref _failedCount),
         ["capacity"] = QueueCapacity,
         // 单消费者串行执行器：领域批处理落地前 batch_size 恒为 1（标记未来批处理粒度）
-        ["batch_size"] = Volatile.Read(ref _batchSize) == 0 ? 1 : Volatile.Read(ref _batchSize)
+        ["batch_size"] = 1
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
