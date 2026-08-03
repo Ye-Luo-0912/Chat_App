@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Core.Interfaces;
 using System.Collections.Concurrent;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace UnitTests;
 
@@ -20,6 +21,12 @@ namespace UnitTests;
 /// </summary>
 public class TokenRefreshSingleFlightTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public TokenRefreshSingleFlightTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
     private sealed class CountingAuthClient : IAuthClientService
     {
         public int RefreshCalls;
@@ -97,7 +104,8 @@ public class TokenRefreshSingleFlightTests
             tasks.Add(tokenInfo.RefreshTokensAsync());
 
         var results = await Task.WhenAll(tasks);
-        Console.WriteLine($"DIAG refreshCalls={auth.RefreshCalls} trueCount={results.Count(r => r)} tokenNull={tokenInfo.Token is null} tokenValue='{tokenInfo.Token?.TokenValue}'");
+        _output.WriteLine("DIAG refreshCalls={0} trueCount={1} tokenNull={2} tokenValue='{3}'",
+            auth.RefreshCalls, results.Count(r => r), tokenInfo.Token is null, tokenInfo.Token?.TokenValue);
         Assert.All(results, r => Assert.True(r));
         // 100 个并发 401 只产生一次 refresh HTTP 请求
         Assert.Equal(1, auth.RefreshCalls);
@@ -139,6 +147,7 @@ public class TokenRefreshSingleFlightTests
         Assert.Equal(1, auth.RefreshCalls);
     }
 }
+
 
 
 
