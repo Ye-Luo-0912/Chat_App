@@ -435,7 +435,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _eventSubscriptions.Add(_eventBus.Subscribe<OutboxStatusChangedEvent>(OnOutboxStatusChanged));
         _eventSubscriptions.Add(_eventBus.Subscribe<MessageRecalledEvent>(OnMessageRecalledPersisted));
         _eventSubscriptions.Add(_eventBus.Subscribe<MessageEditedEvent>(OnMessageEditedPersisted));
-        _eventSubscriptions.Add(_eventBus.Subscribe<ConversationReadEvent>(OnConversationRead));
+        _eventSubscriptions.Add(_eventBus.Subscribe<PeerReadWatermarkAdvancedEvent>(OnPeerReadWatermarkAdvanced));
         _eventSubscriptions.Add(_eventBus.Subscribe<ConversationUpdatedEvent>(OnConversationUpdated));
     }
 
@@ -1037,16 +1037,19 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _conversationCts = new CancellationTokenSource();
     }
 
-    private void OnConversationRead(ConversationReadEvent e)
+    private void OnPeerReadWatermarkAdvanced(PeerReadWatermarkAdvancedEvent e)
     {
         if (CurrConversationId is null || !string.Equals(e.ConversationId, CurrConversationId, StringComparison.Ordinal))
             return;
 
+        // 仅对端真实已读（服务端 103/105 序列水位）才推进已读展示；
+        // 本地打开会话清未读（LocalUnreadClearedEvent）不得伪造对端已读（P0-7）。
+        var cutoff = DateTimeOffset.FromUnixTimeMilliseconds(e.ReadAtMs).LocalDateTime;
         PostIfCurrent(() =>
         {
             foreach (var m in Messages)
             {
-                if (m.IsSentByMe && m.Status == MessageStatus.Sent)
+                if (m.IsSentByMe && m.Status == MessageStatus.Sent && m.Timestamp <= cutoff)
                     m.Status = MessageStatus.Read;
             }
         });
@@ -1293,10 +1296,16 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var hasAttachments = _pendingAttachments.Count > 0;
         if (!hasText && !hasAttachments) return;
 
+        // 离线发送放开：纯文本消息即使未连接也事务化写入 Outbox+LocalMessage，
+        // 由 OutboxProcessor 在恢复连接后认领补发（P0-5）。
+        // 附件消息的附件文件尚未上传到服务端，离线时无法发送。
         if (!_chatSession.IsConnected || !_chatSession.IsAuthenticated)
         {
-            _notificationService.ShowError("未连接到服务器或未鉴权，无法发送消息。");
-            return;
+            if (hasAttachments)
+            {
+                _notificationService.ShowError("未连接到服务器或未鉴权，带附件的消息暂无法发送。");
+                return;
+            }
         }
 
         if (_editingMessage is not null)
@@ -1601,7 +1610,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             clientAttachmentId = Guid.NewGuid().ToString("N");
             try
             {
-                await using (var sourceStream = picked.OpenRead())
+                await using (var sourceStream = await picked.OpenReadAsync(ct).ConfigureAwait(true))
                 {
                     var (relPath, hash) = await _storage.WriteToUploadingWithHashAsync(sourceStream, picked.FileName, ct).ConfigureAwait(true);
                     uploadingRelativePath = relPath;
@@ -2104,13 +2113,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
     }
 }
 
-/// <summary>View 文件选择器返回的本地文件描述。</summary>
+/// <summary>View 文件选择器返回的本地文件描述。选择阶段不读取文件内容（P0-9），</summary>
+/// 大小取自文件系统元数据；OpenReadAsync 延迟到上传阶段才真正打开流。
 public sealed class PickedAttachmentFile
 {
     public required string FileName { get; init; }
     public required string ContentType { get; init; }
     public required long ContentLength { get; init; }
-    public required Func<Stream> OpenRead { get; init; }
+    public required Func<CancellationToken, Task<Stream>> OpenReadAsync { get; init; }
 }
 
 /// <summary>待发送附件草稿项（阶段 3-5 多附件草稿）。</summary>

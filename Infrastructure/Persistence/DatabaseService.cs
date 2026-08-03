@@ -1,6 +1,7 @@
 using Core.Contracts.Auth;
 using Core.Models;
 using Core.Models.DTO;
+using Chat_App.Infrastructure.Identity;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Serialization;
@@ -213,19 +214,31 @@ public class DatabaseService(
 
     public async Task SaveTokenAsync(AuthToken token)
     {
+        // P0-10：令牌以 DPAPI 密文落库，明文不出现在 SQLite 文件中。
+        var secret = new AuthToken
+        {
+            UserId = token.UserId,
+            AccessToken = SecretProtector.Protect(token.AccessToken) ?? string.Empty,
+            RefreshToken = SecretProtector.Protect(token.RefreshToken) ?? string.Empty,
+            AccessTokenExpires = token.AccessTokenExpires,
+            RefreshTokenExpires = token.RefreshTokenExpires,
+            SessionId = token.SessionId,
+            DeviceIdHash = token.DeviceIdHash
+        };
+
         await using var db = await contextFactory.CreateDbContextAsync(None);
         var oldToken = await db.Tokens.FirstOrDefaultAsync(None);
         if (oldToken is not null)
         {
-            oldToken.UserId = token.UserId;
-            oldToken.AccessToken = token.AccessToken;
-            oldToken.RefreshToken = token.RefreshToken;
-            oldToken.AccessTokenExpires = token.AccessTokenExpires;
-            oldToken.RefreshTokenExpires = token.RefreshTokenExpires;
+            oldToken.UserId = secret.UserId;
+            oldToken.AccessToken = secret.AccessToken;
+            oldToken.RefreshToken = secret.RefreshToken ?? string.Empty;
+            oldToken.AccessTokenExpires = secret.AccessTokenExpires;
+            oldToken.RefreshTokenExpires = secret.RefreshTokenExpires;
         }
         else
         {
-            await db.Tokens.AddAsync(token, None);
+            await db.Tokens.AddAsync(secret, None);
         }
         await db.SaveChangesAsync(None);
     }
@@ -240,25 +253,50 @@ public class DatabaseService(
                 TokenExpires = t.AccessTokenExpires,
                 TokenValue = t.AccessToken
             })
-            .FirstOrDefaultAsync(None);
+            .FirstOrDefaultAsync(None)
+            .ConfigureAwait(false);
     }
 
     public async Task<int> UpdateTokenAsync(AuthToken token)
     {
+        var secret = new AuthToken
+        {
+            UserId = token.UserId,
+            AccessToken = SecretProtector.Protect(token.AccessToken) ?? string.Empty,
+            RefreshToken = SecretProtector.Protect(token.RefreshToken) ?? string.Empty,
+            AccessTokenExpires = token.AccessTokenExpires,
+            RefreshTokenExpires = token.RefreshTokenExpires,
+            SessionId = token.SessionId,
+            DeviceIdHash = token.DeviceIdHash
+        };
+
         await using var db = await contextFactory.CreateDbContextAsync(None);
         return await db.Tokens
             .Where(f => f.UserId == token.UserId)
             .ExecuteUpdateAsync(t
-                => t.SetProperty(authToken => authToken.AccessToken, token.AccessToken)
-                    .SetProperty(authToken => authToken.RefreshToken, token.RefreshToken)
-                    .SetProperty(authToken => authToken.AccessTokenExpires, token.AccessTokenExpires)
-                    .SetProperty(authToken => authToken.RefreshTokenExpires, token.RefreshTokenExpires), None);
+                => t.SetProperty(authToken => authToken.AccessToken, secret.AccessToken)
+                    .SetProperty(authToken => authToken.RefreshToken, secret.RefreshToken)
+                    .SetProperty(authToken => authToken.AccessTokenExpires, secret.AccessTokenExpires)
+                    .SetProperty(authToken => authToken.RefreshTokenExpires, secret.RefreshTokenExpires), None);
     }
 
     public async Task<AuthToken?> GetTokenAsync()
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        return await db.Tokens.AsNoTracking().FirstOrDefaultAsync(None);
+        var stored = await db.Tokens.AsNoTracking().FirstOrDefaultAsync(None);
+        if (stored is null)
+            return null;
+
+        return new AuthToken
+        {
+            UserId = stored.UserId,
+            AccessToken = SecretProtector.Unprotect(stored.AccessToken) ?? string.Empty,
+            RefreshToken = SecretProtector.Unprotect(stored.RefreshToken) ?? string.Empty,
+            AccessTokenExpires = stored.AccessTokenExpires,
+            RefreshTokenExpires = stored.RefreshTokenExpires,
+            SessionId = stored.SessionId,
+            DeviceIdHash = stored.DeviceIdHash
+        };
     }
 
     public async Task DeleteTokenAsync()
@@ -281,6 +319,8 @@ public class DatabaseService(
         if (existing is not null)
         {
             existing.ServerName = serverInfo.ServerName;
+            existing.UseTls = serverInfo.UseTls;
+            existing.TlsServerName = serverInfo.TlsServerName;
             existing.IsPrimary = serverInfo.IsPrimary;
             existing.LastConnected = DateTime.UtcNow;
         }
@@ -1726,13 +1766,14 @@ public class DatabaseService(
             .ExecuteDeleteAsync(None);
     }
 
-    public async Task<List<LocalAttachment>> GetUploadingAttachmentsAsync(long ownerUserId)
+    /// <summary>查询可恢复的附件：上传中（Uploading）与可重试失败（Failed）均需恢复，放弃（Abandoned）除外。</summary>
+    public async Task<List<LocalAttachment>> GetRecoverableAttachmentsAsync(long ownerUserId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);
-        // Status: 0=Uploading；按 CreatedAt 升序。
         return await db.Attachments
             .AsNoTracking()
-            .Where(a => a.OwnerUserId == ownerUserId && a.Status == AttachmentStatus.Uploading)
+            .Where(a => a.OwnerUserId == ownerUserId
+                && (a.Status == AttachmentStatus.Uploading || a.Status == AttachmentStatus.Failed))
             .OrderBy(a => a.CreatedAt)
             .ToListAsync(None);
     }

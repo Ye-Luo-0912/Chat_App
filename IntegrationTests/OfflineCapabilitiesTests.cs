@@ -230,7 +230,9 @@ public class OfflineCapabilitiesTests : IDisposable
         var store = new MessageStore(_db, eventBus, session);
         var coordinator = new ChatMessageCoordinator(session, store, userContext);
         var processor = new OutboxProcessor(_db, session, userContext, eventBus);
-        processor.Start();
+        try
+        {
+            processor.Start();
 
         // 拦截上行 ChatMessage 帧，注入 MessageAck（模拟服务器确认）
         tcp.OnFrameSent += (cmd, body) =>
@@ -267,6 +269,11 @@ public class OfflineCapabilitiesTests : IDisposable
         Assert.Equal(OutboxStatus.Sent, outbox!.Status);
         Assert.Equal(MessageStatus.Sent, message!.Status);
         Assert.False(string.IsNullOrWhiteSpace(message.MessageId));
+        }
+        finally
+        {
+            processor.Dispose();
+        }
     }
 
     // ── 辅助 ────────────────────────────────────────────

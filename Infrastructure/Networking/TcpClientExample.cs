@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.ComponentModel;
+using System.IO;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Threading.Channels;
 using Core.Interfaces;
@@ -16,12 +18,19 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
 {
     private readonly Lock _syncRoot = new();
     private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
     private ConnectionSession? _currentSession;
     private bool _disposed;
 
     public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
+
+    /// <summary>
+    /// TLS 服务端证书校验回调。为 null 时使用系统默认信任链校验（生产默认严格校验）。
+    /// 开发/测试环境可注入宽松回调以信任自签证书。
+    /// </summary>
+    public RemoteCertificateValidationCallback? RemoteCertificateValidationCallback { get; set; }
 
     public bool IsConnected
     {
@@ -35,8 +44,24 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
     /// <summary>
     /// 连接到服务器并启动收发循环。
     /// 重连顺序：先关闭旧会话并等待旧收发循环退出 → 创建新会话 → 开始新连接。
+    /// 并发 ConnectAsync 由互斥门串行化：后到者先等待前一次连接流程完全结束，
+    /// 再关闭刚建立的会话重连——保证任意时刻最多一条连接处于建立/激活过程，
+    /// 先完成连接的会话不会被后完成的并发会话覆盖而泄漏。
     /// </summary>
     public async Task ConnectAsync(ServerEndpoint endpoint, CancellationToken token = default)
+    {
+        await _connectGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            await ConnectCoreAsync(endpoint, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            _connectGate.Release();
+        }
+    }
+
+    private async Task ConnectCoreAsync(ServerEndpoint endpoint, CancellationToken token)
     {
         // 静默关闭旧会话（不发状态事件，避免误触发重连），并等待旧收发循环退出。
         await CloseSessionSilentlyAsync().ConfigureAwait(false);
@@ -58,6 +83,28 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         try
         {
             await session.Socket.ConnectAsync(endpoint.ServerIpAddress, endpoint.ServerPort, cts.Token).ConfigureAwait(false);
+
+            // P0-10：TLS 传输。UseTls 时用 SslStream 包装 TCP 流并完成 TLS 握手；
+            // 明文端口（如本地开发 127.0.0.1）保持裸流。此后收发全部走 session.Stream。
+            Stream stream = new NetworkStream(session.Socket, ownsSocket: false);
+            if (endpoint.UseTls)
+            {
+                var sslStream = RemoteCertificateValidationCallback is { } validateCallback
+                    ? new SslStream(stream, leaveInnerStreamOpen: false, validateCallback)
+                    : new SslStream(stream, leaveInnerStreamOpen: false);
+                var targetHost = string.IsNullOrWhiteSpace(endpoint.TlsServerName)
+                    ? endpoint.ServerIpAddress
+                    : endpoint.TlsServerName;
+                await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = targetHost,
+                    EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
+                    CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck
+                }, cts.Token).ConfigureAwait(false);
+                stream = sslStream;
+            }
+            session.Stream = stream;
+
             session.Activate();
             OnPropertyChanged(nameof(IsConnected));
             ConnectionStatusChanged?.Invoke(this, new ConnectionStateChangedEventArgs(ConnectionState.Connected));
@@ -153,14 +200,9 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                 try
                 {
                     var data = frame.Data;
-                    var totalSent = 0;
-                    while (totalSent < data.Length)
-                    {
-                        var sent = await session.Socket.SendAsync(data[totalSent..], SocketFlags.None, token).ConfigureAwait(false);
-                        if (sent <= 0)
-                            throw new SocketException((int)SocketError.ConnectionReset);
-                        totalSent += sent;
-                    }
+                    // SslStream 单次 Write 提交全部 TLS 帧；NetworkStream（阻塞 socket）也全量写出。
+                    // Stream 在 ConnectCoreAsync 中激活会话前已设置，循环仅在激活后启动。
+                    await session.Stream!.WriteAsync(data, token).ConfigureAwait(false);
                     frame.Tcs.TrySetResult(true);
                 }
                 catch (Exception ex)
@@ -225,7 +267,8 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                 int bytesRead;
                 try
                 {
-                    bytesRead = await session.Socket.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+                    // Stream 在 ConnectCoreAsync 中激活会话前已设置。
+                    bytesRead = await session.Stream!.ReadAsync(buffer, token).ConfigureAwait(false);
                 }
                 catch (ObjectDisposedException)
                 {
@@ -367,17 +410,22 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         if (!shouldDispose)
             return;
         Disconnect("dispose");
+        _connectGate.Dispose();
         // 不等待循环退出：同步 Dispose 不阻塞；应用关闭路径使用 DisposeAsync。
         GC.SuppressFinalize(this);
     }
 
     /// <summary>
-    /// 单条连接的所有资源：Socket、发送 Channel、收发 CTS 与任务。
+    /// 单条连接的所有资源：Socket、TLS/明文流、发送 Channel、收发 CTS 与任务。
     /// </summary>
     private sealed class ConnectionSession : IDisposable
     {
         public Guid ConnectionId { get; }
         public Socket Socket { get; }
+
+        /// <summary>收发流：UseTls 时为 SslStream（TLS 加密传输），否则为 NetworkStream。连接成功后设置。</summary>
+        public Stream? Stream { get; set; }
+
         public Channel<OutboundFrame> SendChannel { get; } =
             Channel.CreateBounded<OutboundFrame>(new BoundedChannelOptions(256)
             {
@@ -416,6 +464,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
             try { SendCts.Cancel(); } catch (ObjectDisposedException) { }
             try { ReceiveCts.Cancel(); } catch (ObjectDisposedException) { }
             ShutdownAndDisposeSocket();
+            try { Stream?.Dispose(); } catch (ObjectDisposedException) { }
             SendCts.Dispose();
             ReceiveCts.Dispose();
             SendChannel.Writer.TryComplete();

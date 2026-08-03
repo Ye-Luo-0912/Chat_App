@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace Core.Models.DTO;
 
 /// <summary>显式历史消息拉取请求（106）。注意：SyncBootstrap 内嵌的 catch-up 不用此 DTO。</summary>
-public sealed class MessageHistoryRequestDto
+public sealed class MessageHistoryRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public required string ConversationId { get; set; }

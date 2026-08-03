@@ -6,7 +6,7 @@ public enum ConversationTypeDto : byte
     Group = 2
 }
 
-public sealed class ConversationListRequestDto
+public sealed class ConversationListRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public bool? BeforeIsPinned { get; set; }

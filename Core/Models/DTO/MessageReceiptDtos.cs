@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Core.Models.DTO;
 
 /// <summary>已读回执（103）。对端已读我的消息时，服务端下发；也用于上行告知服务端我已读。</summary>
-public sealed class MessageReceiptDto
+public sealed class MessageReceiptDto : IRequestDto
 {
     /// <summary>请求 Id（上行时携带，用于匹配 MessageReceiptAck）。</summary>
     public string? RequestId { get; set; }

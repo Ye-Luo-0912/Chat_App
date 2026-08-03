@@ -190,7 +190,9 @@ public partial class App : Application
         // 实例化附件恢复服务以注册鉴权事件订阅：恢复任务在 Authenticated 事件触发，
         // 不再依赖启动固定延迟，未登录会在鉴权成功时自动重试。若当前已鉴权则立即尝试一次。
         var attachmentRecovery = _services.GetRequiredService<AttachmentRecoveryService>();
-        _ = attachmentRecovery.RecoverFailedUploadsAsync();
+        var currentUser = _services.GetRequiredService<ICurrentUserContext>();
+        if (currentUser.IsAuthenticated && currentUser.UserId is { } ownerUserId)
+            _ = attachmentRecovery.RecoverFailedUploadsAsync(ownerUserId);
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

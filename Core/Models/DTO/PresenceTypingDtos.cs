@@ -14,7 +14,7 @@ public sealed class TypingUpdateDto
     public bool IsTyping { get; set; }
 }
 
-public sealed class PresenceQueryRequestDto
+public sealed class PresenceQueryRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public IReadOnlyList<long>? UserIds { get; set; }

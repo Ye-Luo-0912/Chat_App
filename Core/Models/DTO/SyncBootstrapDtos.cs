@@ -7,7 +7,7 @@ public sealed class ConversationSyncWatermarkDto
     public required string AfterMessageId { get; set; }
 }
 
-public sealed class SyncBootstrapRequestDto
+public sealed class SyncBootstrapRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public int ListLimit { get; set; } = 50;

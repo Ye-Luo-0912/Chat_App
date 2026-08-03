@@ -347,7 +347,6 @@ namespace Core.Services
             return SendRequestAsync(_listPending, PacketCommand.ConversationListRequest,
                 new ConversationListRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     BeforeIsPinned = beforeIsPinned,
                     BeforePinnedAtMs = beforePinnedAtMs,
                     BeforeLastMessageAtMs = beforeLastMessageAtMs,
@@ -374,7 +373,6 @@ namespace Core.Services
             return SendRequestAsync(_prefsPending, PacketCommand.ConversationSetPrefsRequest,
                 new ConversationSetPrefsRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     ConversationId = conversationId.Trim(),
                     Pinned = pinned,
                     Muted = muted,
@@ -395,7 +393,6 @@ namespace Core.Services
             return SendRequestAsync(_recallPending, PacketCommand.MessageRecallRequest,
                 new MessageRecallRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     MessageId = messageId.Trim()
                 },
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
@@ -420,7 +417,6 @@ namespace Core.Services
             return SendRequestAsync(_editPending, PacketCommand.MessageEditRequest,
                 new MessageEditRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     MessageId = messageId.Trim(),
                     Content = trimmed
                 },
@@ -459,7 +455,6 @@ namespace Core.Services
             return SendRequestAsync(_presencePending, PacketCommand.PresenceQuery,
                 new PresenceQueryRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     UserIds = NormalizePresenceIds(userIds)
                 },
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
@@ -494,7 +489,6 @@ namespace Core.Services
             return SendRequestAsync(_syncPending, PacketCommand.SyncBootstrapRequest,
                 new SyncBootstrapRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     ListLimit = Math.Clamp(listLimit, 1, 100),
                     HistoryLimitPerConversation = Math.Clamp(historyLimitPerConversation, 1, 50),
                     MaxConversationsWithHistory = Math.Clamp(maxConversationsWithHistory, 0, 20),
@@ -518,7 +512,6 @@ namespace Core.Services
             return SendRequestAsync(_historyPending, PacketCommand.MessageHistoryRequest,
                 new MessageHistoryRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     ConversationId = conversationId.Trim(),
                     BeforeReceivedAtMs = beforeReceivedAtMs,
                     BeforeMessageId = beforeMessageId,
@@ -540,7 +533,6 @@ namespace Core.Services
             return SendRequestAsync(_receiptPending, PacketCommand.MessageReceipt,
                 new MessageReceiptDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     ConversationId = conversationId.Trim(),
                     LastReadMessageId = lastReadMessageId,
                     LastReadAtMs = lastReadAtMs,
@@ -562,7 +554,6 @@ namespace Core.Services
             return SendRequestAsync(_markReadPending, PacketCommand.ConversationMarkReadRequest,
                 new ConversationMarkReadRequestDto
                 {
-                    RequestId = Guid.NewGuid().ToString("N"),
                     ConversationId = conversationId.Trim(),
                     LastReadMessageId = lastReadMessageId,
                     LastReadAtMs = lastReadAtMs
@@ -580,24 +571,29 @@ namespace Core.Services
         /// 统一请求-响应模板：生成 requestId → 注册 TCS → 发包 → 带超时等待响应 → finally 清理。
         /// 调用方需先 EnsureAuthenticated 并完成参数校验。
         /// </summary>
-        private async Task<T> SendRequestAsync<T>(
-            ConcurrentDictionary<string, TaskCompletionSource<T>> pending,
+        /// <summary>
+        /// 请求-响应模板：RequestId 只在此处生成一次并回填到请求 DTO，
+        /// 同时作为 pending 字典键；服务端响应原样回显该 Id，路由层据此匹配。
+        /// 请求与响应永远不可能因 Id 不一致而失配。
+        /// </summary>
+        private async Task<TResponse> SendRequestAsync<TRequest, TResponse>(
+            ConcurrentDictionary<string, TaskCompletionSource<TResponse>> pending,
             PacketCommand command,
-            object payload,
+            TRequest request,
             TimeSpan timeout,
             string conflictMessage,
             CancellationToken ct)
+            where TRequest : IRequestDto
         {
             var requestId = Guid.NewGuid().ToString("N");
-            // 请求 DTO 与 pending 键必须使用同一 RequestId，否则服务器回显后无法匹配。
-            SetRequestId(payload, requestId);
-            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            request.RequestId = requestId;
+            var tcs = new TaskCompletionSource<TResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
             if (!pending.TryAdd(requestId, tcs))
                 throw new InvalidOperationException(conflictMessage);
 
             try
             {
-                await SendPacketAsync(command, payload, ct).ConfigureAwait(false);
+                await SendPacketAsync(command, request, ct).ConfigureAwait(false);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 linkedCts.CancelAfter(timeout);
                 return await tcs.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
@@ -606,17 +602,6 @@ namespace Core.Services
             {
                 pending.TryRemove(requestId, out _);
             }
-        }
-
-        /// <summary>将 pending 键回填到请求 DTO 的 RequestId 属性（请求/响应配对的前提）。</summary>
-        private static void SetRequestId(object payload, string requestId)
-        {
-            if (payload is null)
-                return;
-            var property = payload.GetType().GetProperty(
-                "RequestId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-            if (property is not null && property.CanWrite && property.PropertyType == typeof(string))
-                property.SetValue(payload, requestId);
         }
 
         /// <summary>规整 presence 用户 Id 列表：过滤无效值、去重、截断到上限。</summary>

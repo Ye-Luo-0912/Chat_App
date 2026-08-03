@@ -1,6 +1,6 @@
 namespace Core.Models.DTO;
 
-public sealed class ConversationSetPrefsRequestDto
+public sealed class ConversationSetPrefsRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public required string ConversationId { get; set; }

@@ -177,5 +177,7 @@ public interface IDatabaseService
     /// <summary>更新附件的本地上传路径和重试次数。传 null 表示不修改对应字段（localUploadingPath 传空字符串可清空）。</summary>
     Task UpdateAttachmentUploadPathAsync(long ownerUserId, string? clientAttachmentId, string? localUploadingPath, int? retryCount = null);
     Task DeleteAttachmentAsync(long ownerUserId, string attachmentId);
-    Task<List<LocalAttachment>> GetUploadingAttachmentsAsync(long ownerUserId);
+
+    /// <summary>查询可恢复的附件（Uploading 与 Failed），Abandoned 除外。</summary>
+    Task<List<LocalAttachment>> GetRecoverableAttachmentsAsync(long ownerUserId);
 }

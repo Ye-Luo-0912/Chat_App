@@ -1,6 +1,6 @@
 namespace Core.Models.DTO;
 
-public sealed class MessageRecallRequestDto
+public sealed class MessageRecallRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public required string MessageId { get; set; }

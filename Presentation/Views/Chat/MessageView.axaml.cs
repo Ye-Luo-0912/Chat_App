@@ -132,20 +132,20 @@ public partial class MessageView : UserControl
         if (file is null)
             return null;
 
-        await using var source = await file.OpenReadAsync().ConfigureAwait(true);
-        await using var buffer = new MemoryStream();
-        await source.CopyToAsync(buffer, ct).ConfigureAwait(true);
-        var bytes = buffer.ToArray();
-        if (bytes.Length == 0)
+        var name = file.Name;
+        var props = await file.GetBasicPropertiesAsync().ConfigureAwait(true);
+        var length = (long)(props.Size ?? 0);
+        if (length <= 0)
             return null;
 
-        var name = file.Name;
+        // P0-9：选择阶段不读取文件内容（避免整个文件复制进内存后再判大小），
+        // 大小取自文件系统元数据；上传阶段才打开流。
         return new PickedAttachmentFile
         {
             FileName = name,
             ContentType = GuessContentType(name),
-            ContentLength = bytes.Length,
-            OpenRead = () => new MemoryStream(bytes, writable: false)
+            ContentLength = length,
+            OpenReadAsync = _ => file.OpenReadAsync()
         };
     }
 

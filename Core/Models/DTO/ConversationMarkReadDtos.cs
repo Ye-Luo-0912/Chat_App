@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace Core.Models.DTO;
 
 /// <summary>标记会话已读请求（110）。</summary>
-public sealed class ConversationMarkReadRequestDto
+public sealed class ConversationMarkReadRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }
     public required string ConversationId { get; set; }

@@ -9,6 +9,7 @@ using Core.Models;
 using Chat_App.Infrastructure.Identity;
 using Chat_App.Infrastructure.Models;
 using Serilog;
+using Microsoft.Extensions.Configuration;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,7 @@ public class LoginViewModel : ViewModelBase
     private readonly INotificationService _notificationService;
     private readonly TokenInfo _tokenInfo;
     private readonly ICurrentUserState _currentUserContext;
+    private readonly bool _useTls;
     private CancellationTokenSource? _cts;
 
     /// <summary>
@@ -80,7 +82,8 @@ public class LoginViewModel : ViewModelBase
         TokenInfo tokenInfo,
         ICurrentUserState currentUserContext,
         HomeViewModel homeViewModel,
-        INotificationService notificationService)
+        INotificationService notificationService,
+        Microsoft.Extensions.Configuration.IConfiguration configuration)
     {
         _authService = loginService;
         _dbService = dbService;
@@ -88,7 +91,7 @@ public class LoginViewModel : ViewModelBase
         _currentUserContext = currentUserContext;
         _homeViewModel = homeViewModel;
         _notificationService = notificationService;
-
+        _useTls = configuration.GetValue<bool>("Tcp:UseTls", true);
         LoginCommand = new AsyncRelayCommand(OnLoginAsync, CanLogin);
         GoToRegisterCommand = new RelayCommand(() => NavigateTo?.Invoke("register"));
     }
@@ -257,6 +260,8 @@ public class LoginViewModel : ViewModelBase
                 ServerPort = server.Port,
                 ServerIpAddress = server.Host,
                 ServerName = server.Name,
+                // P0-10：TCP 传输默认启用 TLS（appsettings Tcp:UseTls）；明文端口需显式关闭。
+                UseTls = _useTls
             };
             await Task.WhenAll(saveTokenTask, saveUserTask, _dbService.SaveServerInfoAsync(endpoint))
                 .ConfigureAwait(false);

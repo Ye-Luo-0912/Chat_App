@@ -328,7 +328,7 @@ public sealed class MessageStore : IMessageStore
             await _db.UpsertConversationAsync(conv);
         }
 
-        _eventBus.Publish(new ConversationReadEvent(conversationId, nowMs));
+        _eventBus.Publish(new LocalUnreadClearedEvent(conversationId));
     }
 
     /// <inheritdoc />
@@ -374,7 +374,8 @@ public sealed class MessageStore : IMessageStore
         readState.UpdatedAt = DateTime.UtcNow;
         await _db.UpsertReadStateAsync(readState);
 
-        _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+        _eventBus.Publish(new PeerReadWatermarkAdvancedEvent(conversationId,
+            dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), dto.LastReadMessageId));
     }
 
     /// <inheritdoc />
@@ -397,7 +398,8 @@ public sealed class MessageStore : IMessageStore
         readState.UpdatedAt = DateTime.UtcNow;
         await _db.UpsertReadStateAsync(readState);
 
-        _eventBus.Publish(new ConversationReadEvent(conversationId, dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+        _eventBus.Publish(new PeerReadWatermarkAdvancedEvent(conversationId,
+            dto.LastReadAtMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), dto.LastReadMessageId));
     }
 
     /// <inheritdoc />
