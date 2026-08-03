@@ -22,7 +22,11 @@ public class LocalOutboxMessage
     /// <summary>所属会话 Id，非空。</summary>
     public string ConversationId { get; set; } = string.Empty;
 
-    public long TargetUserId { get; set; }
+    /// <summary>会话类型：0=直聊，1=群聊（见 ConversationTypeDto）。发送按 ConversationId 寻址。</summary>
+    public byte ConversationType { get; set; }
+
+    /// <summary>直聊对端用户 Id：直聊必填，群聊为空（群消息按会话寻址，无对端用户）。</summary>
+    public long? TargetUserId { get; set; }
 
     public string? Content { get; set; }
 

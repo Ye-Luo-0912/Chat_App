@@ -44,6 +44,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private long CurrPeerId { get; set; }
     private string? CurrConversationId { get; set; }
 
+    /// <summary>当前会话发送目标：直聊与群聊统一按会话寻址（群聊 PeerUserId 为空）。</summary>
+    private Core.Models.DTO.MessageDestination? CurrDestination { get; set; }
+
+    /// <summary>当前会话是否为群聊（群聊无对端用户，发送/转发/输入状态按会话处理）。</summary>
+    private bool IsGroupConversation => CurrDestination is { IsGroup: true };
+
     // 会话切换代际与取消令牌：防止快速切换 A→B 时 A 的异步历史/已读任务污染 B。
     // 每次切换生成新代际，所有历史加载/附件加载/已读请求/Dispatcher 回调必须校验代际。
     private long _conversationGeneration;
@@ -228,7 +234,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         AttachFileCommand = new AsyncRelayCommand(
             AttachFileAsync,
-            () => !IsUploading && CurrPeerId > 0,
+            () => !IsUploading && (CurrConversationId is not null),
             ex =>
             {
                 Log.Error(ex, "附件上传失败");
@@ -308,9 +314,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
             ClearEditDraft();
             _replyToMessageId = msg.MessageId;
+            // 群聊回复保留实际发送者 Id（消息自带发送者）；直聊回退当前对端。
             _replyToSenderUserId = msg.IsSentByMe
                 ? _chatSession.CurrentUserId
-                : (CurrPeerId > 0 ? CurrPeerId : null);
+                : (msg.SenderUserId > 0
+                    ? msg.SenderUserId
+                    : (CurrPeerId > 0 ? CurrPeerId : (long?)null));
             ReplyDraftPreview = string.IsNullOrWhiteSpace(msg.Content)
                 ? (msg.HasAttachments ? msg.AttachmentSummary : "原消息")
                 : PreviewText.Truncate(msg.Content, 80);
@@ -698,6 +707,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = SaveDraftSnapshotAsync(prevOwner, prevConv);
         }
 
+        var isGroup = conversation.Type == (byte)Core.Models.DTO.ConversationTypeDto.Group;
         var targetPeerId = conversation.PeerUserId ?? 0;
         var previousPeerId = CurrPeerId;
         if (previousPeerId > 0 && previousPeerId != targetPeerId)
@@ -709,6 +719,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var ct = _conversationCts.Token;
 
         CurrPeerId = targetPeerId;
+        CurrDestination = new Core.Models.DTO.MessageDestination(
+            conversation.ConversationId,
+            isGroup ? Core.Models.DTO.ConversationTypeDto.Group : Core.Models.DTO.ConversationTypeDto.Direct,
+            conversation.PeerUserId);
         try
         {
             CurrConversationId = string.IsNullOrWhiteSpace(conversation.ConversationId)
@@ -1065,7 +1079,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task MarkCurrentConversationReadAsync(long generation, CancellationToken ct)
     {
-        if (CurrConversationId is null || CurrPeerId <= 0)
+        // 直聊与群聊都按会话标记已读（群聊无对端用户，不要求 CurrPeerId）。
+        if (CurrConversationId is null)
             return;
         try
         {
@@ -1146,6 +1161,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Timestamp = ts,
             ReceivedAtMs = lm.ReceivedAtMs,
             IsSentByMe = lm.SenderUserId == selfId,
+            SenderUserId = lm.SenderUserId,
             Status = lm.Status,
             Sender = EmptyUser,
             Attachments = attachments,
@@ -1171,12 +1187,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
     /// <summary>将同步 catch-up 消息合并进当前打开的会话（按 MessageId 去重）。</summary>
     public void ApplyCatchUp(IReadOnlyList<MessageHistoryItemDto> items)
     {
-        if (CurrPeerId <= 0 || items.Count == 0)
+        // 群聊无对端用户（CurrPeerId=0）：按会话匹配即可应用。
+        if (items.Count == 0 || CurrConversationId is null)
             return;
 
         if (CurrConversationId is not null)
             _ = _messageStore.PersistHistoryAsync(_chatSession.CurrentSession, CurrConversationId, items);
 
+        var isGroup = IsGroupConversation;
         var peerId = CurrPeerId;
         var selfId = _chatSession.CurrentUserId;
 
@@ -1184,10 +1202,20 @@ public class MessageViewModel : ViewModelBase, IDisposable
         // 避免每次构建 knownIds HashSet 的 O(Messages) 分配。
         foreach (var item in items.OrderBy(i => i.ReceivedAtMs).ThenBy(i => i.MessageId, StringComparer.Ordinal))
         {
-            if (item.SenderUserId != peerId && item.ReceiverUserId != peerId)
+            if (!isGroup)
+            {
+                // 直聊过滤：消息必须涉及当前对端与当前用户双方。
+                if (item.SenderUserId != peerId && item.ReceiverUserId != peerId)
+                    continue;
+                if (item.SenderUserId != selfId && item.ReceiverUserId != selfId)
+                    continue;
+            }
+            else if (!string.IsNullOrWhiteSpace(item.ConversationId)
+                     && item.ConversationId != CurrConversationId)
+            {
+                // 群聊过滤：消息必须属于当前会话（保留实际发送者，不做对端过滤）。
                 continue;
-            if (item.SenderUserId != selfId && item.ReceiverUserId != selfId)
-                continue;
+            }
 
             if (!string.IsNullOrWhiteSpace(item.MessageId))
             {
@@ -1218,6 +1246,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(item.ReceivedAtMs).LocalDateTime,
                 ReceivedAtMs = item.ReceivedAtMs,
                 IsSentByMe = item.SenderUserId == selfId,
+                SenderUserId = item.SenderUserId,
                 Sender = EmptyUser,
                 Attachments = item.Attachments,
                 ReplyToMessageId = item.ReplyToMessageId,
@@ -1303,7 +1332,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task SendMessage(CancellationToken ct)
     {
-        if (CurrPeerId <= 0) return;
+        // 群聊无对端用户（CurrPeerId=0），按会话寻址即可发送。
+        if (CurrConversationId is null)
+            return;
+        if (CurrDestination is null)
+            return;
 
         var text = NewMessage?.Trim();
         var hasText = !string.IsNullOrWhiteSpace(text);
@@ -1387,13 +1420,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var attachmentsJson = hasAttachments ? AttachmentJson.Serialize(attachments) : null;
 
         var clientMessageId = Guid.CreateVersion7().ToString("N");
-        var targetUserId = CurrPeerId;
+        var targetUserId = CurrDestination?.PeerUserId; // 群聊为空（按会话寻址）
 
         var outbox = new LocalOutboxMessage
         {
             OwnerUserId = selfId,
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
+            ConversationType = (byte)(CurrDestination?.Type ?? Core.Models.DTO.ConversationTypeDto.Direct),
             TargetUserId = targetUserId,
             Content = text,
             AttachmentIdsJson = attachmentIdsJson,
@@ -1410,7 +1444,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
             SenderUserId = selfId,
-            ReceiverUserId = targetUserId,
+            ReceiverUserId = targetUserId ?? 0,
             Content = text ?? string.Empty,
             ReceivedAtMs = nowMs,
             AttachmentsJson = attachmentsJson,
@@ -1455,7 +1489,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         // UI 仅事务化入库，网络发送全部由 OutboxProcessor 执行；
         // 发布事件提示排空器立即发送，后续状态经 OutboxStatusChangedEvent 回流 UI。
-        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, targetUserId));
+        _eventBus.Publish(new OutboxEnqueuedEvent(clientMessageId, conversationId, targetUserId ?? 0));
     }
 
     /// <summary>
@@ -1471,8 +1505,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(source);
 
+        var isGroupTarget = target.Type == (byte)Core.Models.DTO.ConversationTypeDto.Group;
         var targetPeerId = target.PeerUserId ?? 0;
-        if (targetPeerId <= 0)
+        // 群聊无对端用户：按会话寻址即可转发；直聊要求有对端。
+        if (!isGroupTarget && targetPeerId <= 0)
         {
             _notificationService.ShowError("无法转发到该会话。");
             return null;
@@ -1484,13 +1520,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return null;
         }
 
-        long forwardSenderId;
-        if (source.IsSentByMe)
-            forwardSenderId = _chatSession.CurrentUserId;
-        else if (CurrPeerId > 0)
-            forwardSenderId = CurrPeerId;
-        else
-            forwardSenderId = 0;
+        // 原消息发送方：优先取消息携带的发送者 Id（群聊来源消息保留实际发送者），
+        // 直聊来源且无 Id 时回退当前对端。
+        var forwardSenderId = source.IsSentByMe
+            ? _chatSession.CurrentUserId
+            : (source.SenderUserId > 0
+                ? source.SenderUserId
+                : CurrPeerId);
 
         if (forwardSenderId <= 0)
         {
@@ -1523,7 +1559,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
             OwnerUserId = selfId,
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
-            TargetUserId = targetPeerId,
+            ConversationType = (byte)(isGroupTarget
+                ? Core.Models.DTO.ConversationTypeDto.Group
+                : Core.Models.DTO.ConversationTypeDto.Direct),
+            TargetUserId = isGroupTarget ? null : targetPeerId,
             Content = content,
             ForwardedFromMessageId = source.MessageId,
             ForwardedFromSenderUserId = forwardSenderId,
@@ -1538,7 +1577,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
             SenderUserId = selfId,
-            ReceiverUserId = targetPeerId,
+            ReceiverUserId = isGroupTarget ? 0 : targetPeerId,
             Content = content,
             ReceivedAtMs = nowMs,
             ForwardedFromMessageId = source.MessageId,
@@ -1581,7 +1620,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task AttachFileAsync(CancellationToken ct)
     {
-        if (CurrPeerId <= 0) return;
+        // 群聊无对端用户（CurrPeerId=0）：附件选择按会话可用。
+        if (CurrConversationId is null) return;
         if (PickAttachmentAsync is null)
         {
             _notificationService.ShowError("No file picker available.");
@@ -2037,8 +2077,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task NotifyTypingFromComposerAsync()
     {
-        if (CurrPeerId <= 0
-            || !_chatSession.IsConnected
+        // 群聊无对端用户（CurrPeerId=0）：输入状态按会话广播（conversationId 参数）。
+        if (!IsGroupConversation && CurrPeerId <= 0)
+            return;
+        if (!_chatSession.IsConnected
             || !_chatSession.IsAuthenticated)
         {
             return;
@@ -2073,7 +2115,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     private async Task StopTypingAsync()
     {
-        if (!_typingActive || CurrPeerId <= 0)
+        if (!_typingActive || (!IsGroupConversation && CurrPeerId <= 0))
         {
             _typingActive = false;
             return;

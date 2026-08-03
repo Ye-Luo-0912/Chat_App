@@ -107,6 +107,11 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         _chatSession.MessageReceiptUpdated += OnMessageReceiptUpdated;
         _chatSession.UnreadCountChanged += OnUnreadCountChanged;
 
+        // 群聊成员被移除/退出/解散：该会话未发送 Outbox 永久失败，不再重试。
+        _chatSession.GroupMemberRemoved += OnGroupMemberRemoved;
+        _chatSession.GroupMemberLeft += OnGroupMemberLeft;
+        _chatSession.GroupConversationDissolved += OnGroupConversationDissolved;
+
         // 启动单消费者
         _consumeTask = Task.Run(ConsumeLoopAsync);
     }
@@ -138,9 +143,50 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
     private void OnUnreadCountChanged(object? sender, UnreadCountChangedDto dto)
         => EnqueueMutation(dto, InboundMutationKind.UnreadCountChanged, "未读数变更", dto.ConversationId);
 
+    // 成员被移出群聊：若被移除的是当前用户，该会话未发送 Outbox 永久失败（不再重试）。
+    private void OnGroupMemberRemoved(object? sender, MemberRemovedUpdateDto dto)
+    {
+        if (_currentUserContext.TryGetUserId(out var userId) && dto.UserId == userId)
+            MarkConversationOutboxPermanent(dto.ConversationId, "成员已被移出群聊");
+    }
+
+    // 当前用户主动退出群聊：未发送 Outbox 永久失败。
+    private void OnGroupMemberLeft(object? sender, MemberLeftUpdateDto dto)
+    {
+        if (_currentUserContext.TryGetUserId(out var userId) && dto.UserId == userId)
+            MarkConversationOutboxPermanent(dto.ConversationId, "已退出群聊");
+    }
+
+    // 群聊解散：未发送 Outbox 永久失败。
+    private void OnGroupConversationDissolved(object? sender, ConversationDissolvedUpdateDto dto)
+        => MarkConversationOutboxPermanent(dto.ConversationId, "群聊已解散");
+
+    private void MarkConversationOutboxPermanent(string conversationId, string reason)
+    {
+        if (!_currentUserContext.TryGetUserId(out var userId))
+            return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var affected = await _messageStore.MarkOutboxPermanentByConversationAsync(userId, conversationId, reason)
+                    .ConfigureAwait(false);
+                if (affected > 0)
+                    Log.Information("群聊会话 {ConversationId} 的 {Count} 条未发送 Outbox 已永久失败：{Reason}",
+                        conversationId, affected, reason);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "标记群聊会话 Outbox 永久失败出错 ConversationId={ConversationId}", conversationId);
+            }
+        });
+    }
+
     /// <summary>
     /// 统一入站事件入队模板：捕获当前 SessionStamp 后写入 Channel。
-    /// 队列满时 TryWrite 失败 → 计数溢出 → 后台等待写入（超时断开连接）。
+    /// 队列满时 TryWrite 失败 → 在回调线程上同步等待空位（严格有序单一 ingress：
+    /// 事件回调由接收循环串行触发，等待期间不产生任何新事件，恢复写入顺序与网络顺序一致），
+    /// 超过 BackpressureWaitMs 未写入则主动断开连接（重连后按同步水位补拉，宁断不丢）。
     /// 用户未登录时以警告日志丢弃事件。
     /// </summary>
     private void EnqueueMutation<T>(T payload, InboundMutationKind kind, string label, object? id = null)
@@ -160,45 +206,44 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         if (_inboundChannel.Writer.TryWrite(mutation))
             return;
 
-        // 队列已满（FullMode=Wait 下 TryWrite 一定失败）：转入背压等待路径。
-        Interlocked.Increment(ref _overflowCount);
-        _ = HandleBackpressureAsync(mutation);
-    }
+        // 背压断连已触发（连接即将断开）：事件由重连后的同步水位恢复，
+        // 立即放弃等待，避免在断连前的残余事件上串行堆积 5s×N。
+        if (Volatile.Read(ref _backpressureDisconnectArmed) != 0)
+            return;
 
-    /// <summary>
-    /// 背压路径：等待队列腾出空间写入；超过 BackpressureWaitMs 未写入则主动断开连接，
-    /// 由重连后的同步水位重新拉取（宁可断线重同步，也不静默丢弃）。
-    /// 同一背压事件只断开一次：多个溢出事件并发超时共享一次断连（CompareExchange 原子抢占），
-    /// 避免断连风暴；队列腾出空间（消费端恢复）后复位标记，允许下一次独立背压事件再次断连。
-    /// </summary>
-    private async Task HandleBackpressureAsync(InboundMutation mutation)
-    {
+        // 队列已满（FullMode=Wait 下 TryWrite 一定失败）：同步等待空位写入。
+        // 回调串行 → 等待期间不会有其他事件入队 → 恢复后写入顺序 = 原始网络顺序。
+        // 不创建每事件后台任务（避免并发等待导致的重排与 task storm）。
+        Interlocked.Increment(ref _overflowCount);
         var sw = Stopwatch.StartNew();
-        try
+        using (var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token))
         {
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
             timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(BackpressureWaitMs));
-            await _inboundChannel.Writer.WriteAsync(mutation, timeoutCts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
-        {
-            // 背压超时：消费端卡死（如 DB 死锁）。主动断开，重连后按同步水位补拉。
-            if (Interlocked.CompareExchange(ref _backpressureDisconnectArmed, 1, 0) == 0)
+            try
             {
-                Interlocked.Increment(ref _backpressureDisconnects);
-                Log.Error(
-                    "入站队列背压超时（{Ms}ms），队列深度={Depth}，主动断开连接以避免丢事件",
-                    BackpressureWaitMs, _inboundChannel.Reader.Count);
-                _ = _chatSession.DisconnectAsync("入站队列背压超时，重连同步");
+                _inboundChannel.Writer.WriteAsync(mutation, timeoutCts.Token).AsTask().GetAwaiter().GetResult();
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // 协调器关闭
-        }
-        finally
-        {
-            Interlocked.Add(ref _inboundQueueWaitDurationMs, sw.ElapsedMilliseconds);
+            catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
+            {
+                // 背压超时：消费端卡死（如 DB 死锁）。主动断开，重连后按同步水位补拉。
+                // 同一背压事件只断开一次（CompareExchange 原子抢占），避免断连风暴。
+                if (Interlocked.CompareExchange(ref _backpressureDisconnectArmed, 1, 0) == 0)
+                {
+                    Interlocked.Increment(ref _backpressureDisconnects);
+                    Log.Error(
+                        "入站队列背压超时（{Ms}ms），队列深度={Depth}，主动断开连接以避免丢事件",
+                        BackpressureWaitMs, _inboundChannel.Reader.Count);
+                    _ = _chatSession.DisconnectAsync("入站队列背压超时，重连同步");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 协调器关闭
+            }
+            finally
+            {
+                Interlocked.Add(ref _inboundQueueWaitDurationMs, sw.ElapsedMilliseconds);
+            }
         }
     }
 

@@ -481,8 +481,10 @@ public class DatabaseService(
                                    && c.ConversationId == conversation.ConversationId, None);
         if (existing is not null)
         {
+            // 本地 Upsert 不覆盖草稿/归档/删除等本地专属字段（服务端投影另有 ApplyRemoteConversationProjectionAsync）。
             existing.Type = conversation.Type;
             existing.PeerUserId = conversation.PeerUserId;
+            existing.GroupTitle = conversation.GroupTitle;
             existing.LastMessageId = conversation.LastMessageId;
             existing.LastMessagePreview = conversation.LastMessagePreview;
             existing.LastMessageAtMs = conversation.LastMessageAtMs;
@@ -494,12 +496,50 @@ public class DatabaseService(
             existing.PinnedAtMs = conversation.PinnedAtMs;
             existing.IsMuted = conversation.IsMuted;
             existing.MutedUntilMs = conversation.MutedUntilMs;
-            existing.Draft = conversation.Draft;
             existing.LastSynced = conversation.LastSynced;
         }
         else
         {
             await db.Conversations.AddAsync(conversation, None);
+        }
+        await db.SaveChangesAsync(None);
+    }
+
+    /// <summary>
+    /// 应用服务端会话投影（同步链路专用）：只更新服务端拥有的字段
+    /// （Type/PeerUserId/GroupTitle/LastMessage*/Unread*/Pinned/Muted），
+    /// 绝不触碰本地专属字段（Draft/DraftState/DraftRevision/Archived/IsDeleted/LocalUIState）。
+    /// </summary>
+    public Task ApplyRemoteConversationProjectionAsync(LocalConversation projection) =>
+        WriteAsync(() => ApplyRemoteConversationProjectionAsyncImpl(projection));
+
+    private async Task ApplyRemoteConversationProjectionAsyncImpl(LocalConversation projection)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.Conversations
+            .FirstOrDefaultAsync(c => c.OwnerUserId == projection.OwnerUserId
+                                   && c.ConversationId == projection.ConversationId, None);
+        if (existing is not null)
+        {
+            existing.Type = projection.Type;
+            existing.PeerUserId = projection.PeerUserId;
+            existing.GroupTitle = projection.GroupTitle;
+            existing.LastMessageId = projection.LastMessageId;
+            existing.LastMessagePreview = projection.LastMessagePreview;
+            existing.LastMessageAtMs = projection.LastMessageAtMs;
+            existing.LastSenderUserId = projection.LastSenderUserId;
+            existing.UnreadCount = projection.UnreadCount;
+            existing.LastReadMessageId = projection.LastReadMessageId;
+            existing.LastReadAtMs = projection.LastReadAtMs;
+            existing.IsPinned = projection.IsPinned;
+            existing.PinnedAtMs = projection.PinnedAtMs;
+            existing.IsMuted = projection.IsMuted;
+            existing.MutedUntilMs = projection.MutedUntilMs;
+            existing.LastSynced = projection.LastSynced;
+        }
+        else
+        {
+            await db.Conversations.AddAsync(projection, None);
         }
         await db.SaveChangesAsync(None);
     }
@@ -1396,6 +1436,33 @@ public class DatabaseService(
         await db.SaveChangesAsync(None);
         await transaction.CommitAsync(None);
         return true;
+    }
+
+    /// <summary>
+    /// 按会话将未发送 Outbox 标记为永久失败（群聊成员被移除/退出/解散时调用）：
+    /// 该会话的 Queued/Sending 条目不再自动重试。返回受影响条数。
+    /// </summary>
+    public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason) =>
+        WriteAsync(() => MarkOutboxPermanentByConversationAsyncImpl(ownerUserId, conversationId, reason));
+
+    private async Task<int> MarkOutboxPermanentByConversationAsyncImpl(long ownerUserId, string conversationId, string reason)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+        var affected = await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && o.ConversationId == conversationId
+                     && (o.Status == OutboxStatus.Queued || o.Status == OutboxStatus.Sending))
+            .ExecuteUpdateAsync(o => o
+                .SetProperty(x => x.Status, OutboxStatus.Failed)
+                .SetProperty(x => x.FailureKind, OutboxFailureKind.Permanent)
+                .SetProperty(x => x.LastErrorCode, "MEMBER_REMOVED")
+                .SetProperty(x => x.FailureReason, reason)
+                .SetProperty(x => x.NextRetryAt, (DateTime?)null)
+                .SetProperty(x => x.AttemptId, (string?)null)
+                .SetProperty(x => x.AttemptStartedAt, (DateTime?)null)
+                .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
+        return affected;
     }
 
     /// <inheritdoc />

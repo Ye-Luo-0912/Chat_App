@@ -103,6 +103,9 @@ public class CoordinatorAccountSwitchTests
         public Task MarkConversationReadAndNotifyAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default)
         { Record(session, "mark_read_notify"); return Task.CompletedTask; }
 
+        public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default)
+        { Record(new SessionStamp(ownerUserId, 0, Guid.Empty), "outbox_permanent"); return Task.FromResult(1); }
+
         public void Reset() => Calls.Clear();
     }
 

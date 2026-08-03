@@ -215,7 +215,8 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                     frame.Tcs.TrySetException(failure);
                     frame.Owner?.Dispose();
                     DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
-                    Disconnect("Connection lost during send");
+                    // 身份绑定断连：旧会话循环的异常不得关闭新会话。
+                    DisconnectSession(session, "Connection lost during send");
                     return;
                 }
                 finally
@@ -234,7 +235,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         catch (Exception ex)
         {
             DrainSendChannel(session.SendChannel, ex);
-            Disconnect($"Send loop error: {ex.Message}");
+            DisconnectSession(session, $"Send loop error: {ex.Message}");
         }
     }
 
@@ -284,7 +285,8 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
 
                 if (bytesRead == 0)
                 {
-                    Disconnect("Graceful disconnect");
+                    // 服务端优雅关闭：仅当本会话仍是当前会话时才触发断线事件。
+                    DisconnectSession(session, "Graceful disconnect");
                     break;
                 }
 
@@ -297,7 +299,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Disconnect($"Receive error: {ex.Message}");
+            DisconnectSession(session, $"Receive error: {ex.Message}");
         }
         finally
         {
@@ -328,6 +330,8 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
 
         CancelAndDrainSession(session);
         await WaitForSessionLoopsAsync(session, TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
+        // 循环已退出：完整释放会话资源（CTS/Socket/Stream/Channel），防止遗留。
+        session.Dispose();
         RaiseDisconnected(reason);
     }
 
@@ -339,6 +343,23 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
             return;
         CancelAndDrainSession(session);
         await WaitForSessionLoopsAsync(session, TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false);
+        session.Dispose();
+    }
+
+    /// <summary>
+    /// 会话身份绑定的断连：仅当 <paramref name="source"/> 仍是当前会话时才清理全局状态
+    /// 并触发断线事件。旧会话循环的异常/延迟退出绝不能关闭新建立的连接。
+    /// </summary>
+    private void DisconnectSession(ConnectionSession source, string reason)
+    {
+        lock (_syncRoot)
+        {
+            if (!ReferenceEquals(_currentSession, source))
+                return; // 旧会话迟到异常：新会话不受影响。
+            _currentSession = null;
+        }
+        CancelAndDrainSession(source);
+        RaiseDisconnected(reason);
     }
 
     private ConnectionSession? TakeCurrentSession()

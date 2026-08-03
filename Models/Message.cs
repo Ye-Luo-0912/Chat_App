@@ -77,6 +77,9 @@ public class Message : INotifyPropertyChanged
     public long ReceivedAtMs { get; set; }
     public bool IsSentByMe { get; set; }
 
+    /// <summary>实际发送者用户 Id（群聊消息的关键身份：回复/转发按此保留真实发送者）。</summary>
+    public long SenderUserId { get; set; }
+
     private MessageStatus _status = MessageStatus.Sent;
     public MessageStatus Status
     {
@@ -275,51 +278,51 @@ public class Message : INotifyPropertyChanged
         switch (mutation.Kind)
         {
             case MessageMutationKind.Recall:
-            {
-                var recalledAt = mutation.RecalledAtMs > 0
-                    ? mutation.RecalledAtMs.Value
-                    : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                // 已撤回或旧撤回（时间不更新）：拒绝。
-                if (Status == MessageStatus.Recalled || (RecalledAtMs is > 0 && RecalledAtMs >= recalledAt))
-                    return false;
-
-                RecalledAtMs = recalledAt;
-                Status = MessageStatus.Recalled;
-                Content = string.Empty;
-                Attachments = null;
-                ReplyToMessageId = null;
-                ReplyToSenderUserId = null;
-                ReplyToPreview = null;
-                ForwardedFromMessageId = null;
-                ForwardedFromSenderUserId = null;
-                ForwardedFromPreview = null;
-                OnPropertyChanged(nameof(ReplyDisplayText));
-                OnPropertyChanged(nameof(ForwardDisplayText));
-                return true;
-            }
-            case MessageMutationKind.Edit:
-            {
-                // 已撤回消息不可编辑。
-                if (IsRecalled)
-                    return false;
-                // 版本单调：严格更新的版本才覆盖；无版本号时以编辑时间拒绝旧编辑。
-                if (mutation.EditVersion > 0 && EditVersion >= mutation.EditVersion)
-                    return false;
-                if (mutation.EditVersion <= 0
-                    && mutation.EditedAtMs is > 0
-                    && EditedAtMs is > 0
-                    && mutation.EditedAtMs <= EditedAtMs)
                 {
-                    return false;
-                }
+                    var recalledAt = mutation.RecalledAtMs > 0
+                        ? mutation.RecalledAtMs.Value
+                        : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    // 已撤回或旧撤回（时间不更新）：拒绝。
+                    if (Status == MessageStatus.Recalled || (RecalledAtMs is > 0 && RecalledAtMs >= recalledAt))
+                        return false;
 
-                Content = mutation.Content?.Trim() ?? string.Empty;
-                if (mutation.EditVersion > 0)
-                    EditVersion = mutation.EditVersion;
-                if (mutation.EditedAtMs is > 0)
-                    EditedAtMs = mutation.EditedAtMs;
-                return true;
-            }
+                    RecalledAtMs = recalledAt;
+                    Status = MessageStatus.Recalled;
+                    Content = string.Empty;
+                    Attachments = null;
+                    ReplyToMessageId = null;
+                    ReplyToSenderUserId = null;
+                    ReplyToPreview = null;
+                    ForwardedFromMessageId = null;
+                    ForwardedFromSenderUserId = null;
+                    ForwardedFromPreview = null;
+                    OnPropertyChanged(nameof(ReplyDisplayText));
+                    OnPropertyChanged(nameof(ForwardDisplayText));
+                    return true;
+                }
+            case MessageMutationKind.Edit:
+                {
+                    // 已撤回消息不可编辑。
+                    if (IsRecalled)
+                        return false;
+                    // 版本单调：严格更新的版本才覆盖；无版本号时以编辑时间拒绝旧编辑。
+                    if (mutation.EditVersion > 0 && EditVersion >= mutation.EditVersion)
+                        return false;
+                    if (mutation.EditVersion <= 0
+                        && mutation.EditedAtMs is > 0
+                        && EditedAtMs is > 0
+                        && mutation.EditedAtMs <= EditedAtMs)
+                    {
+                        return false;
+                    }
+
+                    Content = mutation.Content?.Trim() ?? string.Empty;
+                    if (mutation.EditVersion > 0)
+                        EditVersion = mutation.EditVersion;
+                    if (mutation.EditedAtMs is > 0)
+                        EditedAtMs = mutation.EditedAtMs;
+                    return true;
+                }
             default:
                 return false;
         }

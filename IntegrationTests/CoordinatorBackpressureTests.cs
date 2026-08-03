@@ -97,6 +97,9 @@ public class CoordinatorBackpressureTests
         public Task MarkConversationReadAndNotifyAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default)
         { Calls.Add((session, "mark_read_notify")); return Task.CompletedTask; }
 
+        public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default)
+        { Calls.Add((new SessionStamp(ownerUserId, 0, Guid.Empty), "outbox_permanent")); return Task.FromResult(1); }
+
         public void Reset() => Calls.Clear();
     }
 
@@ -250,9 +253,9 @@ public class CoordinatorBackpressureTests
         for (var i = 1; i < totalEvents; i++)
             session.RaiseChatMessage(NewMessage(i));
 
-        // 背压等待路径已触发：overflow 计数 ≥ 超出量
+        // 背压等待路径已触发：overflow 计数 ≥ 1（首个溢出事件进入同步等待；断连后的事件直接放弃）
         var overflow = coordinator.InboundOverflowCount;
-        Assert.True(overflow >= totalEvents - 512 - 8, $"溢出计数异常: {overflow}");
+        Assert.True(overflow >= 1, $"溢出计数异常: {overflow}");
 
         // 等背压超时（BackpressureWaitMs=5000）：必须主动断开连接，且只断开一次（无断连风暴）
         await WaitUntilAsync(() => Interlocked.CompareExchange(ref session.DisconnectCalls, 0, 0) >= 1,
@@ -262,15 +265,16 @@ public class CoordinatorBackpressureTests
         Assert.Contains("入站队列背压超时", session.LastDisconnectReason ?? "");
 
         // 释放消费端：入队成功的事件全部处理完、队列清空。
-        // 溢出超时的事件按设计不进队列（靠断连+重同步水位恢复，不靠队列保底）。
-        var enqueued = totalEvents - (int)coordinator.InboundOverflowCount;
+        // 溢出的事件按设计不写入（首个超时丢弃 + 断连后直接放弃，靠重连同步水位恢复）。
+        // 队列容量 512 + 首个被消费的事件 = 513。
+        const int expectedEnqueued = 513;
         store.Gate.TrySetResult();
         await WaitUntilAsync(
-            () => coordinator.InboundQueueDepth == 0 && coordinator.LastProcessedSequence >= enqueued,
+            () => coordinator.InboundQueueDepth == 0 && coordinator.LastProcessedSequence >= expectedEnqueued,
             TimeSpan.FromSeconds(9));
 
-        Assert.Equal(enqueued, coordinator.LastProcessedSequence);
-        Assert.Equal(enqueued, store.Calls.Count);
+        Assert.Equal(expectedEnqueued, coordinator.LastProcessedSequence);
+        Assert.Equal(expectedEnqueued, store.Calls.Count);
         Assert.Equal(0, coordinator.StaleDropped);
     }
 }

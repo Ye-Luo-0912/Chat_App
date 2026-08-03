@@ -21,8 +21,16 @@ public class TokenInfo
     private readonly IAuthClientService _loginService;
     private readonly ICurrentUserState _currentUserState;
 
-    /// <summary>在途刷新任务：严格 single-flight，并发 401 共享同一轮刷新。</summary>
-    private Task<bool>? _inFlightRefresh;
+    /// <summary>
+    /// 在途刷新任务：严格 single-flight，并发 401 共享同一轮刷新。
+    /// 任务在锁内创建（创建即启动），竞争失败的调用方绝不会发起第二次刷新；
+    /// 共享刷新使用 session 生命周期令牌，各调用方只能取消自己的等待。
+    /// </summary>
+    private readonly object _refreshGate = new();
+    private Task<bool>? _refreshTask;
+
+    /// <summary>会话生命周期令牌：登录期间有效；退出登录/应用关闭时取消并替换。</summary>
+    private CancellationTokenSource _sessionLifetimeCts = new();
 
     /// <summary>
     /// 会话失效事件：刷新令牌已过期/无效、或刷新失败时触发。
@@ -69,42 +77,50 @@ public class TokenInfo
 
     /// <summary>
     /// 登录成功后由外部直接设置内存中的 Token（LoginResult 中的数据已经完整）。
+    /// 同时开启新的会话生命周期令牌（旧令牌已被 ClearLocalSessionAsync 取消）。
     /// </summary>
     public void SetToken(Token token)
     {
         _token = token;
+        lock (_refreshGate)
+        {
+            _sessionLifetimeCts = new CancellationTokenSource();
+        }
     }
 
     public Token? Token => _token;
 
     /// <summary>
-    /// 严格 single-flight 刷新：并发调用共享同一轮刷新任务，
-    /// 后续等待者拿到的是同一结果，不会各自再次使用已旋转的 RefreshToken。
+    /// 严格 single-flight 刷新：并发调用共享同一轮刷新任务。
+    /// 任务在锁内创建：仅当无在途任务时才启动新的 RefreshTokensCoreAsync，
+    /// 竞争失败者（并发 401）不会各自再次发起 HTTP 刷新（CAS 前启动的假合并已修复）。
+    /// 共享任务使用 session 生命周期令牌：任一调用方的取消只中断自己的等待，
+    /// 不取消全局刷新（首个调用方取消不再连带取消所有等待者）。
     /// </summary>
-    public Task<bool> RefreshTokensAsync(CancellationToken ct = default)
+    public Task<bool> RefreshTokensAsync(CancellationToken callerToken = default)
     {
-        var inFlight = Volatile.Read(ref _inFlightRefresh);
-        if (inFlight is not null)
-            return inFlight;
-
-        var candidate = RefreshTokensCoreAsync(ct);
-        var raced = Interlocked.CompareExchange(ref _inFlightRefresh, candidate, null);
-        if (raced is not null)
-            return raced;
-
-        return AwaitAndClearAsync(candidate);
+        Task<bool> shared;
+        lock (_refreshGate)
+        {
+            shared = _refreshTask ??= RefreshTokensCoreAsync(_sessionLifetimeCts.Token);
+        }
+        return AwaitSharedAndClearAsync(shared, callerToken);
     }
 
-    private async Task<bool> AwaitAndClearAsync(Task<bool> task)
+    private async Task<bool> AwaitSharedAndClearAsync(Task<bool> shared, CancellationToken callerToken)
     {
         try
         {
-            return await task.ConfigureAwait(false);
+            return await shared.WaitAsync(callerToken).ConfigureAwait(false);
         }
         finally
         {
             // 仅清空仍指向本轮刷新任务的引用，避免误清后续刷新。
-            _ = Interlocked.CompareExchange(ref _inFlightRefresh, null, task);
+            lock (_refreshGate)
+            {
+                if (ReferenceEquals(_refreshTask, shared))
+                    _refreshTask = null;
+            }
         }
     }
 
@@ -177,6 +193,14 @@ public class TokenInfo
     public async Task ClearLocalSessionAsync(CancellationToken ct = default)
     {
         Log.Warning("正在清除本地 Token 信息");
+        // 会话结束：取消并替换 session 生命周期令牌（在途刷新任务随之失败退出；
+        // 替换保证后续访问不会触及已 Dispose 的 CTS）。
+        lock (_refreshGate)
+        {
+            try { _sessionLifetimeCts.Cancel(); } catch (ObjectDisposedException) { }
+            _sessionLifetimeCts.Dispose();
+            _sessionLifetimeCts = new CancellationTokenSource();
+        }
         _token = null;
         _currentUserState.Clear();
         await _databaseService.DeleteTokenAsync().ConfigureAwait(false);

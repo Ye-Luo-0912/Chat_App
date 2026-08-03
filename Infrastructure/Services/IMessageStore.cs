@@ -66,5 +66,8 @@ public interface IMessageStore
     /// <summary>主动标记会话已读：本地落库 + 上行网络请求。</summary>
     Task MarkConversationReadAndNotifyAsync(SessionStamp session, string conversationId, string? lastReadMessageId, CancellationToken ct = default);
 
+    /// <summary>按会话将未发送 Outbox 标记为永久失败（群聊成员移除/退出/解散后不再重试）。</summary>
+    Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default);
+
     void Reset();
 }

@@ -49,7 +49,24 @@ public class OfflineCapabilitiesTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        File.Delete(_dbPath);
+        TryDeleteWithRetry(_dbPath);
+    }
+
+    /// <summary>删除测试库文件：OutboxProcessor 的 fire-and-forget 排空任务可能仍在释放连接，重试等待。</summary>
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     /// <summary>离线发送：断网（无连接）时事务化双写落库，恢复后 ack 单事务推进 Sent。</summary>

@@ -47,7 +47,24 @@ public class SyncStateMachineTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        File.Delete(_dbPath);
+        TryDeleteWithRetry(_dbPath);
+    }
+
+    /// <summary>删除测试库文件：OutboxProcessor 的 fire-and-forget 排空任务可能仍在释放连接，重试等待。</summary>
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     /// <summary>离线启动：本地离线消息可用；恢复连接后首帧同步合并服务器版本（MessageId 回填、不重复入库）。</summary>
@@ -198,7 +215,7 @@ public class SyncStateMachineTests : IDisposable
         serverMessages.Clear();
         var secondRun = await RunSyncAsync(engine, expectSuccess: true);
         Assert.All(secondRun.CatchUps, c => Assert.Empty(c.Items));
-        Assert.Equal(1, secondRun.Conversations.Count); // 会话列表仍返回
+        Assert.Single(secondRun.Conversations); // 会话列表仍返回
 
         // 幂等：消息数不变、水位不回退
         var countAfterSecond = (await _db.GetMessagesAsync(OwnerId, ConvId, 100)).Count;
@@ -483,37 +500,37 @@ public class SyncStateMachineTests : IDisposable
                 switch (cmd)
                 {
                     case PacketCommand.MessageHistoryRequest:
-                    {
-                        var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
-                        if (req is null)
-                            return;
-
-                        // 无游标 → 最新一页；有游标 → 更早一页（均按时间升序返回，NextCursor 指向页内最早）
-                        var candidates = pool.AsEnumerable();
-                        if (req.BeforeReceivedAtMs is { } before)
-                            candidates = candidates.Where(m => m.ReceivedAtMs < before
-                                && !string.Equals(m.MessageId, req.BeforeMessageId, StringComparison.Ordinal));
-
-                        var ordered = candidates.OrderByDescending(m => m.ReceivedAtMs).Take(req.Limit).Reverse().ToList();
-                        var hasMore = candidates.Count() > ordered.Count;
-                        var cursor = ordered.Count == 0 ? null : new MessageHistoryCursorDto
                         {
-                            ReceivedAtMs = ordered[0].ReceivedAtMs,
-                            MessageId = ordered[0].MessageId
-                        };
+                            var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+                            if (req is null)
+                                return;
 
-                        InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
-                            new MessageHistoryPageDto
+                            // 无游标 → 最新一页；有游标 → 更早一页（均按时间升序返回，NextCursor 指向页内最早）
+                            var candidates = pool.AsEnumerable();
+                            if (req.BeforeReceivedAtMs is { } before)
+                                candidates = candidates.Where(m => m.ReceivedAtMs < before
+                                    && !string.Equals(m.MessageId, req.BeforeMessageId, StringComparison.Ordinal));
+
+                            var ordered = candidates.OrderByDescending(m => m.ReceivedAtMs).Take(req.Limit).Reverse().ToList();
+                            var hasMore = candidates.Count() > ordered.Count;
+                            var cursor = ordered.Count == 0 ? null : new MessageHistoryCursorDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId ?? string.Empty,
-                                Items = ordered,
-                                HasMore = hasMore,
-                                NextCursor = cursor
-                            });
-                        break;
-                    }
+                                ReceivedAtMs = ordered[0].ReceivedAtMs,
+                                MessageId = ordered[0].MessageId
+                            };
+
+                            InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
+                                new MessageHistoryPageDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId ?? string.Empty,
+                                    Items = ordered,
+                                    HasMore = hasMore,
+                                    NextCursor = cursor
+                                });
+                            break;
+                        }
                 }
             }
             catch
@@ -566,16 +583,16 @@ public class SyncStateMachineTests : IDisposable
         long receivedAtMs,
         int editVersion = 1,
         long? recalledAtMs = null) => new()
-    {
-        MessageId = messageId,
-        ClientMessageId = clientMessageId,
-        SenderUserId = messageId == "svr-2" ? PeerId : OwnerId,
-        ReceiverUserId = PeerId,
-        Content = content,
-        ReceivedAtMs = receivedAtMs,
-        EditVersion = editVersion,
-        RecalledAtMs = recalledAtMs
-    };
+        {
+            MessageId = messageId,
+            ClientMessageId = clientMessageId,
+            SenderUserId = messageId == "svr-2" ? PeerId : OwnerId,
+            ReceiverUserId = PeerId,
+            Content = content,
+            ReceivedAtMs = receivedAtMs,
+            EditVersion = editVersion,
+            RecalledAtMs = recalledAtMs
+        };
 
     /// <summary>同步服务器模拟：应答 SyncBootstrap / 会话列表 / 历史分页三类请求。</summary>
     private static void SetupSyncServer(
@@ -590,39 +607,39 @@ public class SyncStateMachineTests : IDisposable
                 switch (cmd)
                 {
                     case PacketCommand.SyncBootstrapRequest:
-                    {
-                        var req = serializer.Deserialize<SyncBootstrapRequestDto>(new ReadOnlySequence<byte>(body));
-                        if (req is null)
-                            return;
-                        var resp = bootstrap();
-                        resp.RequestId = req.RequestId;
-                        InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, resp);
-                        break;
-                    }
+                        {
+                            var req = serializer.Deserialize<SyncBootstrapRequestDto>(new ReadOnlySequence<byte>(body));
+                            if (req is null)
+                                return;
+                            var resp = bootstrap();
+                            resp.RequestId = req.RequestId;
+                            InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, resp);
+                            break;
+                        }
                     case PacketCommand.ConversationListRequest:
-                    {
-                        var req = serializer.Deserialize<ConversationListRequestDto>(new ReadOnlySequence<byte>(body));
-                        if (req is null)
-                            return;
-                        InjectPacket(tcp, serializer, PacketCommand.ConversationListPage,
-                            new ConversationListResponseDto { RequestId = req.RequestId, Succeeded = true, HasMore = false });
-                        break;
-                    }
+                        {
+                            var req = serializer.Deserialize<ConversationListRequestDto>(new ReadOnlySequence<byte>(body));
+                            if (req is null)
+                                return;
+                            InjectPacket(tcp, serializer, PacketCommand.ConversationListPage,
+                                new ConversationListResponseDto { RequestId = req.RequestId, Succeeded = true, HasMore = false });
+                            break;
+                        }
                     case PacketCommand.MessageHistoryRequest:
-                    {
-                        var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
-                        if (req is null)
-                            return;
-                        InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
-                            new MessageHistoryPageDto
-                            {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId ?? string.Empty,
-                                HasMore = false
-                            });
-                        break;
-                    }
+                        {
+                            var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+                            if (req is null)
+                                return;
+                            InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
+                                new MessageHistoryPageDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId ?? string.Empty,
+                                    HasMore = false
+                                });
+                            break;
+                        }
                 }
             }
             catch
@@ -734,3 +751,5 @@ public class SyncStateMachineTests : IDisposable
         }
     }
 }
+
+

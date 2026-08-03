@@ -168,7 +168,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 listCursor = resp.NextCursor;
             }
 
-            // 4. 持久化 catch-up + 对仍有更多的会话继续拉历史
+            // 4. 持久化 catch-up（forward 方向：以正向水位判定 + 推进水位）+ 对仍有更多的会话继续拉历史
             foreach (var cu in catchUps)
                 await PersistCatchUpAsync(session, cu, ct).ConfigureAwait(false);
 
@@ -186,9 +186,10 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                         .ConfigureAwait(false);
                     if (!resp.Succeeded || resp.Items.Count == 0)
                         break;
-                    // 续页消息独立落库：PersistCatchUpItemsAsync 以 resp.Items 为准，
-                    // 不能用原 cu.Items（那只是 bootstrap 首页，续页数据会丢失）。
-                    await PersistCatchUpItemsAsync(session, cu.ConversationId, resp.Items, ct).ConfigureAwait(false);
+                    // backward 方向：Before... 游标返回的是"更早"的消息，天然小于正向水位，
+                    // 绝不能复用 HasNewerMessages（会被整页跳过）；这里无条件幂等合并
+                    // （ApplyHistoryBatchAsync 内部按 MessageId 幂等），且不推进正向水位。
+                    await PersistHistoryPageAsync(session, cu.ConversationId, resp.Items, ct).ConfigureAwait(false);
                     if (!resp.HasMore || resp.NextCursor is null)
                         break;
                     cursor = resp.NextCursor;
@@ -235,6 +236,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             ConversationId = item.ConversationId,
             Type = (byte)item.Type,
             PeerUserId = item.PeerUserId,
+            GroupTitle = item.Title,
             LastMessageId = item.LastMessageId,
             LastMessagePreview = item.LastMessagePreview,
             LastMessageAtMs = item.LastMessageAtMs,
@@ -248,14 +250,38 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             MutedUntilMs = item.MutedUntilMs,
             LastSynced = DateTime.UtcNow
         };
-        await _db.UpsertConversationAsync(conversation).ConfigureAwait(false);
+        // 服务端投影专用：不覆盖本地草稿/归档/删除等本地专属字段。
+        await _db.ApplyRemoteConversationProjectionAsync(conversation).ConfigureAwait(false);
         _diagnostics.AddConversations(1);
     }
 
     private async Task PersistCatchUpAsync(SessionStamp session, ConversationHistoryCatchUpDto cu, CancellationToken ct)
-        => await PersistCatchUpItemsAsync(session, cu.ConversationId, cu.Items, ct).ConfigureAwait(false);
+    {
+        if (cu.Items.Count == 0)
+            return;
+        var cursor = await _db.GetSyncCursorAsync(session.OwnerUserId, cu.ConversationId).ConfigureAwait(false);
+        if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, cursor?.AfterMessageId, cu.Items))
+            return;
 
-    private async Task PersistCatchUpItemsAsync(
+        // 目标水位：批次最大 (ReceivedAtMs, MessageId) 复合游标（批量方法内做单调判断，不回退旧水位）。
+        var maxItem = MaxItem(cu.Items);
+        var target = new LocalSyncCursor
+        {
+            OwnerUserId = session.OwnerUserId,
+            ConversationId = cu.ConversationId,
+            AfterReceivedAtMs = maxItem.ReceivedAtMs,
+            AfterMessageId = maxItem.MessageId
+        };
+
+        await _messageStore.ApplyHistoryBatchAsync(session, cu.ConversationId, cu.Items, target, ct).ConfigureAwait(false);
+        _diagnostics.AddMessages(cu.Items.Count);
+    }
+
+    /// <summary>
+    /// backward 历史续页落库：无条件幂等合并（不判定水位、不推进正向水位，cursor=null）。
+    /// 早于水位的消息正是分页要补的历史，若用正向水位过滤会整页丢失。
+    /// </summary>
+    private async Task PersistHistoryPageAsync(
         SessionStamp session,
         string conversationId,
         IReadOnlyList<MessageHistoryItemDto> items,
@@ -263,27 +289,22 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     {
         if (items.Count == 0)
             return;
-        var cursor = await _db.GetSyncCursorAsync(session.OwnerUserId, conversationId).ConfigureAwait(false);
-        if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, items))
-            return;
+        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, cursor: null, ct).ConfigureAwait(false);
+        _diagnostics.AddMessages(items.Count);
+    }
 
-        // 目标水位：批次最大时间戳（批量方法内做单调判断，不回退旧水位）。
-        var maxItem = items[0];
+    private static MessageHistoryItemDto MaxItem(IReadOnlyList<MessageHistoryItemDto> items)
+    {
+        var max = items[0];
         for (var i = 1; i < items.Count; i++)
         {
-            if (items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
-                maxItem = items[i];
+            var item = items[i];
+            if (item.ReceivedAtMs > max.ReceivedAtMs
+                || (item.ReceivedAtMs == max.ReceivedAtMs
+                    && string.CompareOrdinal(item.MessageId, max.MessageId) > 0))
+                max = item;
         }
-        var target = new LocalSyncCursor
-        {
-            OwnerUserId = session.OwnerUserId,
-            ConversationId = conversationId,
-            AfterReceivedAtMs = maxItem.ReceivedAtMs,
-            AfterMessageId = maxItem.MessageId
-        };
-
-        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, target, ct).ConfigureAwait(false);
-        _diagnostics.AddMessages(items.Count);
+        return max;
     }
 }
 
@@ -306,10 +327,17 @@ public sealed class SyncCheckpointStore(
     }
 }
 
-/// <summary>冲突判定：存在比本地水位更新的消息才值得持久化。</summary>
+/// <summary>
+/// 冲突判定：存在比本地正向水位更新的消息才值得持久化。
+/// 仅用于 bootstrap catch-up（forward 方向）；backward 历史续页不经过此判定。
+/// 同时间戳按 (ReceivedAtMs, MessageId) 复合比较：本地水位消息 Id 更早时视为有更新。
+/// </summary>
 public sealed class SyncConflictResolver : ISyncConflictResolver
 {
-    public bool HasNewerMessages(long? localAfterReceivedAtMs, IReadOnlyList<MessageHistoryItemDto> items)
+    public bool HasNewerMessages(
+        long? localAfterReceivedAtMs,
+        string? localAfterMessageId,
+        IReadOnlyList<MessageHistoryItemDto> items)
     {
         if (items.Count == 0)
             return false;
@@ -318,6 +346,11 @@ public sealed class SyncConflictResolver : ISyncConflictResolver
         foreach (var item in items)
         {
             if (item.ReceivedAtMs > after)
+                return true;
+            // 同时间戳：仅当本地水位消息 Id 字典序更早（即本地落后）才视为有更新。
+            if (item.ReceivedAtMs == after
+                && localAfterMessageId is not null
+                && string.CompareOrdinal(item.MessageId, localAfterMessageId) > 0)
                 return true;
         }
         return false;

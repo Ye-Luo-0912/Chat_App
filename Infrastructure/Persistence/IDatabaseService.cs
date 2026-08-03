@@ -47,6 +47,12 @@ public interface IDatabaseService
     Task<LocalConversation?> GetConversationAsync(long ownerUserId, string conversationId);
     Task UpsertConversationAsync(LocalConversation conversation);
 
+    /// <summary>
+    /// 应用服务端会话投影（同步链路专用）：只更新服务端字段（Type/PeerUserId/GroupTitle/
+    /// LastMessage*/Unread*/Pinned/Muted），不覆盖草稿/归档/删除等本地专属字段。
+    /// </summary>
+    Task ApplyRemoteConversationProjectionAsync(LocalConversation projection);
+
     /// <summary>本地归档/删除状态落库（不随服务端同步 Upsert 覆盖）。</summary>
     Task SetConversationLocalStateAsync(long ownerUserId, string conversationId, bool? archived = null, bool? deleted = null);
     Task DeleteConversationAsync(long ownerUserId, string conversationId);
@@ -137,6 +143,9 @@ public interface IDatabaseService
     /// LocalMessage 同步置 Failed；单事务。
     /// </summary>
     Task<bool> MarkOutboxFailureAsync(long ownerUserId, string clientMessageId, string? errorCode, string? failureReason, OutboxFailureKind failureKind, DateTime? nextRetryAt);
+
+    /// <summary>按会话将未发送 Outbox 标记为永久失败（群聊成员移除/退出/解散）。返回受影响条数。</summary>
+    Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason);
 
     /// <summary>手动重试：Failed/Cancelled → Queued，重置尝试元数据与分类。返回是否转换成功。</summary>
     Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId);

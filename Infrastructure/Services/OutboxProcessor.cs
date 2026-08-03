@@ -203,7 +203,7 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                 try
                 {
                     await _chatSession.SendChatMessageAsync(
-                        entry.TargetUserId,
+                        entry.TargetUserId ?? 0,
                         entry.Content,
                         AttachmentJson.DeserializeIds(entry.AttachmentIdsJson),
                         entry.ReplyToMessageId,

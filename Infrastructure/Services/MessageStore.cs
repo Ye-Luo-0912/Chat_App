@@ -455,6 +455,10 @@ public sealed class MessageStore : IMessageStore
         }
     }
 
+    /// <inheritdoc />
+    public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default)
+        => _db.MarkOutboxPermanentByConversationAsync(ownerUserId, conversationId, reason);
+
     public void Reset()
     {
         // 无内存状态需清理；DB 数据按 OwnerUserId 隔离，登出时不删除。

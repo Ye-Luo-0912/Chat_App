@@ -32,7 +32,24 @@ public class AttachmentRecoveryTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        File.Delete(_dbPath);
+        TryDeleteWithRetry(_dbPath);
+    }
+
+    /// <summary>删除测试库文件：后台任务可能仍在释放连接，重试等待。</summary>
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     [Fact]
@@ -66,15 +83,15 @@ public class AttachmentRecoveryTests : IDisposable
 
     private static LocalAttachment NewAttachment(
         string clientId, AttachmentStatus status, long ownerUserId = OwnerId) => new()
-    {
-        OwnerUserId = ownerUserId,
-        ClientAttachmentId = clientId,
-        FileName = $"{clientId}.bin",
-        ContentType = "application/octet-stream",
-        SizeBytes = 1024,
-        Status = status,
-        LocalUploadingPath = $"{clientId}.bin"
-    };
+        {
+            OwnerUserId = ownerUserId,
+            ClientAttachmentId = clientId,
+            FileName = $"{clientId}.bin",
+            ContentType = "application/octet-stream",
+            SizeBytes = 1024,
+            Status = status,
+            LocalUploadingPath = $"{clientId}.bin"
+        };
 
     private sealed class DbContextFactoryStub(string dbPath) : IDbContextFactory<ClientDbContext>
     {
@@ -90,3 +107,5 @@ public class AttachmentRecoveryTests : IDisposable
             => Task.FromResult(CreateDbContext());
     }
 }
+
+

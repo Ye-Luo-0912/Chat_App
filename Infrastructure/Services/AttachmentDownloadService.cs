@@ -33,8 +33,10 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
     private readonly IDatabaseService _db;
     private readonly ICurrentUserContext _currentUserContext;
 
-    // key = {ownerUserId}:{attachmentId}, value = 进行中的合并下载任务。
-    private static readonly ConcurrentDictionary<string, Task<string?>> _inFlight = new();
+    // key = {ownerUserId}:{attachmentId}, value = 惰性合并下载任务。
+    // Lazy 保证只有字典中的 winner 才真正调用下载方法（GetOrAdd 前不启动任何网络请求），
+    // 且下载任务不受任何调用方的 CancellationToken 控制（调用方只能取消自己的等待）。
+    private static readonly ConcurrentDictionary<string, Lazy<Task<string?>>> _inFlight = new();
 
     public AttachmentDownloadService(
         IAttachmentClientService attachments,
@@ -66,25 +68,21 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         var owner = _currentUserContext.UserId ?? 0;
         var key = $"{owner}:{attachmentId}";
 
-        // 2. AsyncLazy 合并：加入或复用进行中的下载任务，网络请求只发一次。
-        var newTask = DownloadAndCacheAsync(attachmentId, fileName, downloadApiHint, ct);
-        var raced = _inFlight.GetOrAdd(key, newTask);
-        if (!ReferenceEquals(raced, newTask))
-        {
-            // 并发发起者输掉竞争：等待胜者结果。
-            try { return await raced.ConfigureAwait(false); }
-            catch { /* 胜者失败，本次不重试，保持与失败路径一致 */ }
-            return null;
-        }
+        // 2. 惰性 single-flight 合并：只有字典 winner 才执行 DownloadAndCacheAsync。
+        //    共享下载不受调用方取消影响（调用方取消只中断自己的等待）。
+        var lazy = _inFlight.GetOrAdd(key,
+            _ => new Lazy<Task<string?>>(
+                () => DownloadAndCacheAsync(attachmentId, fileName, downloadApiHint, CancellationToken.None),
+                LazyThreadSafetyMode.ExecutionAndPublication));
 
         try
         {
-            return await newTask.ConfigureAwait(false);
+            return await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
         }
         finally
         {
             // 条件移除：仅移除本次创建的任务，避免误删后续发起的新任务。
-            _inFlight.TryRemove(new KeyValuePair<string, Task<string?>>(key, newTask));
+            _inFlight.TryRemove(new KeyValuePair<string, Lazy<Task<string?>>>(key, lazy));
         }
     }
 

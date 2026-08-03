@@ -40,7 +40,24 @@ public class OutboxAckRaceTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        File.Delete(_dbPath);
+        TryDeleteWithRetry(_dbPath);
+    }
+
+    /// <summary>删除测试库文件：OutboxProcessor 的 fire-and-forget 排空任务可能仍在释放连接，重试等待。</summary>
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     private LocalOutboxMessage NewOutbox(string clientId) => new()
@@ -185,5 +202,7 @@ public class OutboxAckRaceTests : IDisposable
             => Task.FromResult(CreateDbContext());
     }
 }
+
+
 
 

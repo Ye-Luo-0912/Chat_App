@@ -53,8 +53,25 @@ public class AttachmentResumeDownloadTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        File.Delete(_dbPath);
+        TryDeleteWithRetry(_dbPath);
         try { Directory.Delete(_storageRoot, recursive: true); } catch { /* 忽略 */ }
+    }
+
+    /// <summary>删除测试库文件：后台任务可能仍在释放连接，重试等待。</summary>
+    private static void TryDeleteWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     [Fact]
@@ -341,3 +358,5 @@ public class AttachmentResumeDownloadTests : IDisposable
             => Task.FromResult(CreateDbContext());
     }
 }
+
+
