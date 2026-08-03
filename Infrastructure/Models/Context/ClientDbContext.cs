@@ -54,6 +54,10 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         modelBuilder.Entity<LocalConversation>()
             .HasIndex(x => new { x.OwnerUserId, x.ConversationId })
             .IsUnique();
+        // 会话列表排序/过滤覆盖索引：置顶优先 → 置顶时间 → 最后消息时间（分页游标同序）
+        modelBuilder.Entity<LocalConversation>()
+            .HasIndex(x => new { x.OwnerUserId, x.IsPinned, x.PinnedAtMs, x.LastMessageAtMs, x.ConversationId })
+            .HasDatabaseName("ix_conversations_owner_list_order");
 
         // ---- 本地消息----
         modelBuilder.Entity<LocalMessage>()
@@ -86,8 +90,10 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         modelBuilder.Entity<LocalOutboxMessage>()
             .HasIndex(x => new { x.OwnerUserId, x.ClientMessageId })
             .IsUnique();
+        // 排空认领查询覆盖索引：(OwnerUserId, Status) 过滤 + NextRetryAt 到期排序
         modelBuilder.Entity<LocalOutboxMessage>()
-            .HasIndex(x => new { x.OwnerUserId, x.Status });
+            .HasIndex(x => new { x.OwnerUserId, x.Status, x.NextRetryAt })
+            .HasDatabaseName("ix_outbox_owner_status_retry");
 
         // ---- 同步水位----
         modelBuilder.Entity<LocalSyncCursor>()

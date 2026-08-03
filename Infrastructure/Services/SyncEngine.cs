@@ -186,7 +186,9 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                         .ConfigureAwait(false);
                     if (!resp.Succeeded || resp.Items.Count == 0)
                         break;
-                    await PersistCatchUpAsync(session, cu, ct).ConfigureAwait(false);
+                    // 续页消息独立落库：PersistCatchUpItemsAsync 以 resp.Items 为准，
+                    // 不能用原 cu.Items（那只是 bootstrap 首页，续页数据会丢失）。
+                    await PersistCatchUpItemsAsync(session, cu.ConversationId, resp.Items, ct).ConfigureAwait(false);
                     if (!resp.HasMore || resp.NextCursor is null)
                         break;
                     cursor = resp.NextCursor;
@@ -251,30 +253,37 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     }
 
     private async Task PersistCatchUpAsync(SessionStamp session, ConversationHistoryCatchUpDto cu, CancellationToken ct)
+        => await PersistCatchUpItemsAsync(session, cu.ConversationId, cu.Items, ct).ConfigureAwait(false);
+
+    private async Task PersistCatchUpItemsAsync(
+        SessionStamp session,
+        string conversationId,
+        IReadOnlyList<MessageHistoryItemDto> items,
+        CancellationToken ct)
     {
-        if (cu.Items.Count == 0)
+        if (items.Count == 0)
             return;
-        var cursor = await _db.GetSyncCursorAsync(session.OwnerUserId, cu.ConversationId).ConfigureAwait(false);
-        if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, cu.Items))
+        var cursor = await _db.GetSyncCursorAsync(session.OwnerUserId, conversationId).ConfigureAwait(false);
+        if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, items))
             return;
 
         // 目标水位：批次最大时间戳（批量方法内做单调判断，不回退旧水位）。
-        var maxItem = cu.Items[0];
-        for (var i = 1; i < cu.Items.Count; i++)
+        var maxItem = items[0];
+        for (var i = 1; i < items.Count; i++)
         {
-            if (cu.Items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
-                maxItem = cu.Items[i];
+            if (items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
+                maxItem = items[i];
         }
         var target = new LocalSyncCursor
         {
             OwnerUserId = session.OwnerUserId,
-            ConversationId = cu.ConversationId,
+            ConversationId = conversationId,
             AfterReceivedAtMs = maxItem.ReceivedAtMs,
             AfterMessageId = maxItem.MessageId
         };
 
-        await _messageStore.ApplyHistoryBatchAsync(session, cu.ConversationId, cu.Items, target, ct).ConfigureAwait(false);
-        _diagnostics.AddMessages(cu.Items.Count);
+        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, target, ct).ConfigureAwait(false);
+        _diagnostics.AddMessages(items.Count);
     }
 }
 
