@@ -10,7 +10,7 @@ namespace Benchmarks;
 /// 验收：搜索和输入 p95 响应低于 50ms 的预算内。
 /// </summary>
 [MemoryDiagnoser]
-[SimpleJob(warmupCount: 3, iterationCount: 5)]
+[SimpleJob(warmupCount: 5, iterationCount: 9)]
 public class SerializationBenchmarks
 {
     private JsonPacketBodySerializer _serializer = null!;
@@ -64,3 +64,4 @@ public class SerializationBenchmarks
         return _serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(_writer.WrittenSpan.ToArray()));
     }
 }
+

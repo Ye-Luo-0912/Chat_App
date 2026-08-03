@@ -14,7 +14,7 @@ namespace Benchmarks;
 /// - 解码1000帧 0B: ≤ 35 us, ≤ 17 KB
 /// </summary>
 [MemoryDiagnoser]
-[SimpleJob(warmupCount: 3, iterationCount: 5)]
+[SimpleJob(warmupCount: 5, iterationCount: 9)]
 public class ProtocolCodecBenchmarks
 {
     private byte[] _frameBytes = null!;
