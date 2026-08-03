@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Chat_App.Infrastructure.Persistence;
 using Serilog;
@@ -26,7 +27,7 @@ public interface IAttachmentDownloadService
 /// 合并发生在服务入口，整个"网络下载 → 哈希校验 → 缓存落盘"只执行一次，
 /// 后续等待者直接复用结果，不再各自发起 HTTP 请求。
 /// </summary>
-public sealed class AttachmentDownloadService : IAttachmentDownloadService
+public sealed class AttachmentDownloadService : IAttachmentDownloadService, IMetricsSource
 {
     private readonly IAttachmentClientService _attachments;
     private readonly IAttachmentStorageService _storage;
@@ -37,6 +38,24 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
     // Lazy 保证只有字典中的 winner 才真正调用下载方法（GetOrAdd 前不启动任何网络请求），
     // 且下载任务不受任何调用方的 CancellationToken 控制（调用方只能取消自己的等待）。
     private static readonly ConcurrentDictionary<string, Lazy<Task<string?>>> _inFlight = new();
+    private long _cacheHits;
+    private long _networkRequests;
+    private long _deduped;
+
+    public string Name => "attachment_download";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        // 缓存命中率 = cache_hits / (cache_hits + network_requests + deduped)
+        ["cache_hits"] = Volatile.Read(ref _cacheHits),
+        ["network_requests"] = Volatile.Read(ref _networkRequests),
+        // 并发下载去重命中数（single-flight 共享）：去重率 = deduped / (network_requests + deduped)
+        ["deduped"] = Volatile.Read(ref _deduped)
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot>();
+
 
     public AttachmentDownloadService(
         IAttachmentClientService attachments,
@@ -60,7 +79,10 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         {
             var cached = _storage.GetDownloadCachePath(owner, attachmentId, fileName);
             if (cached is not null)
+            {
+                Interlocked.Increment(ref _cacheHits);
                 return cached;
+            }
         }
         catch (Exception ex)
         {
@@ -71,6 +93,10 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
 
         // 2. 惰性 single-flight 合并：只有字典 winner 才执行 DownloadAndCacheAsync。
         //    共享下载不受调用方取消影响（调用方取消只中断自己的等待）。
+        //    并发等待者计入去重命中（network_dedup），winner 计入网络请求。
+        if (_inFlight.TryGetValue(key, out var existing) && !existing.IsValueCreated)
+            Interlocked.Increment(ref _deduped);
+
         var lazy = _inFlight.GetOrAdd(key,
             _ => new Lazy<Task<string?>>(
                 () => DownloadAndCacheAsync(owner, attachmentId, fileName, downloadApiHint, CancellationToken.None),
@@ -90,6 +116,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
     private async Task<string?> DownloadAndCacheAsync(
         long owner, string attachmentId, string fileName, string? downloadApiHint, CancellationToken ct)
     {
+        Interlocked.Increment(ref _networkRequests);
         var hint = !string.IsNullOrWhiteSpace(downloadApiHint) ? downloadApiHint : attachmentId;
         try
         {
@@ -225,5 +252,6 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         }
     }
 }
+
 
 

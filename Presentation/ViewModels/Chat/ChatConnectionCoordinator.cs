@@ -39,6 +39,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
     private long _connectAttempts;
     private long _connectFailures;
     private long _reconnectCycles;
+    private long _sessionGeneration;
     private readonly LatencyHistogram _connectLatency = new();
 
     public ChatConnectionStatus Status
@@ -189,6 +190,8 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
                     deviceIdHash,
                     ct)
                 .ConfigureAwait(false);
+            // 会话代数：每次成功鉴权 +1（跨连接误关闭诊断：新代会话的迟到异常必须忽略）
+            Interlocked.Increment(ref _sessionGeneration);
             _connectLatency.Add(sw.Elapsed);
         }
         catch
@@ -383,6 +386,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
         ["connect_attempts"] = Volatile.Read(ref _connectAttempts),
         ["connect_failures"] = Volatile.Read(ref _connectFailures),
         ["reconnect_cycles"] = Volatile.Read(ref _reconnectCycles),
+        ["session_generation"] = Volatile.Read(ref _sessionGeneration),
         ["current_backoff_ms"] = (long)(Math.Min(
             MaxBackoff.TotalMilliseconds,
             Math.Pow(2, Math.Min(_attempt - 1, 5)) * 1000))

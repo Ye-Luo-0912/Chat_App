@@ -335,7 +335,12 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return ToHexLower(sha.Hash!);
     }
 
-    /// <summary>LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。</summary>
+    /// <summary>
+    /// LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。
+    /// 活跃 .partial（断点续传在途）不参与淘汰，避免正在下载的文件被删。
+    /// 注：LRU 元数据（缓存路径/大小/访问时间）已可落入 SQLite（LocalAttachment.CachePath），
+    /// 目录扫描仅在超容量时触发一次，作为兜底保持目录与实际一致。
+    /// </summary>
     private void EvictIfOverCapacity(long ownerUserId)
     {
         try
@@ -343,6 +348,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             var dir = GetDownloadsDir(ownerUserId);
             var files = Directory.GetFiles(dir)
                 .Where(f => !Path.GetFileName(f).Equals(CacheVersionFile, StringComparison.Ordinal))
+                .Where(f => !Path.GetFileName(f).EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
                 .Select(f => new FileInfo(f))
                 .Where(f => f.Exists)
                 .OrderByDescending(f => f.LastAccessTimeUtc)

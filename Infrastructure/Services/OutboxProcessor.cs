@@ -70,6 +70,7 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
     private long _leaseRecoveries;
     private long _claimEmptyRounds;
     private long _leaseReleasedOnStop;
+    private long _oldestOutboxAgeMs;
     private readonly LatencyHistogram _sendLatency = new();
 
     public OutboxProcessor(
@@ -219,6 +220,12 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
             Interlocked.Add(ref _processedCount, claimed.Count);
             if (claimed.Count == 0)
                 Interlocked.Increment(ref _claimEmptyRounds);
+            if (claimed.Count > 0)
+            {
+                // 最旧待发消息年龄（队首 QueuedAt → 本轮 claim 时刻），反映端到端发送积压
+                var oldest = claimed.Min(c => c.QueuedAt);
+                Interlocked.Exchange(ref _oldestOutboxAgeMs, (long)(now - oldest).TotalMilliseconds);
+            }
 
             // 3. 有限并发发送（MaxConcurrentSends 上限，含失败/取消/停止释放语义）。
             // Sending 事件按批次顺序统一发布；停止时仅释放"尚未开始"条目的租约
@@ -245,11 +252,12 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         }
     }
 
-    /// <summary>发送批次最大并发数（S3：有限并发，不放大服务器/网络突发）。</summary>
+    /// <summary>发送批次最大并发会话组数（全局有界并发；组内同一会话严格 FIFO）。</summary>
     private const int MaxConcurrentSends = 2;
 
     /// <summary>
-    /// 有限并发发送一个批次：Sending 事件按批次顺序发布；
+    /// 有界并发发送一个批次：按会话分组（PerConversation FIFO：组内保持 claim 顺序串行发送，
+    /// 不同会话组间并发，Global bounded concurrency）；Sending 事件按批次顺序发布；
     /// 停止/取消时仅释放"尚未开始"条目的租约（在途条目保持 Sending 等租约/ack）。
     /// </summary>
     private async Task SendBatchAsync(long userId, List<LocalOutboxMessage> claimed)
@@ -266,54 +274,71 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         foreach (var entry in claimed)
             notStarted[entry.ClientMessageId] = entry;
 
-        var gate = new SemaphoreSlim(MaxConcurrentSends);
-        var tasks = new List<Task>(claimed.Count);
+        // 按会话分组：组内保持 claim 顺序（FIFO），组间并行（全局有界并发）
+        var groups = new List<List<LocalOutboxMessage>>();
         foreach (var entry in claimed)
+        {
+            var key = entry.ConversationId ?? string.Empty;
+            var group = groups.FirstOrDefault(g => string.Equals(g[0].ConversationId, key, StringComparison.Ordinal));
+            if (group is null)
+            {
+                group = [];
+                groups.Add(group);
+            }
+            group.Add(entry);
+        }
+
+        var gate = new SemaphoreSlim(MaxConcurrentSends);
+        var tasks = new List<Task>(groups.Count);
+        foreach (var group in groups)
         {
             tasks.Add(Task.Run(async () =>
             {
                 await gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
-                    if (_cts.IsCancellationRequested)
-                        return; // 尚未开始：留在 notStarted，统一释放租约
+                    foreach (var entry in group) // 同一会话严格顺序
+                    {
+                        if (_cts.IsCancellationRequested)
+                            return; // 尚未开始：留在 notStarted，统一释放租约
 
-                    notStarted.TryRemove(entry.ClientMessageId, out _); // 已开始：在途
+                        notStarted.TryRemove(entry.ClientMessageId, out _); // 已开始：在途
 
-                    var sw = Stopwatch.StartNew();
-                    try
-                    {
-                        await _chatSession.SendChatMessageAsync(
-                            entry.TargetUserId ?? 0,
-                            entry.Content,
-                            AttachmentJson.DeserializeIds(entry.AttachmentIdsJson),
-                            entry.ReplyToMessageId,
-                            entry.ReplyToSenderUserId,
-                            entry.ReplyToPreview,
-                            entry.ForwardedFromMessageId,
-                            entry.ForwardedFromSenderUserId,
-                            entry.ForwardedFromPreview,
-                            entry.ClientMessageId,
-                            conversationId: entry.ConversationId,
-                            ct: _cts.Token).ConfigureAwait(false);
+                        var sw = Stopwatch.StartNew();
+                        try
+                        {
+                            await _chatSession.SendChatMessageAsync(
+                                entry.TargetUserId ?? 0,
+                                entry.Content,
+                                AttachmentJson.DeserializeIds(entry.AttachmentIdsJson),
+                                entry.ReplyToMessageId,
+                                entry.ReplyToSenderUserId,
+                                entry.ReplyToPreview,
+                                entry.ForwardedFromMessageId,
+                                entry.ForwardedFromSenderUserId,
+                                entry.ForwardedFromPreview,
+                                entry.ClientMessageId,
+                                conversationId: entry.ConversationId,
+                                ct: _cts.Token).ConfigureAwait(false);
 
-                        // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。
-                        Interlocked.Increment(ref _transportWrites);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // 处理器关闭：在途条目保持 Sending（租约过期后由下轮恢复）；不释放（防重复发送）。
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "Outbox 发送失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
-                        await MarkFailedAsync(userId, entry, ex).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        sw.Stop();
-                        _sendLatency.Add(sw.Elapsed);
+                            // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。
+                            Interlocked.Increment(ref _transportWrites);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // 处理器关闭：在途条目保持 Sending（租约过期后由下轮恢复）；不释放（防重复发送）。
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Outbox 发送失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
+                            await MarkFailedAsync(userId, entry, ex).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            sw.Stop();
+                            _sendLatency.Add(sw.Elapsed);
+                        }
                     }
                 }
                 finally
@@ -403,7 +428,9 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         ["permanent_failures"] = Volatile.Read(ref _permanentFailures),
         ["lease_recoveries"] = Volatile.Read(ref _leaseRecoveries),
         ["lease_released_on_stop"] = Volatile.Read(ref _leaseReleasedOnStop),
-        ["claim_empty_rounds"] = Volatile.Read(ref _claimEmptyRounds)
+        ["claim_empty_rounds"] = Volatile.Read(ref _claimEmptyRounds),
+        // 最旧待发消息年龄（ms）：0 表示当前无积压
+        ["oldest_outbox_age_ms"] = Volatile.Read(ref _oldestOutboxAgeMs)
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -171,7 +173,30 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     public string SendButtonText => HasEditDraft ? "保存" : "发送";
 
-    public ObservableCollection<Message> Messages { get; } = [];
+    /// <summary>
+    /// 支持 AddRange 批量通知的消息集合：历史页批量插入时只触发一次 CollectionChanged，
+    /// 避免逐条插入导致每页 100 次 UI 重渲染（大列表避免频繁 CollectionChanged）。
+    /// </summary>
+    public sealed class BatchObservableCollection<T> : ObservableCollection<T>
+    {
+        public void AddRange(IEnumerable<T> items)
+        {
+            var list = items as IReadOnlyList<T> ?? items.ToList();
+            if (list.Count == 0)
+                return;
+
+            var startIndex = Count;
+            foreach (var item in list)
+                Items.Add(item);
+
+            OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+            OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+            OnCollectionChanged(new NotifyCollectionChangedEventArgs(
+                NotifyCollectionChangedAction.Add, new List<T>(list), startIndex));
+        }
+    }
+
+    public BatchObservableCollection<Message> Messages { get; } = [];
 
     private readonly Dictionary<string, Message> _messagesByServerId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Message> _messagesByClientId = new(StringComparer.Ordinal);
@@ -1006,12 +1031,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 if (generation != _conversationGeneration)
                     return;
+                // 历史页批量插入：单次 CollectionChanged，避免逐条 UI 重渲染
+                var batch = new List<Message>(history.Count);
                 foreach (var lm in history)
                 {
                     var ui = ToUiMessage(lm);
                     if (ui is not null)
-                        AddMessage(ui);
+                        batch.Add(ui);
                 }
+                Messages.AddRange(batch);
             });
         }
         catch (OperationCanceledException)

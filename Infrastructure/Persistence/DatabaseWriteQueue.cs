@@ -34,7 +34,10 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
     private long _processedCount;
     private long _failedCount;
     private long _inFlightCount;
-    private readonly LatencyHistogram _writeLatency = new();
+    private long _batchSize;
+    private readonly LatencyHistogram _queueWait = new();
+    private readonly LatencyHistogram _execution = new();
+    private readonly LatencyHistogram _endToEnd = new();
 
     /// <summary>写入操作封装：携带唯一 Id 便于诊断，自包含执行并通过 TCS 通知完成。</summary>
     private abstract class WriteOperation
@@ -120,6 +123,8 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
     {
         await foreach (var op in _channel.Reader.ReadAllAsync(_cts.Token))
         {
+            // 排队等待 = 入队时刻 → 执行开始（背压下等待空位/前序操作的时间）
+            var waitElapsed = TimeSpan.FromTicks(Stopwatch.GetTimestamp() - op.EnqueuedAtTicks);
             var sw = Stopwatch.StartNew();
             Interlocked.Increment(ref _inFlightCount);
             try
@@ -138,7 +143,10 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
             {
                 Interlocked.Decrement(ref _inFlightCount);
                 sw.Stop();
-                _writeLatency.Add(sw.Elapsed);
+                // 语义拆分：queue_wait（背压排队） / execution（DB 操作） / end_to_end（全链路）
+                _queueWait.Add(waitElapsed);
+                _execution.Add(sw.Elapsed);
+                _endToEnd.Add(sw.Elapsed + waitElapsed);
             }
         }
     }
@@ -151,11 +159,18 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
         ["in_flight"] = Volatile.Read(ref _inFlightCount),
         ["processed"] = Volatile.Read(ref _processedCount),
         ["failed"] = Volatile.Read(ref _failedCount),
-        ["capacity"] = QueueCapacity
+        ["capacity"] = QueueCapacity,
+        // 单消费者串行执行器：领域批处理落地前 batch_size 恒为 1（标记未来批处理粒度）
+        ["batch_size"] = Volatile.Read(ref _batchSize) == 0 ? 1 : Volatile.Read(ref _batchSize)
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
-        new Dictionary<string, HistogramSnapshot> { ["write_latency_ms"] = _writeLatency.Snapshot() };
+        new Dictionary<string, HistogramSnapshot>
+        {
+            ["queue_wait_ms"] = _queueWait.Snapshot(),
+            ["execution_ms"] = _execution.Snapshot(),
+            ["end_to_end_ms"] = _endToEnd.Snapshot()
+        };
 
     public async ValueTask DisposeAsync()
     {
