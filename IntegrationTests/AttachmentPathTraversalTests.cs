@@ -57,11 +57,11 @@ public class AttachmentPathTraversalTests : IDisposable
     [InlineData("..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\tmp")]
     public async Task Malicious_AttachmentId_Cannot_Escape_Downloads_Dir(string attachmentId)
     {
-        var downloadsDir = _storage.GetDownloadsDir();
+        var downloadsDir = _storage.GetDownloadsDir(1001);
         var escapeProbe = EscapeProbe(downloadsDir);
 
         using var content = new MemoryStream("payload"u8.ToArray());
-        var path = await _storage.WriteToDownloadsAsync(attachmentId, "report.txt", content);
+        var path = await _storage.WriteToDownloadsAsync(1001, attachmentId, "report.txt", content);
 
         var fullPath = Path.GetFullPath(path);
         var downloadsPrefix = Path.GetFullPath(downloadsDir) + Path.DirectorySeparatorChar;
@@ -89,11 +89,11 @@ public class AttachmentPathTraversalTests : IDisposable
     [InlineData("a:b\\c/d")]
     public async Task Malicious_FileName_Cannot_Escape_Downloads_Dir(string fileName)
     {
-        var downloadsDir = _storage.GetDownloadsDir();
+        var downloadsDir = _storage.GetDownloadsDir(1001);
         var escapeProbe = EscapeProbe(downloadsDir);
 
         using var content = new MemoryStream("payload"u8.ToArray());
-        var path = await _storage.WriteToDownloadsAsync("att-1", fileName, content);
+        var path = await _storage.WriteToDownloadsAsync(1001, "att-1", fileName, content);
 
         var fullPath = Path.GetFullPath(path);
         var downloadsPrefix = Path.GetFullPath(downloadsDir) + Path.DirectorySeparatorChar;
@@ -113,8 +113,8 @@ public class AttachmentPathTraversalTests : IDisposable
     [InlineData("uploading\\..\\..\\..\\root.txt")]
     public void RelativePath_Escape_Throws_SecurityException(string relativePath)
     {
-        Assert.Throws<SecurityException>(() => _storage.ResolvePath(relativePath));
-        Assert.Throws<SecurityException>(() => _storage.OpenUploadingRead(relativePath));
+        Assert.Throws<SecurityException>(() => _storage.ResolvePath(1001, relativePath));
+        Assert.Throws<SecurityException>(() => _storage.OpenUploadingRead(1001, relativePath));
     }
 
     /// <summary>对照组：合法 AttachmentId 与文件名正常工作，无误伤。</summary>
@@ -122,12 +122,39 @@ public class AttachmentPathTraversalTests : IDisposable
     public async Task Benign_Ids_And_Names_Work_Normally()
     {
         using var content = new MemoryStream("hello"u8.ToArray());
-        var path = await _storage.WriteToDownloadsAsync("att-benign-1", "notes.txt", content);
+        var path = await _storage.WriteToDownloadsAsync(1001, "att-benign-1", "notes.txt", content);
         Assert.True(File.Exists(path));
-        Assert.StartsWith(Path.GetFullPath(_storage.GetDownloadsDir()), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith(Path.GetFullPath(_storage.GetDownloadsDir(1001)), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase);
 
-        var resolved = _storage.ResolvePath("uploading");
-        Assert.Equal(Path.GetFullPath(_storage.GetUploadingDir()), Path.GetFullPath(resolved));
+        var resolved = _storage.ResolvePath(1001, "uploading");
+        Assert.Equal(Path.GetFullPath(_storage.GetUploadingDir(1001)), Path.GetFullPath(resolved));
+    }
+
+    /// <summary>
+    /// P1-6 回归：路径方法显式携带 owner——当前用户是 B（2002）时，
+    /// 显式传 owner=1001 的操作必须落在 A 的目录，绝不落到 B 的目录。
+    /// （原实现按全局当前用户决定目录，恢复 A 记录时会误读 B 目录。）
+    /// </summary>
+    [Fact]
+    public async Task Explicit_Owner_Is_Used_Regardless_Of_Current_User()
+    {
+        // 当前用户是 B
+        _ctx.UserId = 2002;
+
+        // 显式 owner=1001：写入必须落在 A 的 downloads 目录
+        using var content = new MemoryStream("owner-scoped"u8.ToArray());
+        var path = await _storage.WriteToDownloadsAsync(1001, "att-owner-a", "a.txt", content);
+        var downloadsA = Path.GetFullPath(_storage.GetDownloadsDir(1001));
+        var downloadsB = Path.GetFullPath(_storage.GetDownloadsDir(2002));
+        Assert.StartsWith(downloadsA + Path.DirectorySeparatorChar, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase);
+        Assert.False(Path.GetFullPath(path).StartsWith(downloadsB, StringComparison.OrdinalIgnoreCase), "不得写入当前用户 B 的目录");
+
+        // ResolvePath 同理：owner=1001 解析到 A 目录内
+        var resolved = _storage.ResolvePath(1001, "downloads");
+        Assert.StartsWith(downloadsA, Path.GetFullPath(resolved), StringComparison.OrdinalIgnoreCase);
+
+        // 当前用户 B 的目录中没有 A 的文件
+        Assert.False(File.Exists(Path.Combine(downloadsB, Path.GetFileName(path))));
     }
 
     public void Dispose()
@@ -136,3 +163,4 @@ public class AttachmentPathTraversalTests : IDisposable
         GC.SuppressFinalize(this);
     }
 }
+

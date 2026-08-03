@@ -147,6 +147,9 @@ public interface IDatabaseService
     /// <summary>按会话将未发送 Outbox 标记为永久失败（群聊成员移除/退出/解散）。返回受影响条数。</summary>
     Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason);
 
+    /// <summary>主动释放一批 Outbox 条目租约（Sending → Queued，AttemptId 匹配才释放）。返回释放条数。</summary>
+    Task<int> ReleaseOutboxLeasesAsync(long ownerUserId, IReadOnlyList<string> clientMessageIds, string attemptId);
+
     // ---- 群聊领域仓储 ----
 
     /// <summary>成员加入/角色变更落库（OccurredAtMs 单调，防重放/乱序）。返回是否应用。</summary>

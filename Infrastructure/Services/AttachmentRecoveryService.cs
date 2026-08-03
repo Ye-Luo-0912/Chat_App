@@ -112,7 +112,7 @@ public sealed class AttachmentRecoveryService
         }
 
         // Verify local file exists
-        var fullPath = _storage.ResolvePath(Path.Combine("uploading", att.LocalUploadingPath));
+        var fullPath = _storage.ResolvePath(att.OwnerUserId, Path.Combine("uploading", att.LocalUploadingPath));
         if (!File.Exists(fullPath))
         {
             await _db.UpdateAttachmentStatusAsync(att.OwnerUserId, att.AttachmentId, att.ClientAttachmentId, AttachmentStatus.Abandoned, null, "Local file lost").ConfigureAwait(false);
@@ -121,7 +121,7 @@ public sealed class AttachmentRecoveryService
 
         // Re-upload from local file
         AttachmentUploadResult result;
-        await using (var stream = _storage.OpenUploadingRead(att.LocalUploadingPath))
+        await using (var stream = _storage.OpenUploadingRead(att.OwnerUserId, att.LocalUploadingPath))
         {
             result = await _attachments.UploadAndConfirmAsync(
                     stream, att.ContentType, att.SizeBytes, att.FileName,
@@ -139,12 +139,12 @@ public sealed class AttachmentRecoveryService
         // 九2: 上传成功后将临时文件转为下载缓存，避免再次打开仍需网络下载。
         try
         {
-            att.LocalCachePath = _storage.MoveToDownloads(att.LocalUploadingPath!, result.AttachmentId, att.FileName ?? "file");
+            att.LocalCachePath = _storage.MoveToDownloads(att.OwnerUserId, att.LocalUploadingPath!, result.AttachmentId, att.FileName ?? "file");
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Failed to move recovered file to downloads cache");
-            _storage.DeleteUploadingFile(att.LocalUploadingPath);
+            _storage.DeleteUploadingFile(att.OwnerUserId, att.LocalUploadingPath);
         }
 
         await _db.UpsertAttachmentAsync(att).ConfigureAwait(false);
@@ -153,3 +153,4 @@ public sealed class AttachmentRecoveryService
         Log.Information("Attachment upload recovered AttachmentId={AttachmentId}", result.AttachmentId);
     }
 }
+

@@ -6,7 +6,7 @@ namespace UnitTests;
 /// <summary>
 /// 敏感令牌静态保护器测试。
 /// Windows：DPAPI 加解密往返一致；空值直通；密文与明文不同（非 Base64 的明文不落库）。
-/// 非 Windows：不支持 DPAPI，原样直通（开发环境）。
+/// 非 Windows：拒绝持久化（Protect 返回 null，自动登录禁用）；不信任存量明文（Unprotect 返回 null）。
 /// </summary>
 public class SecretProtectorTests
 {
@@ -26,8 +26,9 @@ public class SecretProtectorTests
         }
         else
         {
-            Assert.Equal(plain, protectedValue);
-            Assert.Equal(plain, restored);
+            // 非 Windows：拒绝持久化 + 不信任明文
+            Assert.Null(protectedValue);
+            Assert.Null(restored);
         }
     }
 

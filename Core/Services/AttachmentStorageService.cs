@@ -16,21 +16,19 @@ namespace Core.Services;
 /// </summary>
 public sealed class AttachmentStorageService : IAttachmentStorageService
 {
-    private readonly ICurrentUserContext _currentUserContext;
     private readonly string _basePath;
 
     // 下载缓存治理：容量上限与并发下载合并。
     private const long MaxCacheBytes = 512L * 1024 * 1024; // 512MB
     private const int CacheVersion = 2;
     private const string CacheVersionFile = "cache.version";
-    // 同一 AttachmentId 的并发下载合并：key = attachmentId, value = 进行中的写入任务。
+    // 同一 (Owner, AttachmentId, append) 的并发下载合并：key = 合并键, value = 进行中的写入任务。
     private static readonly ConcurrentDictionary<string, Task<string>> _inFlightDownloads = new();
-    // 每账户缓存版本只校验一次：登录前 UserId=0 的目录不能抢占首次校验。
+    // 每账户缓存版本只校验一次。
     private readonly ConcurrentDictionary<long, byte> _cacheVersionChecked = new();
 
     public AttachmentStorageService(ICurrentUserContext currentUserContext, string? basePath = null)
     {
-        _currentUserContext = currentUserContext;
         _basePath = basePath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
@@ -67,46 +65,42 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         }
     }
 
-    private string OwnerDir
+    /// <summary>指定 owner 的附件根目录（路径方法全部显式携带 owner，不依赖全局当前用户）。</summary>
+    private static string OwnerDirOf(string basePath, long ownerUserId)
     {
-        get
-        {
-            var owner = _currentUserContext.UserId ?? 0;
-            var dir = Path.Combine(_basePath, owner.ToString());
-            Directory.CreateDirectory(dir);
-            return dir;
-        }
-    }
-
-    public string GetAttachmentsRoot() => OwnerDir;
-
-    public string GetUploadingDir()
-    {
-        var dir = Path.Combine(OwnerDir, "uploading");
+        var dir = Path.Combine(basePath, ownerUserId.ToString());
         Directory.CreateDirectory(dir);
         return dir;
     }
 
-    public string GetDownloadsDir()
+    public string GetAttachmentsRoot(long ownerUserId) => OwnerDirOf(_basePath, ownerUserId);
+
+    public string GetUploadingDir(long ownerUserId)
     {
-        var dir = Path.Combine(OwnerDir, "downloads");
+        var dir = Path.Combine(OwnerDirOf(_basePath, ownerUserId), "uploading");
         Directory.CreateDirectory(dir);
-        // 版本校验延迟到首次使用（登录后）执行：登录前 UserId 为 0，
-        // 若在构造时校验会针对用户 0 目录误操作真实用户缓存。
-        if (_cacheVersionChecked.TryAdd(_currentUserContext.UserId ?? 0, 0))
+        return dir;
+    }
+
+    public string GetDownloadsDir(long ownerUserId)
+    {
+        var dir = Path.Combine(OwnerDirOf(_basePath, ownerUserId), "downloads");
+        Directory.CreateDirectory(dir);
+        if (_cacheVersionChecked.TryAdd(ownerUserId, 0))
             EnsureCacheVersion(dir);
         return dir;
     }
 
-    public string GetThumbnailsDir()
+    public string GetThumbnailsDir(long ownerUserId)
     {
-        var dir = Path.Combine(OwnerDir, "thumbnails");
+        var dir = Path.Combine(OwnerDirOf(_basePath, ownerUserId), "thumbnails");
         Directory.CreateDirectory(dir);
         return dir;
     }
-    public string CopyToUploading(string sourceFilePath, string fileName)
+
+    public string CopyToUploading(long ownerUserId, string sourceFilePath, string fileName)
     {
-        var uploadingDir = GetUploadingDir();
+        var uploadingDir = GetUploadingDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
         var uniqueName = $"{Guid.NewGuid():N}_{safeName}";
         var fullPath = Path.Combine(uploadingDir, uniqueName);
@@ -114,9 +108,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return Path.GetFileName(fullPath);
     }
 
-    public async Task<string> WriteToUploadingAsync(Stream content, string fileName, CancellationToken ct = default)
+    public async Task<string> WriteToUploadingAsync(long ownerUserId, Stream content, string fileName, CancellationToken ct = default)
     {
-        var uploadingDir = GetUploadingDir();
+        var uploadingDir = GetUploadingDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
         var uniqueName = $"{Guid.NewGuid():N}_{safeName}";
         var fullPath = Path.Combine(uploadingDir, uniqueName);
@@ -129,9 +123,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     /// 将源流写入上传临时目录，同时在同一次读取中增量计算 SHA-256。
     /// 源流仅读取一次，避免“先算 hash 再复制”的重复 IO。
     /// </summary>
-    public async Task<(string relativePath, string sha256)> WriteToUploadingWithHashAsync(Stream content, string fileName, CancellationToken ct = default)
+    public async Task<(string relativePath, string sha256)> WriteToUploadingWithHashAsync(long ownerUserId, Stream content, string fileName, CancellationToken ct = default)
     {
-        var uploadingDir = GetUploadingDir();
+        var uploadingDir = GetUploadingDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
         var uniqueName = $"{Guid.NewGuid():N}_{safeName}";
         var fullPath = Path.Combine(uploadingDir, uniqueName);
@@ -151,22 +145,22 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return (Path.GetFileName(fullPath), ToHexLower(sha.Hash!));
     }
 
-    public string ResolvePath(string relativePath)
+    public string ResolvePath(long ownerUserId, string relativePath)
     {
-        return SafeResolve(OwnerDir, relativePath);
+        return SafeResolve(OwnerDirOf(_basePath, ownerUserId), relativePath);
     }
 
-    public Stream OpenUploadingRead(string relativePath)
+    public Stream OpenUploadingRead(long ownerUserId, string relativePath)
     {
-        var fullPath = SafeResolve(GetUploadingDir(), relativePath);
+        var fullPath = SafeResolve(GetUploadingDir(ownerUserId), relativePath);
         return new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
     }
 
-    public void DeleteUploadingFile(string relativePath)
+    public void DeleteUploadingFile(long ownerUserId, string relativePath)
     {
         try
         {
-            var fullPath = SafeResolve(GetUploadingDir(), relativePath);
+            var fullPath = SafeResolve(GetUploadingDir(ownerUserId), relativePath);
             if (File.Exists(fullPath))
                 File.Delete(fullPath);
         }
@@ -175,13 +169,13 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             // 忽略删除失败
         }
     }
-    public string MoveToDownloads(string uploadingRelativePath, string attachmentId, string fileName)
+    public string MoveToDownloads(long ownerUserId, string uploadingRelativePath, string attachmentId, string fileName)
     {
-        var downloadsDir = GetDownloadsDir();
+        var downloadsDir = GetDownloadsDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
-        var destName = $"{HashAttachmentName(attachmentId)}_{safeName}";
+        var destName = $"{HashAttachmentName(ownerUserId, attachmentId)}_{safeName}";
         var destPath = Path.Combine(downloadsDir, destName);
-        var srcPath = SafeResolve(GetUploadingDir(), uploadingRelativePath);
+        var srcPath = SafeResolve(GetUploadingDir(ownerUserId), uploadingRelativePath);
         if (File.Exists(srcPath))
         {
             File.Move(srcPath, destPath, overwrite: true);
@@ -189,16 +183,16 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
         // 移动即访问：更新元数据并触发容量淘汰，避免新缓存被立即淘汰。
         try { File.SetLastAccessTimeUtc(destPath, DateTime.UtcNow); } catch { /* 忽略 */ }
-        EvictIfOverCapacity();
+        EvictIfOverCapacity(ownerUserId);
 
         return Path.GetFileName(destPath);
     }
 
-    public string? GetDownloadCachePath(string attachmentId, string fileName)
+    public string? GetDownloadCachePath(long ownerUserId, string attachmentId, string fileName)
     {
-        var downloadsDir = GetDownloadsDir();
+        var downloadsDir = GetDownloadsDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
-        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(attachmentId)}_{safeName}");
+        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(ownerUserId, attachmentId)}_{safeName}");
         if (File.Exists(path))
         {
             // 缓存命中即更新访问元数据，保证 LRU 淘汰按真实使用顺序执行。
@@ -208,11 +202,11 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return null;
     }
 
-    public string? GetPartialDownloadPath(string attachmentId, string fileName)
+    public string? GetPartialDownloadPath(long ownerUserId, string attachmentId, string fileName)
     {
-        var downloadsDir = GetDownloadsDir();
+        var downloadsDir = GetDownloadsDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
-        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(attachmentId)}_{safeName}.partial");
+        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(ownerUserId, attachmentId)}_{safeName}.partial");
         if (!File.Exists(path))
             return null;
         var info = new FileInfo(path);
@@ -221,11 +215,11 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     }
 
     public async Task<string> WriteToDownloadsAsync(
-        string attachmentId, string fileName, Stream content, CancellationToken ct = default,
+        long ownerUserId, string attachmentId, string fileName, Stream content, CancellationToken ct = default,
         string? expectedSha256 = null, bool append = false)
     {
-        // 同一 (AttachmentId, append) 的并发下载合并：复用进行中的写入任务，避免重复下载。
-        var coalesceKey = $"{_currentUserContext.UserId ?? 0}:{attachmentId}:{(append ? 1 : 0)}";
+        // 同一 (Owner, AttachmentId, append) 的并发下载合并：复用进行中的写入任务，避免重复下载。
+        var coalesceKey = $"{ownerUserId}:{attachmentId}:{(append ? 1 : 0)}";
         var existing = _inFlightDownloads.GetValueOrDefault(coalesceKey);
         if (existing is not null)
         {
@@ -233,9 +227,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             catch { /* 上一次失败，继续本次写入 */ }
         }
 
-        var downloadsDir = GetDownloadsDir();
+        var downloadsDir = GetDownloadsDir(ownerUserId);
         var safeName = SanitizeFileName(fileName);
-        var destName = $"{HashAttachmentName(attachmentId)}_{safeName}";
+        var destName = $"{HashAttachmentName(ownerUserId, attachmentId)}_{safeName}";
         var fullPath = Path.Combine(downloadsDir, destName);
         var partialPath = fullPath + ".partial";
 
@@ -244,12 +238,12 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
         try
         {
-        // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
-        // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
-        var written = 0L;
-        if (append && !File.Exists(partialPath))
-            throw new IOException("续传目标 partial 不存在");
-        var mode = append ? FileMode.Append : FileMode.Create;
+            // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
+            // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
+            var written = 0L;
+            if (append && !File.Exists(partialPath))
+                throw new IOException("续传目标 partial 不存在");
+            var mode = append ? FileMode.Append : FileMode.Create;
             await using (var fs = new FileStream(partialPath, mode, FileAccess.Write, FileShare.None, 65536, useAsync: true))
             {
                 var buffer = new byte[65536];
@@ -287,7 +281,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
             // 写入成功后更新访问时间并触发 LRU 清理。
             File.SetLastAccessTimeUtc(fullPath, DateTime.UtcNow);
-            EvictIfOverCapacity();
+            EvictIfOverCapacity(ownerUserId);
 
             tcs.TrySetResult(fullPath);
             return fullPath;
@@ -320,11 +314,11 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     }
 
     /// <summary>LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。</summary>
-    private void EvictIfOverCapacity()
+    private void EvictIfOverCapacity(long ownerUserId)
     {
         try
         {
-            var dir = GetDownloadsDir();
+            var dir = GetDownloadsDir(ownerUserId);
             var files = Directory.GetFiles(dir)
                 .Where(f => !Path.GetFileName(f).Equals(CacheVersionFile, StringComparison.Ordinal))
                 .Select(f => new FileInfo(f))
@@ -354,7 +348,7 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         try
         {
-            var root = Path.GetPathRoot(OwnerDir);
+            var root = Path.GetPathRoot(_basePath);
             if (string.IsNullOrWhiteSpace(root))
                 return null;
             var drive = new DriveInfo(root);
@@ -381,9 +375,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     /// 远端 Id 派生本地文件名主段：SHA256(ownerId:attachmentId)。
     /// 远端 Id 绝不可直接用作路径段（可含 ../ 等造成路径穿越）。
     /// </summary>
-    private string HashAttachmentName(string attachmentId)
+    private static string HashAttachmentName(long ownerUserId, string attachmentId)
     {
-        var input = $"{_currentUserContext.UserId ?? 0}:{attachmentId}";
+        var input = $"{ownerUserId}:{attachmentId}";
         return ToHexLower(SHA256.HashData(Encoding.UTF8.GetBytes(input)));
     }
 
@@ -409,3 +403,5 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return sb.ToString();
     }
 }
+
+

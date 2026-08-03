@@ -202,8 +202,10 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
     {
         _attempt = 0;
         Status = ChatConnectionStatus.Connected;
-        _currentUserState.SetCurrentUser(userId, _currentUserState.UserName);
-        _currentUserState.SetSession(_pendingSessionId, _pendingDeviceIdHash);
+        // 原子设置完整鉴权会话：同一账户重连不递增账户代际，仅记录连接代际。
+        _currentUserState.SetAuthenticatedSession(
+            userId, _currentUserState.UserName, _pendingSessionId, _pendingDeviceIdHash,
+            _chatSessionClient.ConnectionGeneration);
         Log.Information("TCP 鉴权成功 OwnerUserId={Id}", userId);
         StartHeartbeat();
         Dispatcher.UIThread.Post(() =>
@@ -220,6 +222,8 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         // 鉴权失败通常需要重新登录，停止自动重连。
         _autoReconnectEnabled = false;
+        // 关键：必须关闭 TCP/TLS 连接与收发循环，否则 Socket 与接收任务泄漏打开。
+        _ = _chatSessionClient.DisconnectAsync("authentication_failed");
     }
 
     /// <summary>

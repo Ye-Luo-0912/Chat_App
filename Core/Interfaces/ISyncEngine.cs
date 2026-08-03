@@ -10,7 +10,8 @@ namespace Core.Interfaces;
 /// <summary>
 /// 独立数据同步引擎：鉴权成功后启动，从服务端拉取会话列表与消息水位，
 /// 全部持久化到本地 DB 后通过 <see cref="Completed"/> 事件通知 UI 投影。
-/// 每次 Start 会取消上一次同步任务（单任务/会话），重连/切账户时旧任务安全退出。
+/// 生命周期严格：RestartAsync 先取消并等待旧任务退出再启动新任务，
+/// 旧任务不得与新任务竞争或污染新会话。
 /// </summary>
 public interface ISyncEngine
 {
@@ -20,14 +21,30 @@ public interface ISyncEngine
     /// <summary>同步诊断信息。</summary>
     ISyncDiagnostics Diagnostics { get; }
 
-    /// <summary>启动一次完整同步。若已有任务在跑，先取消旧任务（旧任务静默退出，不触发事件）。</summary>
+    /// <summary>
+    /// 重启同步：严格等待旧任务退出（取消其 CTS 并等待完成）后再启动新任务。
+    /// 重连/切账户时旧任务的 DB 访问与 RPC 不会与新任务竞争。
+    /// </summary>
+    Task RestartAsync(SessionStamp session, CancellationToken ct = default);
+
+    /// <summary>启动一次同步（仅当无任务在运行时启动；已运行则忽略）。测试/简单场景用。</summary>
     void Start(SessionStamp session, CancellationToken ct = default);
 
-    /// <summary>停止当前同步任务（会话停止/退出登录/应用退出时调用）。幂等。</summary>
-    void Stop();
+    /// <summary>停止当前同步任务并等待其退出。幂等。</summary>
+    Task StopAsync();
 
-    /// <summary>同步完成（成功或失败）后触发。UI 层订阅此事件做投影更新。</summary>
+    /// <summary>同步完成（成功/部分完成/失败）后触发。UI 层订阅此事件做投影更新。</summary>
     event EventHandler<SyncCompletedEventArgs>? Completed;
+}
+
+/// <summary>同步结果类型。</summary>
+public enum SyncOutcome
+{
+    /// <summary>完整成功：所有预算内的数据已同步完毕。</summary>
+    Completed,
+
+    /// <summary>预算上限截断（会话列表/历史页数达到上限）：部分数据待续同步，不得视为完整成功。</summary>
+    PartialLimitReached
 }
 
 /// <summary>一次同步的结果：会话列表与各会话 catch-up（内存引用，同进程消费）。</summary>
@@ -43,6 +60,9 @@ public sealed class SyncCompletedEventArgs : EventArgs
     public IReadOnlyList<ConversationHistoryCatchUpDto> CatchUps { get; init; } = [];
 
     public bool Succeeded { get; init; }
+
+    /// <summary>同步结果类型：PartialLimitReached 表示预算截断，需要后续继续同步。</summary>
+    public SyncOutcome Outcome { get; init; } = SyncOutcome.Completed;
 
     public string? ErrorCode { get; init; }
 

@@ -79,31 +79,82 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
 
     public event EventHandler<SyncCompletedEventArgs>? Completed;
 
+    /// <summary>
+    /// 重启同步：严格取消并等待旧任务退出后启动新任务。
+    /// 旧任务即使已发出 RPC/占用 DB，也在启动新任务前完成收尾，避免竞争与跨会话污染。
+    /// </summary>
+    public async Task RestartAsync(SessionStamp session, CancellationToken ct = default)
+    {
+        Task? oldTask;
+        CancellationTokenSource? oldCts;
+        lock (_startLock)
+        {
+            oldCts = _syncCts;
+            oldTask = _syncTask;
+            _syncCts = null;
+            _syncTask = null;
+        }
+        oldCts?.Cancel();
+        if (oldTask is not null)
+        {
+            try
+            {
+                // 严格等待旧任务退出（旧任务的 Completed 事件可能已触发，由订阅方按 SessionStamp 过滤）。
+                await oldTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // 旧任务异常已在 RunAsync 内部捕获；此处仅等待退出。
+            }
+            oldCts?.Dispose();
+        }
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        lock (_startLock)
+        {
+            _syncCts = cts;
+            _syncTask = Task.Run(() => RunAsync(session, cts.Token));
+        }
+    }
+
+    /// <summary>启动一次同步（仅当无任务在运行时启动；已运行则忽略）。</summary>
     public void Start(SessionStamp session, CancellationToken ct = default)
     {
         lock (_startLock)
         {
+            if (_syncTask is { IsCompleted: false })
+                return;
             var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var oldCts = _syncCts;
             _syncCts = cts;
-            oldCts?.Cancel();
-            oldCts?.Dispose();
             _syncTask = Task.Run(() => RunAsync(session, cts.Token));
         }
     }
 
     /// <summary>
-    /// 停止当前同步任务：取消旧 CTS 并清引用，供会话停止/退出登录/应用退出调用。
-    /// 与 Start 幂等：未运行时调用无副作用。
+    /// 停止当前同步任务并等待其退出。幂等。
     /// </summary>
-    public void Stop()
+    public async Task StopAsync()
     {
+        Task? oldTask;
+        CancellationTokenSource? oldCts;
         lock (_startLock)
         {
-            var oldCts = _syncCts;
+            oldCts = _syncCts;
+            oldTask = _syncTask;
             _syncCts = null;
             _syncTask = null;
-            oldCts?.Cancel();
+        }
+        oldCts?.Cancel();
+        if (oldTask is not null)
+        {
+            try
+            {
+                await oldTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // 旧任务异常已内部处理；此处仅等待退出。
+            }
             oldCts?.Dispose();
         }
     }
@@ -141,6 +192,9 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             var conversations = new List<ConversationListItemDto>(sync.Conversations);
             var catchUps = new List<ConversationHistoryCatchUpDto>(sync.CatchUps);
 
+            // 预算截断标记：会话列表或历史续页达到页数上限且服务端仍有更多 → Partial（不得静默成功）。
+            var partial = false;
+
             // 3. 持久化会话列表 + 继续翻页
             foreach (var item in conversations)
                 await PersistConversationAsync(session, item, ct).ConfigureAwait(false);
@@ -166,6 +220,8 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 if (!resp.HasMore || resp.NextCursor is null)
                     break;
                 listCursor = resp.NextCursor;
+                if (page == MaxConversationPages - 1)
+                    partial = true; // 达到会话列表页数上限且仍有更多
             }
 
             // 4. 持久化 catch-up（forward 方向：以正向水位判定 + 推进水位）+ 对仍有更多的会话继续拉历史
@@ -193,6 +249,8 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                     if (!resp.HasMore || resp.NextCursor is null)
                         break;
                     cursor = resp.NextCursor;
+                    if (page == MaxCatchUpPagesPerConversation - 1)
+                        partial = true; // 达到单会话历史页数上限且仍有更多
                 }
             }
 
@@ -202,7 +260,8 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 Session = session,
                 Conversations = conversations,
                 CatchUps = catchUps,
-                Succeeded = true
+                Succeeded = true,
+                Outcome = partial ? SyncOutcome.PartialLimitReached : SyncOutcome.Completed
             });
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

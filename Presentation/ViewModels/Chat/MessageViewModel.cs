@@ -1666,7 +1666,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 await using (var sourceStream = await picked.OpenReadAsync(ct).ConfigureAwait(true))
                 {
-                    var (relPath, hash) = await _storage.WriteToUploadingWithHashAsync(sourceStream, picked.FileName, ct).ConfigureAwait(true);
+                    var (relPath, hash) = await _storage.WriteToUploadingWithHashAsync(_currentUserContext.RequireUserId(), sourceStream, picked.FileName, ct).ConfigureAwait(true);
                     uploadingRelativePath = relPath;
                     sha256 = hash;
                 }
@@ -1687,7 +1687,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     if (existing is not null && !string.IsNullOrWhiteSpace(existing.AttachmentId))
                     {
                         // 命中去重，删除刚创建的临时文件
-                        _storage.DeleteUploadingFile(uploadingRelativePath);
+                        _storage.DeleteUploadingFile(_currentUserContext.RequireUserId(), uploadingRelativePath);
                         uploadingRelativePath = null;
                         AddPendingAttachment(new PendingAttachment
                         {
@@ -1740,7 +1740,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             });
 
             AttachmentUploadResult result;
-            await using (var uploadStream = _storage.OpenUploadingRead(uploadingRelativePath))
+            await using (var uploadStream = _storage.OpenUploadingRead(_currentUserContext.RequireUserId(), uploadingRelativePath))
             {
                 result = await _attachments.UploadAndConfirmAsync(
                         uploadStream, picked.ContentType, picked.ContentLength, picked.FileName,
@@ -1761,12 +1761,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
             string? localCachePath = null;
             try
             {
-                localCachePath = _storage.MoveToDownloads(uploadingRelativePath, result.AttachmentId, result.OriginalName ?? picked.FileName);
+                localCachePath = _storage.MoveToDownloads(_currentUserContext.RequireUserId(), uploadingRelativePath, result.AttachmentId, result.OriginalName ?? picked.FileName);
             }
             catch (Exception ex)
             {
                 Log.Warning(ex, "Failed to move uploaded file to downloads cache");
-                _storage.DeleteUploadingFile(uploadingRelativePath);
+                _storage.DeleteUploadingFile(_currentUserContext.RequireUserId(), uploadingRelativePath);
             }
             uploadingRelativePath = null;
 
@@ -2187,3 +2187,4 @@ public sealed class PendingAttachment
     public string ContentType { get; init; } = "application/octet-stream";
     public long SizeBytes { get; init; }
 }
+

@@ -163,15 +163,21 @@ public class TlsLoopbackTests
         using var cert = CreateSelfSignedCertificate("localhost");
         var server = new TlsServer(cert);
         using var client = new TcpClientExample();
-        // 不设置回调：走系统默认严格校验
-
-        await Assert.ThrowsAnyAsync<Exception>(() => client.ConnectAsync(new ServerEndpoint
+        // 不注入任何宽松回调、不修改吊销模式：生产默认（系统信任链 + Online 吊销）必须拒绝自签。
+        try
         {
-            ServerIpAddress = "127.0.0.1",
-            ServerPort = server.Port,
-            UseTls = true,
-            TlsServerName = "localhost"
-        }).WaitAsync(TimeSpan.FromSeconds(10)));
+            await client.ConnectAsync(new ServerEndpoint
+            {
+                ServerIpAddress = "127.0.0.1",
+                ServerPort = server.Port,
+                UseTls = true,
+                TlsServerName = "localhost"
+            }).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (AuthenticationException)
+        {
+            // 预期：握手因证书链不可信失败
+        }
 
         Assert.False(client.IsConnected);
         await server.DisposeAsync();

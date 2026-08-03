@@ -142,7 +142,7 @@ public sealed class UserSessionOrchestrator : IDisposable
                 return;
 
             _sessionRunning = false;
-            _syncEngine.Stop();
+            await _syncEngine.StopAsync().ConfigureAwait(false);
             _outboxProcessor.Stop();
             _friendStore.Reset();
             await _connectionCoordinator.StopAsync().ConfigureAwait(false);
@@ -161,7 +161,9 @@ public sealed class UserSessionOrchestrator : IDisposable
     {
         Log.Information("会话编排器：鉴权成功 OwnerUserId={Id}，启动会话服务", userId);
 
-        _syncEngine.Start(_chatSession.CurrentSession);
+        // 严格重启：等待旧同步任务退出后再启动，避免旧任务竞争/污染新会话。
+        var session = _chatSession.CurrentSession;
+        _ = RestartSyncSafeAsync(session);
 
         // 好友增量同步：与通讯录页共享 FriendStore，同步完成后两处 UI 统一刷新。
         _ = Task.Run(() => _friendStore.SyncFromServerAsync());
@@ -171,6 +173,55 @@ public sealed class UserSessionOrchestrator : IDisposable
             _ = _attachmentRecovery.RecoverFailedUploadsAsync(ownerUserId);
 
         Dispatcher.UIThread.Post(() => SessionStarted?.Invoke(this, EventArgs.Empty));
+    }
+
+    /// <summary>
+    /// 重启同步并处理 Partial 结果：预算截断（大账户会话/历史超限）时延迟继续同步，
+    /// 直到完整完成或会话停止——绝不静默接受不完整同步。
+    /// </summary>
+    private async Task RestartSyncSafeAsync(Core.Models.SessionStamp session)
+    {
+        try
+        {
+            var first = true;
+            while (_sessionRunning)
+            {
+                if (!first)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                    if (!_sessionRunning)
+                        return;
+                }
+                first = false;
+
+                var tcs = new TaskCompletionSource<Core.Interfaces.SyncCompletedEventArgs>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                void Handler(object? s, Core.Interfaces.SyncCompletedEventArgs e)
+                {
+                    if (e.Session == session)
+                        tcs.TrySetResult(e);
+                }
+                _syncEngine.Completed += Handler;
+                try
+                {
+                    await _syncEngine.RestartAsync(session).ConfigureAwait(false);
+                    var result = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+                    if (!result.Succeeded)
+                        return; // 同步失败：由重连/下次鉴权再次触发
+                    if (result.Outcome != Core.Interfaces.SyncOutcome.PartialLimitReached)
+                        return; // 完整完成
+                    Log.Information("同步预算截断（Partial），延迟继续同步");
+                }
+                finally
+                {
+                    _syncEngine.Completed -= Handler;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "同步重启失败（会话可能已停止）");
+        }
     }
 
     /// <summary>令牌刷新失败/过期：统一停止会话（TCP/同步/Outbox），UI 应回到登录页。</summary>

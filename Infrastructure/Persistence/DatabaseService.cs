@@ -1465,6 +1465,31 @@ public class DatabaseService(
         return affected;
     }
 
+    /// <summary>
+    /// 主动释放一批 Outbox 条目租约（Sending → Queued）：处理器停止时调用，
+    /// 使尚未开始发送的条目无需等待租约过期即可重新发送。
+    /// 仅释放 AttemptId 匹配的条目（防止误释放他人正在发送的租约）。返回释放条数。
+    /// </summary>
+    public Task<int> ReleaseOutboxLeasesAsync(long ownerUserId, IReadOnlyList<string> clientMessageIds, string attemptId) =>
+        WriteAsync(() => ReleaseOutboxLeasesAsyncImpl(ownerUserId, clientMessageIds, attemptId));
+
+    private async Task<int> ReleaseOutboxLeasesAsyncImpl(long ownerUserId, IReadOnlyList<string> clientMessageIds, string attemptId)
+    {
+        if (clientMessageIds.Count == 0)
+            return 0;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.OutboxMessages
+            .Where(o => o.OwnerUserId == ownerUserId
+                     && o.Status == OutboxStatus.Sending
+                     && o.AttemptId == attemptId
+                     && clientMessageIds.Contains(o.ClientMessageId))
+            .ExecuteUpdateAsync(o => o
+                .SetProperty(x => x.Status, OutboxStatus.Queued)
+                .SetProperty(x => x.AttemptId, (string?)null)
+                .SetProperty(x => x.AttemptStartedAt, (DateTime?)null)
+                .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
+    }
+
     // ---- 群聊领域仓储 ----
 
     /// <summary>
@@ -1524,7 +1549,30 @@ public class DatabaseService(
             CreatedAt = now,
             UpdatedAt = now
         });
-        await db.SaveChangesAsync(None);
+        try
+        {
+            await db.SaveChangesAsync(None);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            // 并发插入冲突（多设备同时加入同一成员）：行已存在，
+            // 以已存在行的版本单调语义重新应用本次事件（时间更晚则更新角色）。
+            var raced = await db.GroupMembers
+                .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId
+                                       && m.ConversationId == conversationId
+                                       && m.UserId == userId, None);
+            if (raced is null)
+                return false;
+            if (occurredAtMs > raced.JoinedAtMs)
+            {
+                raced.Role = role;
+                raced.JoinedAtMs = occurredAtMs;
+                raced.Revision = revision;
+                raced.RemovedAtMs = null;
+                raced.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(None);
+            }
+        }
         return true;
     }
 

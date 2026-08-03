@@ -96,7 +96,7 @@ public class AttachmentResumeDownloadTests : IDisposable
         Assert.Equal(_attachments.Payload, File.ReadAllBytes(second!));
 
         // 完成后不得残留 partial。
-        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(), "*.partial").Any());
+        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(OwnerId), "*.partial").Any());
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class AttachmentResumeDownloadTests : IDisposable
 
         Assert.NotNull(result);
         Assert.Equal(_attachments.Payload, File.ReadAllBytes(result!));
-        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(), "*.partial").Any());
+        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(OwnerId), "*.partial").Any());
     }
 
     [Fact]
@@ -139,7 +139,7 @@ public class AttachmentResumeDownloadTests : IDisposable
         Assert.True(_attachments.RangeRequestCount >= 1);
         Assert.True(_attachments.FullRequestCount >= 1);
         Assert.Equal(_attachments.Payload.Length, new FileInfo(result!).Length);
-        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(), "*.partial").Any());
+        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(OwnerId), "*.partial").Any());
     }
 
     [Fact]
@@ -159,7 +159,7 @@ public class AttachmentResumeDownloadTests : IDisposable
         Assert.Equal(_attachments.Payload, File.ReadAllBytes(result!));
         Assert.Equal(1, _attachments.Range416Count);
         Assert.True(_attachments.FullRequestCount >= 1);
-        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(), "*.partial").Any());
+        Assert.False(Directory.EnumerateFiles(_storage.GetDownloadsDir(OwnerId), "*.partial").Any());
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public class AttachmentResumeDownloadTests : IDisposable
     private string PartialPath()
     {
         var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{OwnerId}:{AttachmentId}")));
-        return Path.Combine(_storage.GetDownloadsDir(), $"{hash}_{FileName}.partial");
+        return Path.Combine(_storage.GetDownloadsDir(OwnerId), $"{hash}_{FileName}.partial");
     }
 
     private async Task SeedExpectedSha256Async()
@@ -358,5 +358,6 @@ public class AttachmentResumeDownloadTests : IDisposable
             => Task.FromResult(CreateDbContext());
     }
 }
+
 
 

@@ -8,7 +8,11 @@ namespace Chat_App.Infrastructure.Identity;
 /// <summary>
 /// 本地敏感信息（AccessToken/RefreshToken）的静态保护器。
 /// Windows 平台使用 DPAPI（当前用户作用域 + 应用熵）加密后落库，
-/// 明文不出现在 SQLite 文件中；非 Windows 平台无 OS 级保护，保持原样并警告。
+/// 明文不出现在 SQLite 文件中。
+/// 非 Windows 平台（macOS/Linux）无 OS 级密钥存储：拒绝持久化明文令牌
+/// （Protect 返回 null，令牌仅驻留内存，重启后自动登录禁用），
+/// 且不信任存量明文（Unprotect 返回 null，强制重新登录）——
+/// 明文落库不能作为正式安全方案。
 /// 加密值以 Base64 存储；解密失败视为数据损坏，返回 null 交由上层走重新登录。
 /// </summary>
 public static class SecretProtector
@@ -23,8 +27,9 @@ public static class SecretProtector
             return plaintext;
         if (!OperatingSystem.IsWindows())
         {
-            Log.Warning("当前平台不支持 DPAPI，敏感令牌将明文存储（仅限非 Windows 开发环境）");
-            return plaintext;
+            // 无 OS 级安全存储：拒绝明文落库，自动登录随之禁用（令牌仅内存驻留）。
+            Log.Warning("当前平台无安全密钥存储（DPAPI 仅 Windows），令牌不持久化，自动登录禁用");
+            return null;
         }
 
         var bytes = ProtectedData.Protect(
@@ -37,7 +42,11 @@ public static class SecretProtector
         if (string.IsNullOrEmpty(stored))
             return stored;
         if (!OperatingSystem.IsWindows())
-            return stored;
+        {
+            // 不信任非 Windows 存量明文（历史版本可能落库）：强制重新登录。
+            Log.Warning("非 Windows 平台检测到存量令牌，为安全起见拒绝使用，请重新登录");
+            return null;
+        }
 
         try
         {

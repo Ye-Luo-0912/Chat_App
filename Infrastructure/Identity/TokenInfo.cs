@@ -175,6 +175,9 @@ public class TokenInfo
                 _currentUserState.SetCurrentUser(stored.UserId, localUser?.Username);
             }
 
+            // 令牌刷新：令牌代际递增（供令牌依赖方判断刷新轮次，不改变账户代际）。
+            _currentUserState.BumpTokenGeneration();
+
             return true;
         }
         catch (OperationCanceledException)

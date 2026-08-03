@@ -53,10 +53,12 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
     public async Task<string?> GetOrDownloadAsync(
         string attachmentId, string fileName, string? downloadApiHint, CancellationToken ct = default)
     {
+        var owner = _currentUserContext.UserId ?? 0;
+
         // 1. 缓存优先：命中即返回（存储层已顺带更新 LRU 访问元数据）。
         try
         {
-            var cached = _storage.GetDownloadCachePath(attachmentId, fileName);
+            var cached = _storage.GetDownloadCachePath(owner, attachmentId, fileName);
             if (cached is not null)
                 return cached;
         }
@@ -65,14 +67,13 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             Log.Warning(ex, "查询下载缓存失败 AttachmentId={AttachmentId}", attachmentId);
         }
 
-        var owner = _currentUserContext.UserId ?? 0;
         var key = $"{owner}:{attachmentId}";
 
         // 2. 惰性 single-flight 合并：只有字典 winner 才执行 DownloadAndCacheAsync。
         //    共享下载不受调用方取消影响（调用方取消只中断自己的等待）。
         var lazy = _inFlight.GetOrAdd(key,
             _ => new Lazy<Task<string?>>(
-                () => DownloadAndCacheAsync(attachmentId, fileName, downloadApiHint, CancellationToken.None),
+                () => DownloadAndCacheAsync(owner, attachmentId, fileName, downloadApiHint, CancellationToken.None),
                 LazyThreadSafetyMode.ExecutionAndPublication));
 
         try
@@ -87,7 +88,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
     }
 
     private async Task<string?> DownloadAndCacheAsync(
-        string attachmentId, string fileName, string? downloadApiHint, CancellationToken ct)
+        long owner, string attachmentId, string fileName, string? downloadApiHint, CancellationToken ct)
     {
         var hint = !string.IsNullOrWhiteSpace(downloadApiHint) ? downloadApiHint : attachmentId;
         try
@@ -95,7 +96,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             var expectedSha256 = await TryGetAttachmentSha256Async(attachmentId).ConfigureAwait(false);
 
             // 断点续传：已有 .partial 则按已写字节数发起 Range 请求续传。
-            var partialPath = _storage.GetPartialDownloadPath(attachmentId, fileName);
+            var partialPath = _storage.GetPartialDownloadPath(owner, attachmentId, fileName);
             var append = false;
             long? resumeFrom = null;
             if (partialPath is not null)
@@ -113,7 +114,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
                     append = false;
 
                 var path = await _storage.WriteToDownloadsAsync(
-                        attachmentId, fileName, result.Content, ct, expectedSha256, append)
+                        owner, attachmentId, fileName, result.Content, ct, expectedSha256, append)
                     .ConfigureAwait(false);
 
                 await TryUpdateAttachmentCachePathAsync(attachmentId, path).ConfigureAwait(false);
@@ -135,7 +136,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             Log.Warning(ex, "断点续传范围无效，重置后整文件重下 AttachmentId={AttachmentId}", attachmentId);
             try
             {
-                var stalePartial = _storage.GetPartialDownloadPath(attachmentId, fileName);
+                var stalePartial = _storage.GetPartialDownloadPath(owner, attachmentId, fileName);
                 if (stalePartial is not null)
                     File.Delete(stalePartial);
             }
@@ -143,7 +144,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             {
                 Log.Debug(cleanupEx, "清理无效 partial 失败");
             }
-            return await DownloadFreshAsync(attachmentId, fileName, hint, ct).ConfigureAwait(false);
+            return await DownloadFreshAsync(owner, attachmentId, fileName, hint, ct).ConfigureAwait(false);
         }
         catch (IOException ex) when (ex.Message.Contains("哈希校验失败", StringComparison.Ordinal))
         {
@@ -151,7 +152,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             Log.Warning(ex, "续传结果哈希校验失败，重置后整文件重下 AttachmentId={AttachmentId}", attachmentId);
             try
             {
-                var stalePartial = _storage.GetPartialDownloadPath(attachmentId, fileName);
+                var stalePartial = _storage.GetPartialDownloadPath(owner, attachmentId, fileName);
                 if (stalePartial is not null)
                     File.Delete(stalePartial);
             }
@@ -159,7 +160,7 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
             {
                 Log.Debug(cleanupEx, "清理损坏 partial 失败");
             }
-            return await DownloadFreshAsync(attachmentId, fileName, hint, ct).ConfigureAwait(false);
+            return await DownloadFreshAsync(owner, attachmentId, fileName, hint, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -170,14 +171,14 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
 
     /// <summary>不带 Range 的整文件下载（续传校验失败后的兜底路径）。</summary>
     private async Task<string?> DownloadFreshAsync(
-        string attachmentId, string fileName, string hint, CancellationToken ct)
+        long owner, string attachmentId, string fileName, string hint, CancellationToken ct)
     {
         var expectedSha256 = await TryGetAttachmentSha256Async(attachmentId).ConfigureAwait(false);
         var result = await _attachments.DownloadAsync(hint, ct: ct).ConfigureAwait(false);
         try
         {
             var path = await _storage.WriteToDownloadsAsync(
-                    attachmentId, fileName, result.Content, ct, expectedSha256, append: false)
+                    owner, attachmentId, fileName, result.Content, ct, expectedSha256, append: false)
                 .ConfigureAwait(false);
 
             await TryUpdateAttachmentCachePathAsync(attachmentId, path).ConfigureAwait(false);
@@ -224,3 +225,5 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         }
     }
 }
+
+

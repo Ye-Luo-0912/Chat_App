@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading.Channels;
 using Core.Interfaces;
 using Core.Models;
@@ -28,9 +29,16 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
 
     /// <summary>
     /// TLS 服务端证书校验回调。为 null 时使用系统默认信任链校验（生产默认严格校验）。
-    /// 开发/测试环境可注入宽松回调以信任自签证书。
+    /// 开发/测试环境可注入宽松回调以信任自签证书——注意：宽松回调仅限开发/测试，
+    /// 生产必须保持 null 并使用系统信任链；此回调与吊销检查独立，两者都需显式配置。
     /// </summary>
     public RemoteCertificateValidationCallback? RemoteCertificateValidationCallback { get; set; }
+
+    /// <summary>
+    /// 证书吊销检查模式。生产默认 Online（在线 CRL/OCSP 检查）；
+    /// 开发/测试使用自签证书时必须显式设为 NoCheck（与生产策略严格分离）。
+    /// </summary>
+    public X509RevocationMode RevocationMode { get; set; } = X509RevocationMode.Online;
 
     public bool IsConnected
     {
@@ -99,7 +107,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                 {
                     TargetHost = targetHost,
                     EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
-                    CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck
+                    CertificateRevocationCheckMode = RevocationMode
                 }, cts.Token).ConfigureAwait(false);
                 stream = sslStream;
             }

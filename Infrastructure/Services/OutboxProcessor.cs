@@ -42,7 +42,8 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
     private const int CleanupIntervalHours = 1;
     /// <summary>Sent/Cancelled 记录保留时长（天）。</summary>
     private const int SentRetentionDays = 7;
-    private const int BatchSize = 50;
+    /// <summary>单批认领条数：小批次降低停止时滞留 Sending 的数量（配合停止时释放租约）。</summary>
+    private const int BatchSize = 8;
 
     private readonly IDatabaseService _db;
     private readonly IChatSessionClient _chatSession;
@@ -51,18 +52,23 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
     private CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _drainLock = new(1, 1);
     private readonly SemaphoreSlim _startLock = new(1, 1);
+    /// <summary>唤醒信号：新条目入队/鉴权成功时释放，后台循环立即排空（替代每事件 Task.Run）。</summary>
+    private readonly SemaphoreSlim _wakeSignal = new(0, 1);
     private readonly IDisposable _enqueuedSubscription;
+    private readonly IDisposable _sentSubscription;
     private Task? _loopTask;
     private DateTime _lastCleanupUtc = DateTime.MinValue;
     private bool _disposed;
 
     // ── 诊断指标 ──
     private long _processedCount;
-    private long _succeededCount;
+    private long _transportWrites;
+    private long _ackedCount;
     private long _retryableFailures;
     private long _permanentFailures;
     private long _leaseRecoveries;
     private long _claimEmptyRounds;
+    private long _leaseReleasedOnStop;
     private readonly LatencyHistogram _sendLatency = new();
 
     public OutboxProcessor(
@@ -79,6 +85,12 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         _chatSession.Authenticated += OnAuthenticated;
         // UI 事务入库后即时触发排空，避免等待下一个轮询周期。
         _enqueuedSubscription = _eventBus.Subscribe<OutboxEnqueuedEvent>(OnOutboxEnqueued);
+        // 服务端 ACK 确认计数（acked 指标：区别于仅 Socket 写成功的 transport_writes）。
+        _sentSubscription = _eventBus.Subscribe<OutboxStatusChangedEvent>(e =>
+        {
+            if (e.NewStatus == OutboxStatus.Sent)
+                Interlocked.Increment(ref _ackedCount);
+        });
     }
 
     /// <summary>启动后台排空循环。幂等：已在运行则无操作；被 Stop 后可重新 Start（换新 CTS）。</summary>
@@ -94,8 +106,7 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         }
     }
 
-    /// <summary>停止后台排空循环并等待退出。幂等。
-    /// 同时等待事件触发的在途 fire-and-forget 排空完成，保证 Dispose 后无遗留 DB 访问。</summary>
+    /// <summary>停止后台排空循环并等待退出。幂等。</summary>
     public void Stop()
     {
         lock (_startLock)
@@ -110,41 +121,32 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                 // 忽略关闭时的等待异常
             }
             _loopTask = null;
-            // 等待事件触发的在途排空（OnOutboxEnqueued/OnAuthenticated 的 Task.Run）收尾
-            var deadline = DateTime.UtcNow.AddSeconds(StopTimeoutSec);
-            while (Volatile.Read(ref _drainInFlight) > 0 && DateTime.UtcNow < deadline)
-                Thread.Sleep(10);
         }
     }
 
     private void OnAuthenticated(object? sender, long userId)
     {
-        // 鉴权成功后立即触发一次排空（与后台循环通过信号量串行化）
-        StartDrainOnce();
+        // 鉴权成功后立即触发一次排空（唤醒信号，不创建每事件任务）
+        Wake();
     }
 
     private void OnOutboxEnqueued(OutboxEnqueuedEvent e)
     {
-        StartDrainOnce();
+        Wake();
     }
 
-    /// <summary>事件触发的在途排空计数：Stop/Dispose 等待其收尾，避免遗留 DB 访问与文件锁。</summary>
-    private long _drainInFlight;
-
-    private void StartDrainOnce()
+    /// <summary>释放唤醒信号：后台排空循环立即运行一次（SingleReader 语义由 _drainLock 串行化保证）。</summary>
+    private void Wake()
     {
-        Interlocked.Increment(ref _drainInFlight);
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                await DrainOnceAsync().ConfigureAwait(false);
-            }
-            finally
-            {
-                Interlocked.Decrement(ref _drainInFlight);
-            }
-        });
+            if (_wakeSignal.CurrentCount == 0)
+                _wakeSignal.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 处理器已释放
+        }
     }
 
     private async Task DrainLoopAsync()
@@ -160,9 +162,11 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                 Log.Error(ex, "Outbox 排空循环异常");
             }
 
+            // 等待唤醒信号（新条目/鉴权 → 立即排空）或周期轮询兜底。
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(DrainIntervalSec), _cts.Token).ConfigureAwait(false);
+                await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(DrainIntervalSec), _cts.Token)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -219,7 +223,15 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
             foreach (var entry in claimed)
             {
                 if (_cts.IsCancellationRequested)
+                {
+                    // 停止：释放本批次尚未开始条目的租约（Sending → Queued），
+                    // 避免等待 2 分钟租约过期才能重新发送。
+                    var released = await ReleaseRemainingLeasesAsync(userId, claimed, entry)
+                        .ConfigureAwait(false);
+                    if (released > 0)
+                        Interlocked.Add(ref _leaseReleasedOnStop, released);
                     break;
+                }
 
                 _eventBus.Publish(new OutboxStatusChangedEvent(entry.ClientMessageId, OutboxStatus.Sending, null));
 
@@ -240,12 +252,16 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                         conversationId: entry.ConversationId,
                         ct: _cts.Token).ConfigureAwait(false);
 
-                    // 已上行成功：保持 Sending，等待 MessageAck 单事务推进 Sent。
-                    Interlocked.Increment(ref _succeededCount);
+                    // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。
+                    Interlocked.Increment(ref _transportWrites);
                 }
                 catch (OperationCanceledException)
                 {
-                    // 处理器关闭：保持 Sending，租约到期后由下轮恢复。
+                    // 处理器关闭：释放本批次剩余租约后退出。
+                    var released = await ReleaseRemainingLeasesAsync(userId, claimed, entry)
+                        .ConfigureAwait(false);
+                    if (released > 0)
+                        Interlocked.Add(ref _leaseReleasedOnStop, released);
                     throw;
                 }
                 catch (Exception ex)
@@ -277,6 +293,31 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         finally
         {
             _drainLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// 停止时释放本批次尚未开始发送条目的租约（Sending → Queued 并清租约字段），
+    /// 使下轮排空（重启后）无需等待租约过期即可重新发送。
+    /// </summary>
+    private async Task<int> ReleaseRemainingLeasesAsync(long userId, List<LocalOutboxMessage> claimed, LocalOutboxMessage current)
+    {
+        var remaining = claimed
+            .SkipWhile(c => c.ClientMessageId != current.ClientMessageId)
+            .Skip(1)
+            .Select(c => c.ClientMessageId)
+            .ToList();
+        if (remaining.Count == 0)
+            return 0;
+        try
+        {
+            return await _db.ReleaseOutboxLeasesAsync(userId, remaining, current.AttemptId ?? string.Empty)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "释放未开始发送的 Outbox 租约失败 Count={Count}", remaining.Count);
+            return 0;
         }
     }
 
@@ -333,10 +374,12 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
     public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
     {
         ["claimed"] = Volatile.Read(ref _processedCount),
-        ["succeeded"] = Volatile.Read(ref _succeededCount),
+        ["transport_writes"] = Volatile.Read(ref _transportWrites),
+        ["acked"] = Volatile.Read(ref _ackedCount),
         ["retryable_failures"] = Volatile.Read(ref _retryableFailures),
         ["permanent_failures"] = Volatile.Read(ref _permanentFailures),
         ["lease_recoveries"] = Volatile.Read(ref _leaseRecoveries),
+        ["lease_released_on_stop"] = Volatile.Read(ref _leaseReleasedOnStop),
         ["claim_empty_rounds"] = Volatile.Read(ref _claimEmptyRounds)
     };
 
@@ -351,9 +394,11 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
 
         _chatSession.Authenticated -= OnAuthenticated;
         _enqueuedSubscription.Dispose();
+        _sentSubscription.Dispose();
         Stop();
         _cts.Dispose();
         _drainLock.Dispose();
         _startLock.Dispose();
+        _wakeSignal.Dispose();
     }
 }
