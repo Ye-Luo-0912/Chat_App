@@ -180,7 +180,9 @@ public sealed class MessageStore : IMessageStore
 
         if (!result.OutboxUpdated)
         {
-            // 状态机不允许该转换（如已 Sent / 已 Cancelled）：重复 ACK 或乱序，忽略。
+            if (result.AlreadySent)
+                return; // 已 Sent 的重复 ACK：幂等成功，静默忽略（不重复发布事件）。
+            // 状态机不允许该转换（如已 Cancelled）：重复 ACK 或乱序，忽略。
             LogWarningDuplicateAck(clientMessageId, ack.Accepted);
             return;
         }

@@ -80,9 +80,11 @@ public class OfflineCapabilitiesTests : IDisposable
         Assert.Equal(MessageStatus.Sent, message!.Status);
         Assert.Equal("svr-1", message!.MessageId);
 
-        // 重复 ack 幂等：已 Sent 状态视为成功，不报乱序
+        // 重复 ack 幂等：已 Sent 状态标记 AlreadySent（OutboxUpdated=false 表示状态未实际变更），
+        // 调用方静默忽略，不报乱序、不重复发布事件。
         var dup = await _db.ApplyOutboxAckAsync(OwnerId, clientId, accepted: true, serverMessageId: "svr-1");
-        Assert.True(dup.OutboxUpdated);
+        Assert.False(dup.OutboxUpdated);
+        Assert.True(dup.AlreadySent);
     }
 
     /// <summary>离线草稿：完整草稿（文本+回复/编辑/附件状态）持久化并可恢复；乐观并发拒绝旧修订。</summary>
@@ -234,41 +236,41 @@ public class OfflineCapabilitiesTests : IDisposable
         {
             processor.Start();
 
-        // 拦截上行 ChatMessage 帧，注入 MessageAck（模拟服务器确认）
-        tcp.OnFrameSent += (cmd, body) =>
-        {
-            if (cmd != PacketCommand.ChatMessage)
-                return;
-            var sent = serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(body));
-            if (sent is null)
-                return;
-            InjectPacket(tcp, serializer, PacketCommand.MessageAck, new MessageAcknowledgementDto
+            // 拦截上行 ChatMessage 帧，注入 MessageAck（模拟服务器确认）
+            tcp.OnFrameSent += (cmd, body) =>
             {
-                ClientMessageId = sent.MessageId,
-                CommandId = sent.MessageId,
-                Accepted = true,
-                AcknowledgedUtc = DateTime.UtcNow
-            });
-        };
+                if (cmd != PacketCommand.ChatMessage)
+                    return;
+                var sent = serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(body));
+                if (sent is null)
+                    return;
+                InjectPacket(tcp, serializer, PacketCommand.MessageAck, new MessageAcknowledgementDto
+                {
+                    ClientMessageId = sent.MessageId,
+                    CommandId = sent.MessageId,
+                    Accepted = true,
+                    AcknowledgedUtc = DateTime.UtcNow
+                });
+            };
 
-        // 离线状态入库（与网络无关），然后发布事件触发即时排空
-        var clientId = $"c-{Guid.NewGuid():N}"[..20];
-        await _db.EnqueueOutboxWithMessageAsync(NewOutbox(clientId), NewLocalMessage(clientId));
-        eventBus.Publish(new OutboxEnqueuedEvent(clientId, ConvId, PeerId));
+            // 离线状态入库（与网络无关），然后发布事件触发即时排空
+            var clientId = $"c-{Guid.NewGuid():N}"[..20];
+            await _db.EnqueueOutboxWithMessageAsync(NewOutbox(clientId), NewLocalMessage(clientId));
+            eventBus.Publish(new OutboxEnqueuedEvent(clientId, ConvId, PeerId));
 
-        // 等待处理器完成 上行 → ack → 双表 Sent（轮询 ≤ 8s）
-        await WaitUntilAsync(async () =>
-        {
-            var o = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
-            var m = await _db.GetMessageByClientIdAsync(OwnerId, clientId);
-            return o?.Status == OutboxStatus.Sent && m?.Status == MessageStatus.Sent;
-        }, TimeSpan.FromSeconds(8));
+            // 等待处理器完成 上行 → ack → 双表 Sent（轮询 ≤ 8s）
+            await WaitUntilAsync(async () =>
+            {
+                var o = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
+                var m = await _db.GetMessageByClientIdAsync(OwnerId, clientId);
+                return o?.Status == OutboxStatus.Sent && m?.Status == MessageStatus.Sent;
+            }, TimeSpan.FromSeconds(8));
 
-        var outbox = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
-        var message = await _db.GetMessageByClientIdAsync(OwnerId, clientId);
-        Assert.Equal(OutboxStatus.Sent, outbox!.Status);
-        Assert.Equal(MessageStatus.Sent, message!.Status);
-        Assert.False(string.IsNullOrWhiteSpace(message.MessageId));
+            var outbox = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
+            var message = await _db.GetMessageByClientIdAsync(OwnerId, clientId);
+            Assert.Equal(OutboxStatus.Sent, outbox!.Status);
+            Assert.Equal(MessageStatus.Sent, message!.Status);
+            Assert.False(string.IsNullOrWhiteSpace(message.MessageId));
         }
         finally
         {

@@ -3,6 +3,7 @@ using Core.Models.DTO;
 using Core.Protocol;
 using Chat_App.Infrastructure.Networking;
 using Chat_App.Infrastructure.Serialization;
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using Xunit;
@@ -193,8 +194,14 @@ public class RealTcpLoopbackTests
     }
 
     /// <summary>
-    /// 断线后 pending SendAsync 必须失败（抛异常），不能永远挂起。
-    /// 验证 DrainSendChannel 把 pending 帧的 tcs 置为失败。
+    /// 断线排空验证（真实 socket + 生产池化发送路径，即 ChatSessionClient 实际使用的
+    /// SendAsync(IMemoryOwner{byte})）：
+    /// 确定性构造——第一帧 10MB 让发送循环的写操作占用 ≥2ms（实测 10MB 回环写 ~2.4ms，
+    /// NetworkStream 在 Windows 上不支持取消在途写），测试线程在 µs 级立即调 Disconnect：
+    /// - 第 2、3 帧必然仍停留在发送 Channel（消费者忙于第一帧），必须被 DrainSendChannel
+    ///   置为失败，不允许静默成功，也不允许挂起
+    /// - 在写的第一帧：写完成则成功、否则失败，两种结局都接受；其 owner 必须归还
+    /// - 所有池化 owner 归还（成功/失败路径都不泄漏）
     /// </summary>
     [Fact]
     public async Task RealSocket_Disconnect_PendingSend_Fails()
@@ -205,36 +212,36 @@ public class RealTcpLoopbackTests
 
         await client.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = server.Port });
 
-        // 关闭服务端 socket 模拟断线
-        server.Dispose();
+        var pool = System.Buffers.MemoryPool<byte>.Shared;
+        var bigBody = new string('x', 10 * 1024 * 1024);
+        var frame = BuildFrame(serializer, new ChatMessageDto { MessageId = "big", TargetUserId = 1, Content = bigBody });
 
-        // 构造大量数据让其堆积在 send channel，然后断开
-        var bigBody = new string('x', 80000);
-        var writer = new System.Buffers.ArrayBufferWriter<byte>(MessagePacket.HeaderSize + 80000);
-        serializer.Serialize(writer, new ChatMessageDto { MessageId = "big", TargetUserId = 1, Content = bigBody });
-        var packet = new MessagePacket(PacketCommand.ChatMessage,
-            new System.Buffers.ReadOnlySequence<byte>(writer.WrittenSpan.ToArray()));
-        var frameWriter = new System.Buffers.ArrayBufferWriter<byte>(MessagePacket.HeaderSize + writer.WrittenCount);
-        new MessagePacketCodec().TryWrite(packet, frameWriter, out _);
-
-        // 发起多个并发发送，然后断开
-        var sendTasks = new List<Task>();
-        for (var i = 0; i < 5; i++)
+        var owners = new TrackingOwner[3];
+        for (var i = 0; i < owners.Length; i++)
         {
-            sendTasks.Add(client.SendAsync(frameWriter.WrittenMemory));
+            owners[i] = new TrackingOwner(pool.Rent(frame.Length));
+            frame.CopyTo(owners[i].Memory.Span);
         }
 
-        await Task.Delay(50);
+        // 入队后不等待，立即断开：消费者此刻必然在写第一帧（≥2ms），其余帧仍在队列
+        var sendTasks = new List<Task>(owners.Length);
+        foreach (var owner in owners)
+            sendTasks.Add(client.SendAsync(owner));
         client.Disconnect("simulated drop");
 
         // 所有 pending send 必须在合理时间内完成（成功或失败），不能挂起
         var allTask = Task.WhenAll(sendTasks);
         var winner = await Task.WhenAny(allTask, Task.Delay(TimeSpan.FromSeconds(3)));
-        Assert.True(winner == allTask, "pending SendAsync 在断线后 3 秒内未完成");
+        Assert.True(winner == allTask, "pending SendAsync 在断线后 3 秒内未完成（排空路径必须结束所有调用方）");
 
-        // 至少有一个失败（已入队的帧在 drain 时应失败）
-        var failures = sendTasks.Count(t => t.IsFaulted);
-        Assert.True(failures >= 0); // 容忍全部成功（已发送）或部分失败
+        // 排队中的第 2、3 帧必须失败：消费者不可能在 µs 级完成第一帧前取走它们
+        Assert.True(sendTasks[1].IsFaulted && sendTasks[2].IsFaulted,
+            "断线时仍停留在队列中的帧必须被排空失败（不允许静默成功）");
+        Assert.True(sendTasks[0].IsFaulted || sendTasks[0].IsCompletedSuccessfully,
+            "在写的第一帧要么完成要么失败，不得挂起");
+
+        // 无论成功还是失败，所有池化 owner 都必须归还
+        Assert.All(owners, o => Assert.True(o.IsDisposed, "断线后 owner 应被 Dispose 归还池"));
     }
 
     /// <summary>
@@ -286,14 +293,85 @@ public class RealTcpLoopbackTests
         Assert.Equal("second", lastContent);
     }
 
-    private static async Task SendOneAsync(TcpClientExample client, JsonPacketBodySerializer serializer, string content)
+    /// <summary>
+    /// 生产池化发送路径：ChatSessionClient 实际使用 SendAsync(IMemoryOwner{byte}) 零拷贝发送
+    /// （见 ChatSessionClient.SendRequestAsync），真实 socket 下验证：
+    /// - 服务端完整收到全部帧
+    /// - 发送完成后 owner 被发送循环 Dispose 归还池（成功路径）
+    /// </summary>
+    [Fact]
+    public async Task RealSocket_PooledSend_Frames_Intact_And_Owners_Returned()
+    {
+        using var server = await StartEchoServerAsync();
+        using var client = new TcpClientExample();
+        var serializer = new JsonPacketBodySerializer();
+
+        await client.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = server.Port });
+
+        var pool = System.Buffers.MemoryPool<byte>.Shared;
+        var owners = new List<TrackingOwner>();
+        var expectedContents = new List<string>();
+        for (var i = 0; i < 20; i++)
+        {
+            var content = $"pooled-{i}-{Guid.NewGuid():N}";
+            var frame = BuildFrame(serializer, new ChatMessageDto { MessageId = content, TargetUserId = 1, Content = content });
+            var owner = new TrackingOwner(pool.Rent(frame.Length));
+            frame.CopyTo(owner.Memory.Span);
+            owners.Add(owner);
+            expectedContents.Add(content);
+            await client.SendAsync(owner);
+        }
+
+        await Task.Delay(200);
+        client.Disconnect("test done");
+
+        // 成功发送后每个 owner 都必须已归还（不得泄漏池化内存）
+        Assert.All(owners, o => Assert.True(o.IsDisposed, "成功发送后 owner 应被 Dispose 归还池"));
+
+        var received = server.GetReceivedBytes();
+        var codec = new MessagePacketCodec();
+        codec.Append(received);
+        var decoded = new List<string>();
+        while (codec.TryRead(out var pkt))
+        {
+            var dto = serializer.Deserialize<ChatMessageDto>(pkt.Body);
+            Assert.NotNull(dto);
+            Assert.NotNull(dto.MessageId);
+            decoded.Add(dto.MessageId);
+        }
+        Assert.Equal(expectedContents.Count, decoded.Count);
+        Assert.All(expectedContents, c => Assert.Contains(c, decoded));
+    }
+
+    /// <summary>包装池化内存并记录 Dispose 次数，用于验证发送路径正确归还。</summary>
+    private sealed class TrackingOwner(IMemoryOwner<byte> inner) : IMemoryOwner<byte>
+    {
+        private int _disposed;
+
+        public Memory<byte> Memory => inner.Memory;
+
+        public bool IsDisposed => Volatile.Read(ref _disposed) == 1;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                inner.Dispose();
+        }
+    }
+
+    /// <summary>序列化消息为完整网络帧（header + body）。</summary>
+    private static byte[] BuildFrame(JsonPacketBodySerializer serializer, ChatMessageDto dto)
     {
         var writer = new System.Buffers.ArrayBufferWriter<byte>(MessagePacket.HeaderSize + 64);
-        serializer.Serialize(writer, new ChatMessageDto { MessageId = content, TargetUserId = 1, Content = content });
+        serializer.Serialize(writer, dto);
+        var bodyLen = writer.WrittenCount;
         var packet = new MessagePacket(PacketCommand.ChatMessage,
-            new System.Buffers.ReadOnlySequence<byte>(writer.WrittenSpan.ToArray()));
-        var frameWriter = new System.Buffers.ArrayBufferWriter<byte>(MessagePacket.HeaderSize + writer.WrittenCount);
+            bodyLen == 0 ? System.Buffers.ReadOnlySequence<byte>.Empty : new System.Buffers.ReadOnlySequence<byte>(writer.WrittenSpan.ToArray()));
+        var frameWriter = new System.Buffers.ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyLen);
         new MessagePacketCodec().TryWrite(packet, frameWriter, out _);
-        await client.SendAsync(frameWriter.WrittenMemory);
+        return frameWriter.WrittenMemory.ToArray();
     }
+
+    private static async Task SendOneAsync(TcpClientExample client, JsonPacketBodySerializer serializer, string content)
+        => await client.SendAsync(BuildFrame(serializer, new ChatMessageDto { MessageId = content, TargetUserId = 1, Content = content }));
 }

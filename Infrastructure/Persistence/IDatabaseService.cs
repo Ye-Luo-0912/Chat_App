@@ -150,7 +150,8 @@ public interface IDatabaseService
     /// <summary>
     /// ACK 单事务处理：Outbox 与 LocalMessage 在单个事务内原子推进。
     /// 条件更新（单调状态机）：Queued/Sending → Sent（接受）或 → Failed（拒绝）；
-    /// 已 Sent 的重复 ACK 视为幂等成功；其它不允许的状态转换返回 OutboxUpdated=false。
+    /// 已 Sent 的重复 ACK 返回 AlreadySent=true（幂等成功，状态未实际变更）；
+    /// 其它不允许的状态转换返回 OutboxUpdated=false。
     /// </summary>
     Task<OutboxAckResult> ApplyOutboxAckAsync(long ownerUserId, string clientMessageId, bool accepted, string? serverMessageId = null, string? failureReason = null);
 

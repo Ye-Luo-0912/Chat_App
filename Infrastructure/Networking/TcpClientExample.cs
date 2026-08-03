@@ -207,9 +207,14 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    frame.Tcs.TrySetException(ex);
+                    // 断线取消时统一以"连接已断开"失败：避免调用方把 OperationCanceledException
+                    // 误判为自身取消（发送循环的 token 仅来自 SendCts，OCE 必然意味着断线）。
+                    var failure = ex is OperationCanceledException
+                        ? new InvalidOperationException("连接已断开")
+                        : ex;
+                    frame.Tcs.TrySetException(failure);
                     frame.Owner?.Dispose();
-                    DrainSendChannel(session.SendChannel, ex);
+                    DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
                     Disconnect("Connection lost during send");
                     return;
                 }
@@ -222,7 +227,9 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // Disconnect 取消，正常退出。
+            // Disconnect 取消，正常退出：通道已被 TryComplete 拒绝新帧，
+            // 此处排空可能在取消竞态中残留的帧，避免其 tcs 永远不完成。
+            DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
         }
         catch (Exception ex)
         {
@@ -358,6 +365,10 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         try { session.SendCts.Cancel(); } catch (ObjectDisposedException) { }
         try { session.ReceiveCts.Cancel(); } catch (ObjectDisposedException) { }
         session.ShutdownAndDisposeSocket();
+        // 先 TryComplete 再排空：背压中阻塞在 WriteAsync 的发送方立即收到 ChannelClosedException
+        //（"连接已关闭，无法发送"），且 TryComplete 之后不可能再有新帧进入通道；
+        // 随后排空残余帧并置为失败，保证所有 pending 调用方都被结束，不会永远挂起。
+        session.SendChannel.Writer.TryComplete();
         DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
     }
 
@@ -454,7 +465,8 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         /// <summary>关闭 Socket（Shutdown + Dispose），取消中的收发调用随即抛 ObjectDisposedException 退出。</summary>
         public void ShutdownAndDisposeSocket()
         {
-            try { Socket.Shutdown(SocketShutdown.Both); } catch (SocketException) { }
+            try { Socket.Shutdown(SocketShutdown.Both); }
+            catch (SocketException) { }
             catch (ObjectDisposedException) { }
             Socket.Dispose();
         }
@@ -468,6 +480,7 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
             SendCts.Dispose();
             ReceiveCts.Dispose();
             SendChannel.Writer.TryComplete();
+            DrainSendChannel(SendChannel, new InvalidOperationException("连接已断开"));
         }
 
         public async ValueTask DisposeAsync()

@@ -173,9 +173,8 @@ public partial class App : Application
             try
             {
                 // 在迁移前执行 PRAGMA。
-                // journal_mode=WAL 和 synchronous=NORMAL 是持久设置（写入数据库文件头），一次设置即可。
-                // foreign_keys=ON 是每连接设置，由连接字符串 Foreign Keys=true 保证（Microsoft.Data.Sqlite 官方支持）。
-                // busy_timeout 由连接字符串 DefaultTimeout=5 对应。
+                // journal_mode=WAL 和 synchronous=NORMAL 是持久设置（写入数据库文件头），启动时确认一次；
+                // 此后每个连接的 PRAGMA 由 SqlitePragmaInterceptor（EF Core DbConnectionInterceptor）统一执行。
                 db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
                 db.Database.ExecuteSqlRaw("PRAGMA synchronous=NORMAL;");
                 db.Database.Migrate();
@@ -274,14 +273,17 @@ public partial class App : Application
     {
         // 使用共享连接字符串构造器：仅使用 Microsoft.Data.Sqlite 官方支持的关键字
         // Journal Mode / Synchronous / Busy Timeout 不是连接字符串关键字，
-        // 由 ClientDbContext.OnConfiguring 通过 PRAGMA 执行。
+        // 由 SqlitePragmaInterceptor（EF Core DbConnectionInterceptor）在每个连接打开时统一执行
+        //（ForeignKeys=true / DefaultTimeout=5 由连接字符串保证，双保险）。
         var connectionString = DbPathProvider.BuildConnectionString();
 
         // 使用池化工厂：每个仓储操作通过 CreateDbContextAsync 获取独立短生命周期 DbContext，
         // 避免 scoped DbContext 被 singleton 服务捕获共享。
+        // SqlitePragmaInterceptor 保证每个物理连接打开时执行 PRAGMA。
         services.AddPooledDbContextFactory<ClientDbContext>(op =>
         {
             op.UseSqlite(connectionString);
+            op.AddInterceptors(new SqlitePragmaInterceptor());
         });
         return services;
     }

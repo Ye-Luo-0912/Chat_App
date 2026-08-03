@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet build Chat_App.sln -c Release --nologo
+
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test UnitTests -c Release --nologo
+
+  protocol:
+    name: Protocol Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test Protocol.Tests -c Release --nologo
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test IntegrationTests -c Release --nologo
+
+  migration:
+    name: Migration Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test IntegrationTests -c Release --nologo --filter "FullyQualifiedName~MigrationUpgradeMatrixTests"
+
+  allocation-budget:
+    name: Allocation Budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test Protocol.Tests -c Release --nologo --filter "FullyQualifiedName~AllocationBudgetTests"
+
+  analyzers:
+    name: Analyzers (warnaserror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet build Chat_App.sln -c Release --nologo -warnaserror
+
+  format:
+    name: Code Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # 只校验本次变更的 .cs 文件：仓库存在历史格式债务（未跑过 dotnet format），
+      # 全量校验会因存量违规失败；门禁只拦"新引入"的格式问题。
+      - name: Verify format of changed files
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then base="$(git rev-parse HEAD~1)"; fi
+          changed=$(git diff --name-only "$base"...HEAD -- '*.cs' | tr '\n' ' ')
+          if [ -z "$changed" ]; then
+            echo "no changed .cs files to verify"
+            exit 0
+          fi
+          dotnet format Chat_App.sln --verify-no-changes --no-restore --include $changed
+
+  vulnerability-scan:
+    name: Package Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet list Chat_App.sln package --vulnerable --include-transitive

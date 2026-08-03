@@ -61,6 +61,7 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
     // ——— 入站队列指标———
     private long _overflowCount;
     private long _backpressureDisconnects;
+    private long _backpressureDisconnectArmed;
     private long _lastProcessedSequence;
     private long _totalProcessed;
     private long _staleDropped;
@@ -167,6 +168,8 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
     /// <summary>
     /// 背压路径：等待队列腾出空间写入；超过 BackpressureWaitMs 未写入则主动断开连接，
     /// 由重连后的同步水位重新拉取（宁可断线重同步，也不静默丢弃）。
+    /// 同一背压事件只断开一次：多个溢出事件并发超时共享一次断连（CompareExchange 原子抢占），
+    /// 避免断连风暴；队列腾出空间（消费端恢复）后复位标记，允许下一次独立背压事件再次断连。
     /// </summary>
     private async Task HandleBackpressureAsync(InboundMutation mutation)
     {
@@ -180,11 +183,14 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
         {
             // 背压超时：消费端卡死（如 DB 死锁）。主动断开，重连后按同步水位补拉。
-            Interlocked.Increment(ref _backpressureDisconnects);
-            Log.Error(
-                "入站队列背压超时（{Ms}ms），队列深度={Depth}，主动断开连接以避免丢事件",
-                BackpressureWaitMs, _inboundChannel.Reader.Count);
-            _ = _chatSession.DisconnectAsync("入站队列背压超时，重连同步");
+            if (Interlocked.CompareExchange(ref _backpressureDisconnectArmed, 1, 0) == 0)
+            {
+                Interlocked.Increment(ref _backpressureDisconnects);
+                Log.Error(
+                    "入站队列背压超时（{Ms}ms），队列深度={Depth}，主动断开连接以避免丢事件",
+                    BackpressureWaitMs, _inboundChannel.Reader.Count);
+                _ = _chatSession.DisconnectAsync("入站队列背压超时，重连同步");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -223,6 +229,9 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
                 {
                     Log.Error(ex, "处理入站事件失败 Kind={Kind}", mutation.Kind);
                 }
+
+                // 队列已腾出空间：复位背压断连标记，允许下一次独立背压事件再次触发断连。
+                Volatile.Write(ref _backpressureDisconnectArmed, 0);
             }
         }
         catch (OperationCanceledException) { }

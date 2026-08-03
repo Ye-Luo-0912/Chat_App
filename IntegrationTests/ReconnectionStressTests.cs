@@ -115,11 +115,14 @@ public class ReconnectionStressTests
     }
 
     /// <summary>
-    /// 连续 5 轮「连接 → 鉴权 → 断开 → 立即重连」，每轮断开后 pending 请求应全部失败。
+    /// 连续 1,000 轮「连接 → 鉴权 → 断开 → 立即重连」：
+    /// 断开与重连之间没有任何人工等待，直接覆盖最危险的立即重连窗口。
+    /// 每轮断开后 pending 请求必须全部结束（失败），不得挂起。
     /// </summary>
     [Fact]
     public async Task Repeated_Connect_Disconnect_Reconnect_PendingRequests_Resolved()
     {
+        const int rounds = 1000;
         var tcp = new ScriptedTcpClient();
         var serializer = new JsonPacketBodySerializer();
         var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
@@ -129,7 +132,7 @@ public class ReconnectionStressTests
 
         Action<PacketCommand, ReadOnlyMemory<byte>>? authHandler = null;
 
-        for (var round = 0; round < 5; round++)
+        for (var round = 0; round < rounds; round++)
         {
             await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
             if (authHandler is not null)
@@ -156,7 +159,7 @@ public class ReconnectionStressTests
             Assert.False(session.IsAuthenticated);
         }
 
-        Assert.Equal(5, closeReasons.Count);
+        Assert.Equal(rounds, closeReasons.Count);
     }
 
     /// <summary>

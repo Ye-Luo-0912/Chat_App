@@ -187,15 +187,15 @@ public class DatabaseService(
         var existing = await db.Users.FirstOrDefaultAsync(u => u.UserId == user.UserId, None);
         if (existing is not null)
         {
-            existing.Username         = user.Username;
-            existing.AvatarUrl        = user.AvatarUrl;
-            existing.Email            = user.Email;
-            existing.Signature        = user.Signature;
-            existing.Gender           = user.Gender;
-            existing.Region           = user.Region;
-            existing.Status           = user.Status;
+            existing.Username = user.Username;
+            existing.AvatarUrl = user.AvatarUrl;
+            existing.Email = user.Email;
+            existing.Signature = user.Signature;
+            existing.Gender = user.Gender;
+            existing.Region = user.Region;
+            existing.Status = user.Status;
             existing.PreviousLoginDate = user.PreviousLoginDate;
-            existing.LastLoginTime    = user.LastLoginTime;
+            existing.LastLoginTime = user.LastLoginTime;
         }
         else
         {
@@ -481,21 +481,21 @@ public class DatabaseService(
                                    && c.ConversationId == conversation.ConversationId, None);
         if (existing is not null)
         {
-            existing.Type               = conversation.Type;
-            existing.PeerUserId         = conversation.PeerUserId;
-            existing.LastMessageId      = conversation.LastMessageId;
+            existing.Type = conversation.Type;
+            existing.PeerUserId = conversation.PeerUserId;
+            existing.LastMessageId = conversation.LastMessageId;
             existing.LastMessagePreview = conversation.LastMessagePreview;
-            existing.LastMessageAtMs    = conversation.LastMessageAtMs;
-            existing.LastSenderUserId   = conversation.LastSenderUserId;
-            existing.UnreadCount        = conversation.UnreadCount;
-            existing.LastReadMessageId  = conversation.LastReadMessageId;
-            existing.LastReadAtMs       = conversation.LastReadAtMs;
-            existing.IsPinned           = conversation.IsPinned;
-            existing.PinnedAtMs         = conversation.PinnedAtMs;
-            existing.IsMuted            = conversation.IsMuted;
-            existing.MutedUntilMs       = conversation.MutedUntilMs;
-            existing.Draft              = conversation.Draft;
-            existing.LastSynced         = conversation.LastSynced;
+            existing.LastMessageAtMs = conversation.LastMessageAtMs;
+            existing.LastSenderUserId = conversation.LastSenderUserId;
+            existing.UnreadCount = conversation.UnreadCount;
+            existing.LastReadMessageId = conversation.LastReadMessageId;
+            existing.LastReadAtMs = conversation.LastReadAtMs;
+            existing.IsPinned = conversation.IsPinned;
+            existing.PinnedAtMs = conversation.PinnedAtMs;
+            existing.IsMuted = conversation.IsMuted;
+            existing.MutedUntilMs = conversation.MutedUntilMs;
+            existing.Draft = conversation.Draft;
+            existing.LastSynced = conversation.LastSynced;
         }
         else
         {
@@ -617,13 +617,13 @@ public class DatabaseService(
         }
         if (existing is not null)
         {
-            existing.ReceivedAtMs    = message.ReceivedAtMs;
-            existing.DeliveredAtMs   = message.DeliveredAtMs;
-            existing.ReadAtMs        = message.ReadAtMs;
-            existing.RecalledAtMs    = message.RecalledAtMs;
+            existing.ReceivedAtMs = message.ReceivedAtMs;
+            existing.DeliveredAtMs = message.DeliveredAtMs;
+            existing.ReadAtMs = message.ReadAtMs;
+            existing.RecalledAtMs = message.RecalledAtMs;
             existing.AttachmentsJson = message.AttachmentsJson;
-            existing.FailureReason   = message.FailureReason;
-            existing.UpdatedAt       = message.UpdatedAt;
+            existing.FailureReason = message.FailureReason;
+            existing.UpdatedAt = message.UpdatedAt;
             // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
             if (MessageStatusTransitions.CanTransition(existing.Status, message.Status))
                 existing.Status = message.Status;
@@ -631,8 +631,8 @@ public class DatabaseService(
             if (message.EditVersion > existing.EditVersion)
             {
                 existing.EditVersion = message.EditVersion;
-                existing.EditedAtMs  = message.EditedAtMs;
-                existing.Content     = message.Content;
+                existing.EditedAtMs = message.EditedAtMs;
+                existing.Content = message.Content;
             }
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
             if (string.IsNullOrEmpty(existing.MessageId) && message.MessageId is not null)
@@ -780,13 +780,13 @@ public class DatabaseService(
         }
         if (existingMessage is not null)
         {
-            existingMessage.ReceivedAtMs    = message.ReceivedAtMs;
-            existingMessage.DeliveredAtMs   = message.DeliveredAtMs;
-            existingMessage.ReadAtMs        = message.ReadAtMs;
-            existingMessage.RecalledAtMs    = message.RecalledAtMs;
+            existingMessage.ReceivedAtMs = message.ReceivedAtMs;
+            existingMessage.DeliveredAtMs = message.DeliveredAtMs;
+            existingMessage.ReadAtMs = message.ReadAtMs;
+            existingMessage.RecalledAtMs = message.RecalledAtMs;
             existingMessage.AttachmentsJson = message.AttachmentsJson;
-            existingMessage.FailureReason   = message.FailureReason;
-            existingMessage.UpdatedAt       = message.UpdatedAt;
+            existingMessage.FailureReason = message.FailureReason;
+            existingMessage.UpdatedAt = message.UpdatedAt;
             // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
             if (MessageStatusTransitions.CanTransition(existingMessage.Status, message.Status))
                 existingMessage.Status = message.Status;
@@ -794,8 +794,8 @@ public class DatabaseService(
             if (message.EditVersion > existingMessage.EditVersion)
             {
                 existingMessage.EditVersion = message.EditVersion;
-                existingMessage.EditedAtMs  = message.EditedAtMs;
-                existingMessage.Content     = message.Content;
+                existingMessage.EditedAtMs = message.EditedAtMs;
+                existingMessage.Content = message.Content;
             }
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
             if (string.IsNullOrEmpty(existingMessage.MessageId) && message.MessageId is not null)
@@ -828,24 +828,24 @@ public class DatabaseService(
                 }
                 if (existingAttachment is not null)
                 {
-                    existingAttachment.AttachmentId       = attachment.AttachmentId ?? existingAttachment.AttachmentId;
+                    existingAttachment.AttachmentId = attachment.AttachmentId ?? existingAttachment.AttachmentId;
                     existingAttachment.ClientAttachmentId = attachment.ClientAttachmentId ?? existingAttachment.ClientAttachmentId;
-                    existingAttachment.MessageId          = attachment.MessageId ?? existingAttachment.MessageId;
-                    existingAttachment.ConversationId     = attachment.ConversationId ?? existingAttachment.ConversationId;
-                    existingAttachment.FileName           = attachment.FileName ?? existingAttachment.FileName;
-                    existingAttachment.ContentType        = attachment.ContentType;
-                    existingAttachment.SizeBytes          = attachment.SizeBytes;
-                    existingAttachment.Sha256             = attachment.Sha256 ?? existingAttachment.Sha256;
-                    existingAttachment.DownloadPath       = attachment.DownloadPath ?? existingAttachment.DownloadPath;
-                    existingAttachment.ObjectKey          = attachment.ObjectKey ?? existingAttachment.ObjectKey;
-                    existingAttachment.ThumbnailPath      = attachment.ThumbnailPath ?? existingAttachment.ThumbnailPath;
-                    existingAttachment.LocalCachePath     = attachment.LocalCachePath ?? existingAttachment.LocalCachePath;
+                    existingAttachment.MessageId = attachment.MessageId ?? existingAttachment.MessageId;
+                    existingAttachment.ConversationId = attachment.ConversationId ?? existingAttachment.ConversationId;
+                    existingAttachment.FileName = attachment.FileName ?? existingAttachment.FileName;
+                    existingAttachment.ContentType = attachment.ContentType;
+                    existingAttachment.SizeBytes = attachment.SizeBytes;
+                    existingAttachment.Sha256 = attachment.Sha256 ?? existingAttachment.Sha256;
+                    existingAttachment.DownloadPath = attachment.DownloadPath ?? existingAttachment.DownloadPath;
+                    existingAttachment.ObjectKey = attachment.ObjectKey ?? existingAttachment.ObjectKey;
+                    existingAttachment.ThumbnailPath = attachment.ThumbnailPath ?? existingAttachment.ThumbnailPath;
+                    existingAttachment.LocalCachePath = attachment.LocalCachePath ?? existingAttachment.LocalCachePath;
                     existingAttachment.LocalThumbnailPath = attachment.LocalThumbnailPath ?? existingAttachment.LocalThumbnailPath;
                     existingAttachment.LocalUploadingPath = attachment.LocalUploadingPath ?? existingAttachment.LocalUploadingPath;
-                    existingAttachment.RetryCount         = attachment.RetryCount;
-                    existingAttachment.Status             = attachment.Status;
-                    existingAttachment.FailureReason      = attachment.FailureReason ?? existingAttachment.FailureReason;
-                    existingAttachment.UpdatedAt          = DateTime.UtcNow;
+                    existingAttachment.RetryCount = attachment.RetryCount;
+                    existingAttachment.Status = attachment.Status;
+                    existingAttachment.FailureReason = attachment.FailureReason ?? existingAttachment.FailureReason;
+                    existingAttachment.UpdatedAt = DateTime.UtcNow;
                 }
                 else
                 {
@@ -865,22 +865,22 @@ public class DatabaseService(
                 // 新建会话：conversationUpdate.UnreadCount（0 或 1）直接作为绝对值。
                 await db.Conversations.AddAsync(new LocalConversation
                 {
-                    OwnerUserId        = conversationUpdate.OwnerUserId,
-                    ConversationId     = conversationUpdate.ConversationId,
-                    Type               = conversationUpdate.Type,
-                    PeerUserId         = conversationUpdate.PeerUserId,
-                    LastMessageId      = conversationUpdate.LastMessageId,
+                    OwnerUserId = conversationUpdate.OwnerUserId,
+                    ConversationId = conversationUpdate.ConversationId,
+                    Type = conversationUpdate.Type,
+                    PeerUserId = conversationUpdate.PeerUserId,
+                    LastMessageId = conversationUpdate.LastMessageId,
                     LastMessagePreview = conversationUpdate.LastMessagePreview,
-                    LastMessageAtMs    = conversationUpdate.LastMessageAtMs,
-                    LastSenderUserId   = conversationUpdate.LastSenderUserId,
-                    UnreadCount        = conversationUpdate.UnreadCount,
-                    LastReadMessageId  = null,
-                    LastReadAtMs       = null,
-                    IsPinned           = false,
-                    PinnedAtMs         = null,
-                    IsMuted            = false,
-                    MutedUntilMs       = null,
-                    LastSynced         = conversationUpdate.LastSynced
+                    LastMessageAtMs = conversationUpdate.LastMessageAtMs,
+                    LastSenderUserId = conversationUpdate.LastSenderUserId,
+                    UnreadCount = conversationUpdate.UnreadCount,
+                    LastReadMessageId = null,
+                    LastReadAtMs = null,
+                    IsPinned = false,
+                    PinnedAtMs = null,
+                    IsMuted = false,
+                    MutedUntilMs = null,
+                    LastSynced = conversationUpdate.LastSynced
                 }, None);
             }
             else
@@ -889,10 +889,10 @@ public class DatabaseService(
                 if (conversationUpdate.LastMessageAtMs is long newAtMs
                     && newAtMs > (existingConversation.LastMessageAtMs ?? 0))
                 {
-                    existingConversation.LastMessageId      = conversationUpdate.LastMessageId;
+                    existingConversation.LastMessageId = conversationUpdate.LastMessageId;
                     existingConversation.LastMessagePreview = conversationUpdate.LastMessagePreview;
-                    existingConversation.LastMessageAtMs    = newAtMs;
-                    existingConversation.LastSenderUserId   = conversationUpdate.LastSenderUserId;
+                    existingConversation.LastMessageAtMs = newAtMs;
+                    existingConversation.LastSenderUserId = conversationUpdate.LastSenderUserId;
                     // conversationUpdate.UnreadCount 为增量（发送方非自己时为 1）；
                     // 仅当会话已读水位早于该消息时才递增，避免对已读消息重复计数。
                     if (conversationUpdate.UnreadCount > 0
@@ -1226,8 +1226,10 @@ public class DatabaseService(
         {
             if (outbox.Status == OutboxStatus.Sent)
             {
-                // 幂等：已 Sent 的重复 ACK 视为成功，避免误告警。
-                transitioned = true;
+                // 幂等：已 Sent 的重复 ACK 视为成功；以 AlreadySent 标记，
+                // 调用方静默忽略（不更新、不发布重复事件、不告警）。
+                await transaction.CommitAsync(None);
+                return new OutboxAckResult(false, outbox.ConversationId, outbox.MessageId, AlreadySent: true);
             }
             else if (outbox.Status is OutboxStatus.Queued or OutboxStatus.Sending)
             {
@@ -1492,27 +1494,27 @@ public class DatabaseService(
                                    && o.ClientMessageId == outbox.ClientMessageId, None);
         if (existingOutbox is not null)
         {
-            existingOutbox.MessageId                 = outbox.MessageId;
-            existingOutbox.ConversationId            = outbox.ConversationId;
-            existingOutbox.TargetUserId              = outbox.TargetUserId;
-            existingOutbox.Content                   = outbox.Content;
-            existingOutbox.AttachmentIdsJson         = outbox.AttachmentIdsJson;
-            existingOutbox.ReplyToMessageId          = outbox.ReplyToMessageId;
-            existingOutbox.ReplyToSenderUserId       = outbox.ReplyToSenderUserId;
-            existingOutbox.ReplyToPreview            = outbox.ReplyToPreview;
-            existingOutbox.ForwardedFromMessageId    = outbox.ForwardedFromMessageId;
+            existingOutbox.MessageId = outbox.MessageId;
+            existingOutbox.ConversationId = outbox.ConversationId;
+            existingOutbox.TargetUserId = outbox.TargetUserId;
+            existingOutbox.Content = outbox.Content;
+            existingOutbox.AttachmentIdsJson = outbox.AttachmentIdsJson;
+            existingOutbox.ReplyToMessageId = outbox.ReplyToMessageId;
+            existingOutbox.ReplyToSenderUserId = outbox.ReplyToSenderUserId;
+            existingOutbox.ReplyToPreview = outbox.ReplyToPreview;
+            existingOutbox.ForwardedFromMessageId = outbox.ForwardedFromMessageId;
             existingOutbox.ForwardedFromSenderUserId = outbox.ForwardedFromSenderUserId;
-            existingOutbox.ForwardedFromPreview      = outbox.ForwardedFromPreview;
-            existingOutbox.Status                    = outbox.Status;
-            existingOutbox.FailureReason             = outbox.FailureReason;
-            existingOutbox.QueuedAt                  = outbox.QueuedAt;
-            existingOutbox.SentAt                    = outbox.SentAt;
-            existingOutbox.NextRetryAt               = outbox.NextRetryAt;
-            existingOutbox.AttemptId                 = outbox.AttemptId;
-            existingOutbox.AttemptStartedAt          = outbox.AttemptStartedAt;
-            existingOutbox.LeaseUntil                = outbox.LeaseUntil;
-            existingOutbox.LastErrorCode             = outbox.LastErrorCode;
-            existingOutbox.FailureKind               = outbox.FailureKind;
+            existingOutbox.ForwardedFromPreview = outbox.ForwardedFromPreview;
+            existingOutbox.Status = outbox.Status;
+            existingOutbox.FailureReason = outbox.FailureReason;
+            existingOutbox.QueuedAt = outbox.QueuedAt;
+            existingOutbox.SentAt = outbox.SentAt;
+            existingOutbox.NextRetryAt = outbox.NextRetryAt;
+            existingOutbox.AttemptId = outbox.AttemptId;
+            existingOutbox.AttemptStartedAt = outbox.AttemptStartedAt;
+            existingOutbox.LeaseUntil = outbox.LeaseUntil;
+            existingOutbox.LastErrorCode = outbox.LastErrorCode;
+            existingOutbox.FailureKind = outbox.FailureKind;
         }
         else
         {
@@ -1535,17 +1537,17 @@ public class DatabaseService(
         }
         if (existingMessage is not null)
         {
-            existingMessage.Content         = message.Content;
-            existingMessage.ReceivedAtMs    = message.ReceivedAtMs;
-            existingMessage.DeliveredAtMs   = message.DeliveredAtMs;
-            existingMessage.ReadAtMs        = message.ReadAtMs;
-            existingMessage.RecalledAtMs    = message.RecalledAtMs;
-            existingMessage.EditVersion     = message.EditVersion;
-            existingMessage.EditedAtMs      = message.EditedAtMs;
+            existingMessage.Content = message.Content;
+            existingMessage.ReceivedAtMs = message.ReceivedAtMs;
+            existingMessage.DeliveredAtMs = message.DeliveredAtMs;
+            existingMessage.ReadAtMs = message.ReadAtMs;
+            existingMessage.RecalledAtMs = message.RecalledAtMs;
+            existingMessage.EditVersion = message.EditVersion;
+            existingMessage.EditedAtMs = message.EditedAtMs;
             existingMessage.AttachmentsJson = message.AttachmentsJson;
-            existingMessage.Status          = message.Status;
-            existingMessage.FailureReason   = message.FailureReason;
-            existingMessage.UpdatedAt       = message.UpdatedAt;
+            existingMessage.Status = message.Status;
+            existingMessage.FailureReason = message.FailureReason;
+            existingMessage.UpdatedAt = message.UpdatedAt;
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
             if (string.IsNullOrEmpty(existingMessage.MessageId) && !string.IsNullOrEmpty(message.MessageId))
                 existingMessage.MessageId = message.MessageId;
@@ -1575,7 +1577,7 @@ public class DatabaseService(
             return;
 
         var now = DateTime.UtcNow;
-        existing.Status        = status;
+        existing.Status = status;
         existing.FailureReason = failureReason;
         if (!string.IsNullOrEmpty(messageId))
             existing.MessageId = messageId;
@@ -1622,7 +1624,7 @@ public class DatabaseService(
             if (cursor.AfterReceivedAtMs > existing.AfterReceivedAtMs)
             {
                 existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
-                existing.AfterMessageId    = cursor.AfterMessageId;
+                existing.AfterMessageId = cursor.AfterMessageId;
             }
             existing.UpdatedAt = cursor.UpdatedAt;
         }
@@ -1662,9 +1664,9 @@ public class DatabaseService(
         if (existing is not null)
         {
             existing.LastReadMessageId = readState.LastReadMessageId;
-            existing.LastReadAtMs      = readState.LastReadAtMs;
-            existing.UnreadCount       = readState.UnreadCount;
-            existing.UpdatedAt         = readState.UpdatedAt;
+            existing.LastReadAtMs = readState.LastReadAtMs;
+            existing.UnreadCount = readState.UnreadCount;
+            existing.UpdatedAt = readState.UpdatedAt;
         }
         else
         {
@@ -1750,26 +1752,27 @@ public class DatabaseService(
             existing = await db.Attachments
                 .FirstOrDefaultAsync(a => a.OwnerUserId == attachment.OwnerUserId
                                       && a.ClientAttachmentId == attachment.ClientAttachmentId, None);
-        }        if (existing is not null)
+        }
+        if (existing is not null)
         {
-            existing.AttachmentId       = attachment.AttachmentId ?? existing.AttachmentId;
+            existing.AttachmentId = attachment.AttachmentId ?? existing.AttachmentId;
             existing.ClientAttachmentId = attachment.ClientAttachmentId ?? existing.ClientAttachmentId;
-            existing.MessageId          = attachment.MessageId ?? existing.MessageId;
-            existing.ConversationId     = attachment.ConversationId ?? existing.ConversationId;
-            existing.FileName           = attachment.FileName ?? existing.FileName;
-            existing.ContentType        = attachment.ContentType;
-            existing.SizeBytes          = attachment.SizeBytes;
-            existing.Sha256             = attachment.Sha256 ?? existing.Sha256;
-            existing.DownloadPath       = attachment.DownloadPath ?? existing.DownloadPath;
-            existing.ObjectKey          = attachment.ObjectKey ?? existing.ObjectKey;
-            existing.ThumbnailPath      = attachment.ThumbnailPath ?? existing.ThumbnailPath;
-            existing.LocalCachePath     = attachment.LocalCachePath ?? existing.LocalCachePath;
+            existing.MessageId = attachment.MessageId ?? existing.MessageId;
+            existing.ConversationId = attachment.ConversationId ?? existing.ConversationId;
+            existing.FileName = attachment.FileName ?? existing.FileName;
+            existing.ContentType = attachment.ContentType;
+            existing.SizeBytes = attachment.SizeBytes;
+            existing.Sha256 = attachment.Sha256 ?? existing.Sha256;
+            existing.DownloadPath = attachment.DownloadPath ?? existing.DownloadPath;
+            existing.ObjectKey = attachment.ObjectKey ?? existing.ObjectKey;
+            existing.ThumbnailPath = attachment.ThumbnailPath ?? existing.ThumbnailPath;
+            existing.LocalCachePath = attachment.LocalCachePath ?? existing.LocalCachePath;
             existing.LocalThumbnailPath = attachment.LocalThumbnailPath ?? existing.LocalThumbnailPath;
             existing.LocalUploadingPath = attachment.LocalUploadingPath ?? existing.LocalUploadingPath;
-            existing.RetryCount         = attachment.RetryCount;
-            existing.Status             = attachment.Status;
-            existing.FailureReason      = attachment.FailureReason ?? existing.FailureReason;
-            existing.UpdatedAt          = DateTime.UtcNow;
+            existing.RetryCount = attachment.RetryCount;
+            existing.Status = attachment.Status;
+            existing.FailureReason = attachment.FailureReason ?? existing.FailureReason;
+            existing.UpdatedAt = DateTime.UtcNow;
         }
         else
         {

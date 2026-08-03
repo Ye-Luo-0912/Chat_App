@@ -7,7 +7,9 @@ namespace Chat_App.Infrastructure.Persistence;
 /// - 路径固定在用户应用数据目录，避免只读安装目录无法持久化。
 /// - 连接字符串只使用 Microsoft.Data.Sqlite 官方支持的关键字，
 /// 不再使用 Journal Mode / Synchronous / Busy Timeout 等非官方项。
-/// - WAL / NORMAL / busy_timeout / foreign_keys 由 ClientDbContext.OnConfiguring 通过 PRAGMA 执行。
+/// - WAL / NORMAL / busy_timeout / foreign_keys 由 SqlitePragmaInterceptor（EF Core
+/// DbConnectionInterceptor）在每个连接打开时统一执行；连接字符串的 ForeignKeys=true /
+/// DefaultTimeout=5 为双保险。
 /// </summary>
 public static class DbPathProvider
 {

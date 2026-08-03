@@ -25,7 +25,8 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     // ---- 阶段 3 附件元数据 ----
     public DbSet<LocalAttachment> Attachments => Set<LocalAttachment>();
 
-    // PRAGMA 通过 SqlitePragmaInterceptor 在每次连接打开时执行，不在此处调用 ExecuteSqlRaw。
+    // PRAGMA 由 SqlitePragmaInterceptor（EF Core DbConnectionInterceptor，在 AddPooledDbContextFactory
+    // 的 options 中注册）在每个连接打开时统一执行，不在此处调用 ExecuteSqlRaw。
     // OnConfiguring 由池化工厂在租用上下文时调用一次，不适合做 PRAGMA。
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
