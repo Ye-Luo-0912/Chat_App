@@ -193,6 +193,9 @@ public partial class App : Application
         var outboxProcessor = _services.GetRequiredService<OutboxProcessor>();
         outboxProcessor.Start();
 
+        // 生产配置校验：服务器端点/认证/TLS 首启前置检查（不合规则仅告警，登录页可覆盖）
+        ValidateProductionConfiguration();
+
         // 注册诊断指标源并启动周期聚合导出（队列积压 / 写延迟 p95/p99 / 网络重连 / 同步统计）
         var diagnostics = _services.GetRequiredService<DiagnosticsService>();
         diagnostics.AddSource(_services.GetRequiredService<DatabaseWriteQueue>());
@@ -262,8 +265,52 @@ public partial class App : Application
             Log.Warning(ex, "关闭应用：数据库写入队列排空失败（继续退出）");
         }
 
+        // DI 容器完整释放（S2）：单例组件的 IDisposable/IAsyncDisposable 统一收尾
+        //（诊断定时器、恢复服务、连接协调器、数据库工厂池等），防止句柄/定时器泄漏。
+        try
+        {
+            if (_services is IAsyncDisposable asyncDisposable)
+                asyncDisposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            else if (_services is IDisposable disposable)
+                disposable.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "关闭应用：DI 容器释放失败（继续退出）");
+        }
+
         Log.Information("应用程序退出，日志已落盘");
         Log.CloseAndFlush();
+    }
+
+    /// <summary>
+    /// 生产配置验证（S2）：服务器端点存在且为合法 https URI、TLS 保持开启。
+    /// 不合规仅告警不阻断（登录页/设置页可覆盖端点），保证误配可即时发现。
+    /// </summary>
+    private void ValidateProductionConfiguration()
+    {
+        try
+        {
+            var configuration = _services.GetRequiredService<IConfiguration>();
+            var authBaseUrl = configuration["AuthServer:BaseUrl"];
+            if (string.IsNullOrWhiteSpace(authBaseUrl)
+                || !Uri.TryCreate(authBaseUrl, UriKind.Absolute, out var authUri)
+                || (authUri.Scheme != Uri.UriSchemeHttps && !authUri.IsLoopback))
+            {
+                Log.Warning(
+                    "生产配置校验：AuthServer:BaseUrl 缺失或非 HTTPS（当前 '{AuthBaseUrl}'），请确认服务器证书与地址，登录页可手动覆盖",
+                    authBaseUrl);
+            }
+
+            if (bool.TryParse(configuration["Tcp:UseTls"], out var useTls) && !useTls)
+            {
+                Log.Warning("生产配置校验：Tcp:UseTls 被显式关闭——明文传输，仅限内网调试环境");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "生产配置校验失败（不阻断启动）");
+        }
     }
 
     /// <summary>
