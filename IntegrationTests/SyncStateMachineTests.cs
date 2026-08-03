@@ -522,7 +522,7 @@ public class SyncStateMachineTests : IDisposable
                             InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
                                 new MessageHistoryPageDto
                                 {
-                                    RequestId = req.RequestId,
+                                    RequestId = req.RequestId ?? string.Empty,
                                     Succeeded = true,
                                     ConversationId = req.ConversationId ?? string.Empty,
                                     Items = ordered,
@@ -612,7 +612,7 @@ public class SyncStateMachineTests : IDisposable
                             if (req is null)
                                 return;
                             var resp = bootstrap();
-                            resp.RequestId = req.RequestId;
+                            resp.RequestId = req.RequestId ?? string.Empty;
                             InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, resp);
                             break;
                         }
@@ -622,7 +622,7 @@ public class SyncStateMachineTests : IDisposable
                             if (req is null)
                                 return;
                             InjectPacket(tcp, serializer, PacketCommand.ConversationListPage,
-                                new ConversationListResponseDto { RequestId = req.RequestId, Succeeded = true, HasMore = false });
+                                new ConversationListResponseDto { RequestId = req.RequestId ?? string.Empty, Succeeded = true, HasMore = false });
                             break;
                         }
                     case PacketCommand.MessageHistoryRequest:
@@ -633,7 +633,7 @@ public class SyncStateMachineTests : IDisposable
                             InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
                                 new MessageHistoryPageDto
                                 {
-                                    RequestId = req.RequestId,
+                                    RequestId = req.RequestId ?? string.Empty,
                                     Succeeded = true,
                                     ConversationId = req.ConversationId ?? string.Empty,
                                     HasMore = false
@@ -751,5 +751,6 @@ public class SyncStateMachineTests : IDisposable
         }
     }
 }
+
 
 

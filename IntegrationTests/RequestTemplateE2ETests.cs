@@ -95,7 +95,7 @@ public class RequestTemplateE2ETests
         {
             var resp = await client.QuerySyncBootstrapAsync();
             Assert.True(resp.Succeeded);
-            Assert.Equal(1, resp.Conversations.Count);
+            Assert.Single(resp.Conversations);
             var seen = server.Frames.Single(f => f.Command == PacketCommand.SyncBootstrapRequest);
             Assert.Equal(seen.RequestId, resp.RequestId);
         });
@@ -218,91 +218,91 @@ public class RequestTemplateE2ETests
                     switch (cmd)
                     {
                         case PacketCommand.ConversationListRequest:
-                        {
-                            var req = serializer.Deserialize<ConversationListRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.ConversationListPage,
-                                new ConversationListResponseDto { RequestId = req.RequestId, Succeeded = true });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<ConversationListRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.ConversationListPage,
+                                    new ConversationListResponseDto { RequestId = req.RequestId ?? string.Empty, Succeeded = true });
+                                break;
+                            }
                         case PacketCommand.ConversationSetPrefsRequest:
-                        {
-                            var req = serializer.Deserialize<ConversationSetPrefsRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.ConversationSetPrefsResponse,
-                                new ConversationSetPrefsResponseDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    ConversationId = req.ConversationId,
-                                    IsPinned = req.Pinned ?? false
-                                });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<ConversationSetPrefsRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.ConversationSetPrefsResponse,
+                                    new ConversationSetPrefsResponseDto
+                                    {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        ConversationId = req.ConversationId,
+                                        IsPinned = req.Pinned ?? false
+                                    });
+                                break;
+                            }
                         case PacketCommand.MessageRecallRequest:
-                        {
-                            var req = serializer.Deserialize<MessageRecallRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.MessageRecallAck,
-                                new MessageRecallAcknowledgementDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    MessageId = req.MessageId,
-                                    ConversationId = ConvId,
-                                    RecalledAtMs = 1234567890
-                                });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<MessageRecallRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.MessageRecallAck,
+                                    new MessageRecallAcknowledgementDto
+                                    {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        MessageId = req.MessageId,
+                                        ConversationId = ConvId,
+                                        RecalledAtMs = 1234567890
+                                    });
+                                break;
+                            }
                         case PacketCommand.MessageEditRequest:
-                        {
-                            var req = serializer.Deserialize<MessageEditRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.MessageEditAck,
-                                new MessageEditAcknowledgementDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    MessageId = req.MessageId,
-                                    ConversationId = ConvId,
-                                    Content = req.Content,
-                                    EditVersion = 2,
-                                    EditedAtMs = 1234567890
-                                });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<MessageEditRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.MessageEditAck,
+                                    new MessageEditAcknowledgementDto
+                                    {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        MessageId = req.MessageId,
+                                        ConversationId = ConvId,
+                                        Content = req.Content,
+                                        EditVersion = 2,
+                                        EditedAtMs = 1234567890
+                                    });
+                                break;
+                            }
                         case PacketCommand.PresenceQuery:
-                        {
-                            var req = serializer.Deserialize<PresenceQueryRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.PresenceSnapshot,
-                                new PresenceSnapshotResponseDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Items = new[]
+                            {
+                                var req = serializer.Deserialize<PresenceQueryRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.PresenceSnapshot,
+                                    new PresenceSnapshotResponseDto
                                     {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Items = new[]
+                                        {
                                         new PresenceSnapshotItemDto { UserId = PeerId, IsOnline = true }
-                                    }
-                                });
-                            break;
-                        }
+                                        }
+                                    });
+                                break;
+                            }
                         case PacketCommand.SyncBootstrapRequest:
-                        {
-                            var req = serializer.Deserialize<SyncBootstrapRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse,
-                                new SyncBootstrapResponseDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    Conversations = new[]
+                            {
+                                var req = serializer.Deserialize<SyncBootstrapRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse,
+                                    new SyncBootstrapResponseDto
                                     {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        Conversations = new[]
+                                        {
                                         new ConversationListItemDto
                                         {
                                             ConversationId = ConvId,
@@ -313,23 +313,23 @@ public class RequestTemplateE2ETests
                                             LastMessageAtMs = 1234567890,
                                             LastSenderUserId = PeerId
                                         }
-                                    }
-                                });
-                            break;
-                        }
+                                        }
+                                    });
+                                break;
+                            }
                         case PacketCommand.MessageHistoryRequest:
-                        {
-                            var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
-                                new MessageHistoryPageDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    ConversationId = req.ConversationId,
-                                    Items = new[]
+                            {
+                                var req = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage,
+                                    new MessageHistoryPageDto
                                     {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        ConversationId = req.ConversationId,
+                                        Items = new[]
+                                        {
                                         new MessageHistoryItemDto
                                         {
                                             MessageId = "svr-1",
@@ -338,35 +338,35 @@ public class RequestTemplateE2ETests
                                             Content = "历史消息",
                                             ReceivedAtMs = 1234567890
                                         }
-                                    },
-                                    HasMore = false
-                                });
-                            break;
-                        }
+                                        },
+                                        HasMore = false
+                                    });
+                                break;
+                            }
                         case PacketCommand.MessageReceipt:
-                        {
-                            var req = serializer.Deserialize<MessageReceiptDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.MessageReceiptAck,
-                                new MessageReceiptAckDto { RequestId = req.RequestId, Accepted = true });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<MessageReceiptDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.MessageReceiptAck,
+                                    new MessageReceiptAckDto { RequestId = req.RequestId ?? string.Empty, Accepted = true });
+                                break;
+                            }
                         case PacketCommand.ConversationMarkReadRequest:
-                        {
-                            var req = serializer.Deserialize<ConversationMarkReadRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            InjectPacket(tcp, serializer, PacketCommand.ConversationMarkReadResponse,
-                                new ConversationMarkReadResponseDto
-                                {
-                                    RequestId = req.RequestId,
-                                    Succeeded = true,
-                                    ConversationId = req.ConversationId,
-                                    UnreadCount = 0
-                                });
-                            break;
-                        }
+                            {
+                                var req = serializer.Deserialize<ConversationMarkReadRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                InjectPacket(tcp, serializer, PacketCommand.ConversationMarkReadResponse,
+                                    new ConversationMarkReadResponseDto
+                                    {
+                                        RequestId = req.RequestId ?? string.Empty,
+                                        Succeeded = true,
+                                        ConversationId = req.ConversationId,
+                                        UnreadCount = 0
+                                    });
+                                break;
+                            }
                     }
                 }
                 catch
@@ -461,3 +461,4 @@ public class RequestTemplateE2ETests
         }
     }
 }
+

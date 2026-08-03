@@ -127,7 +127,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             if (req is null) return;
                             InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, new SyncBootstrapResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Conversations = new[]
                                 {
@@ -165,7 +165,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             listPagesServed++;
                             InjectPacket(tcp, serializer, PacketCommand.ConversationListPage, new ConversationListResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Items = new[] { ConvItem(ConvB, "b-1", "B-1", t0 + 2000) },
                                 HasMore = false,
@@ -181,7 +181,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             historyBeforeParams.Add($"{req.ConversationId}/{req.BeforeMessageId}/{req.BeforeReceivedAtMs}");
                             var page = new MessageHistoryPageDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 ConversationId = req.ConversationId ?? string.Empty,
                                 HasMore = false
@@ -274,7 +274,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             if (req is null) return;
                             InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, new SyncBootstrapResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Conversations = new[] { ConvItem(ConvA, "a-2", "A-2", t0 + 1000) },
                                 ConversationsHasMore = false,
@@ -299,7 +299,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             // 合法协议语义：Before (t0+1000, a-2) → 返回更早的 a-1（t0）
                             var page = new MessageHistoryPageDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 ConversationId = req.ConversationId ?? string.Empty,
                                 HasMore = false
@@ -389,7 +389,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
                             if (req is null) return;
                             InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, new SyncBootstrapResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Conversations = new[]
                                 {
@@ -535,5 +535,6 @@ public class SyncBootstrapMultiPageTests : IDisposable
         }
     }
 }
+
 
 

@@ -104,17 +104,28 @@ public class AttachmentPathTraversalTests : IDisposable
 
     /// <summary>
     /// 相对路径逃逸必须被 SafeResolve 拒绝（SecurityException），
-    /// 合法相对路径正常解析。
+    /// 合法相对路径正常解析。用例使用跨平台分隔符（正斜杠）；
+    /// Windows 专属反斜杠用例仅在该平台生效（Linux 上反斜杠是合法文件名字符）。
     /// </summary>
     [Theory]
-    [InlineData("..\\..\\..\\etc\\passwd")]
+    [InlineData("../../../etc/passwd")]
     [InlineData("../../outside.txt")]
-    [InlineData("..\\evil\\..\\..\\x")]
-    [InlineData("uploading\\..\\..\\..\\root.txt")]
+    [InlineData("../evil/../../x")]
+    [InlineData("uploading/../../../root.txt")]
     public void RelativePath_Escape_Throws_SecurityException(string relativePath)
     {
         Assert.Throws<SecurityException>(() => _storage.ResolvePath(1001, relativePath));
         Assert.Throws<SecurityException>(() => _storage.OpenUploadingRead(1001, relativePath));
+    }
+
+    /// <summary>Windows 专属：反斜杠分隔符的逃逸路径同样被拒绝（Linux 上该字符串是普通文件名）。</summary>
+    [Fact]
+    public void RelativePath_Escape_Backslash_Throws_On_Windows()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // 反斜杠在 Linux/macOS 不是路径分隔符，逃逸不成立
+        Assert.Throws<SecurityException>(() => _storage.ResolvePath(1001, "..\\..\\..\\etc\\passwd"));
+        Assert.Throws<SecurityException>(() => _storage.OpenUploadingRead(1001, "uploading\\..\\..\\..\\root.txt"));
     }
 
     /// <summary>对照组：合法 AttachmentId 与文件名正常工作，无误伤。</summary>

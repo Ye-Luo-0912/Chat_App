@@ -22,7 +22,11 @@ jobs:
 
   unit:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -32,7 +36,11 @@ jobs:
 
   protocol:
     name: Protocol Tests
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -42,7 +50,11 @@ jobs:
 
   integration:
     name: Integration Tests
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -70,6 +82,18 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet test Protocol.Tests -c Release --nologo --filter "FullyQualifiedName~AllocationBudgetTests"
 
+  performance:
+    name: Performance Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # 基准 JSON → 与基线比较 → 超过允许回归比例（20%）→ CI 失败
+      - run: dotnet run -c Release --project Benchmarks -- --filter "*" --job Short --exporters JSON --artifacts "$RUNNER_TEMP/bench"
+      - run: python3 .github/scripts/compare_benchmarks.py "$RUNNER_TEMP/bench" benchmarks/baseline.json 0.20
+
   analyzers:
     name: Analyzers (warnaserror)
     runs-on: ubuntu-latest
@@ -78,7 +102,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet build Chat_App.sln -c Release --nologo -warnaserror
+      # CS0067（测试桩接口事件未使用）排除：接口强制实现但桩不触发属预期；
+      # 其余警告（nullable 等）一律视为错误
+      - run: dotnet build Chat_App.sln -c Release --nologo -warnaserror -p:WarningsNotAsErrors=CS0067
 
   format:
     name: Code Format
@@ -90,6 +116,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      # 全新 runner 无 project.assets.json：先 restore 再 verify
+      - run: dotnet restore Chat_App.sln --nologo
       # 只校验本次变更的 .cs 文件：仓库存在历史格式债务（未跑过 dotnet format），
       # 全量校验会因存量违规失败；门禁只拦"新引入"的格式问题。
       - name: Verify format of changed files
@@ -111,4 +139,26 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet list Chat_App.sln package --vulnerable --include-transitive
+      # dotnet list 发现漏洞时退出码不可靠：输出 JSON 并显式按严重等级判定
+      - name: Scan and gate on vulnerabilities
+        shell: bash
+        run: |
+          dotnet list Chat_App.sln package --vulnerable --include-transitive --format json > "$RUNNER_TEMP/vuln.json" 2>/dev/null || true
+          python3 - <<'EOF'
+          import json
+          path = "$RUNNER_TEMP/vuln.json"
+          with open(path, encoding="utf-8") as f:
+              data = json.load(f)
+          vulnerable = []
+          for proj in data.get("projects", []):
+              for fw in proj.get("frameworks", []):
+                  for pkg in fw.get("topLevelPackages", []) + fw.get("transitivePackages", []):
+                      for vuln in pkg.get("vulnerabilities", []):
+                          sev = vuln.get("severity", "")
+                          vulnerable.append((pkg.get("name"), sev, vuln.get("advisoryurl")))
+          if vulnerable:
+              for name, sev, url in vulnerable:
+                  print(f"VULNERABLE: {name} [{sev}] {url}")
+              raise SystemExit(1)
+          print("no known vulnerabilities")
+          EOF

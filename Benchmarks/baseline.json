@@ -1,0 +1,17 @@
+{
+  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 512)": 61.01,
+  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 64)": 33.05,
+  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 4096)": 205.87,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 512)": 152992.69,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 0)": 48.01,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 0)": 33064.0,
+  "Benchmarks.SerializationBenchmarks.RoundTrip": 1148.02,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 4096)": 473015.3,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 512)": 102.42,
+  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 0)": 20.21,
+  "Benchmarks.SerializationBenchmarks.DeserializeSingleSegment": 607.39,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 4096)": 304.94,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 64)": 64.62,
+  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 64)": 78058.88,
+  "Benchmarks.SerializationBenchmarks.Serialize": 349.93
+}

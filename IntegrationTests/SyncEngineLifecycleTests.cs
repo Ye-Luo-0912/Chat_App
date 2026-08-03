@@ -108,7 +108,7 @@ public class SyncEngineLifecycleTests : IDisposable
                             var respond = () => InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse,
                                 new SyncBootstrapResponseDto
                                 {
-                                    RequestId = req.RequestId,
+                                    RequestId = req.RequestId ?? string.Empty,
                                     Succeeded = true,
                                     Conversations = Array.Empty<ConversationListItemDto>(),
                                     ConversationsHasMore = false,
@@ -182,7 +182,7 @@ public class SyncEngineLifecycleTests : IDisposable
                             if (req is null) return;
                             InjectPacket(tcp, serializer, PacketCommand.SyncBootstrapResponse, new SyncBootstrapResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Conversations = new[] { ConvItem("conv-a", "a", 1_000L) },
                                 ConversationsNextCursor = new ConversationListCursorDto { LastMessageAtMs = 1_000L, ConversationId = "conv-a" },
@@ -198,7 +198,7 @@ public class SyncEngineLifecycleTests : IDisposable
                             // 永远返回 HasMore=true：翻页将耗尽预算
                             InjectPacket(tcp, serializer, PacketCommand.ConversationListPage, new ConversationListResponseDto
                             {
-                                RequestId = req.RequestId,
+                                RequestId = req.RequestId ?? string.Empty,
                                 Succeeded = true,
                                 Items = new[] { ConvItem("conv-more", "m", 2_000L) },
                                 NextCursor = new ConversationListCursorDto { LastMessageAtMs = 2_000L, ConversationId = "conv-more" },
@@ -321,3 +321,4 @@ public class SyncEngineLifecycleTests : IDisposable
         }
     }
 }
+
