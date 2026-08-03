@@ -1490,7 +1490,63 @@ public class DatabaseService(
                 .SetProperty(x => x.LeaseUntil, (DateTime?)null), None);
     }
 
-    // ---- 群聊领域仓储 ----
+    /// <summary>
+    /// FTS5 本地消息搜索：按全文匹配 Content（带转义，防 FTS 注入），
+    /// 账户隔离（OwnerUserId 必筛），可选会话过滤 + 时间游标分页（ReceivedAtMs 倒序）。
+    /// 返回匹配的完整 LocalMessage（join Messages 取全列）。
+    /// </summary>
+    public Task<List<LocalMessage>> SearchMessagesAsync(
+        long ownerUserId, string query, string? conversationId = null,
+        int limit = 50, long? beforeReceivedAtMs = null) =>
+        WriteAsync(() => SearchMessagesAsyncImpl(ownerUserId, query, conversationId, limit, beforeReceivedAtMs));
+
+    private async Task<List<LocalMessage>> SearchMessagesAsyncImpl(
+        long ownerUserId, string query, string? conversationId,
+        int limit, long? beforeReceivedAtMs)
+    {
+        var match = FtsQueryBuilder.BuildMatchQuery(query);
+        var like = FtsQueryBuilder.BuildLikePattern(query);
+        if ((match is null && like is null) || limit <= 0)
+            return new List<LocalMessage>();
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        // FTS5 前缀命中（索引加速）∪ LIKE 兜底（非前缀子串，如词在末尾）：
+        // 外部内容表 MATCH + join Messages 取全列；账户隔离 + 会话/时间游标分页。
+        // rowid 与 Messages.Id 对齐（content_rowid='Id'）；参数按出现顺序编号。
+        var sb = new System.Text.StringBuilder("""
+            SELECT m."Id", m."OwnerUserId", m."MessageId", m."ClientMessageId", m."ConversationId",
+                   m."SenderUserId", m."ReceiverUserId", m."Content", m."ReceivedAtMs",
+                   m."DeliveredAtMs", m."ReadAtMs", m."RecalledAtMs", m."EditVersion", m."EditedAtMs",
+                   m."AttachmentsJson", m."ReplyToMessageId", m."ReplyToSenderUserId", m."ReplyToPreview",
+                   m."ForwardedFromMessageId", m."ForwardedFromSenderUserId", m."ForwardedFromPreview",
+                   m."Status", m."FailureReason", m."RetryCount", m."CreatedAt", m."UpdatedAt"
+            FROM "Messages" m
+            WHERE m."OwnerUserId" = {0}
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM "MessagesFts" f
+                      WHERE f.rowid = m."Id" AND "MessagesFts" MATCH {1}
+                  )
+                  OR m."Content" LIKE {2} ESCAPE '\'
+              )
+            """);
+        var args = new List<object> { ownerUserId, match ?? string.Empty, like ?? string.Empty };
+        if (conversationId is not null)
+        {
+            sb.Append("AND m.\"ConversationId\" = {").Append(args.Count).Append("} ");
+            args.Add(conversationId);
+        }
+        if (beforeReceivedAtMs is not null)
+        {
+            sb.Append("AND m.\"ReceivedAtMs\" < {").Append(args.Count).Append("} ");
+            args.Add(beforeReceivedAtMs.Value);
+        }
+        sb.Append("ORDER BY m.\"ReceivedAtMs\" DESC LIMIT {").Append(args.Count).Append('}');
+        args.Add(limit);
+
+        return await db.Database.SqlQueryRaw<LocalMessage>(sb.ToString(), args.ToArray())
+            .ToListAsync(None);
+    }
 
     /// <summary>
     /// 成员加入/角色变更落库（版本单调）：仅当事件时间晚于已记录时间才应用（防重放/乱序）。
@@ -1696,6 +1752,7 @@ public class DatabaseService(
         return true;
     }
 
+    /// <summary>查询群状态。</summary>
     public Task<LocalGroupState?> GetGroupStateAsync(long ownerUserId, string conversationId) =>
         WriteAsync(() => GetGroupStateAsyncImpl(ownerUserId, conversationId));
 
@@ -1704,6 +1761,44 @@ public class DatabaseService(
         await using var db = await contextFactory.CreateDbContextAsync(None);
         return await db.GroupStates
             .FirstOrDefaultAsync(g => g.OwnerUserId == ownerUserId && g.ConversationId == conversationId, None);
+    }
+
+    /// <summary>
+    /// 群成员搜索（活跃成员）：按 UserId 前缀 或 好友显示名/备注包含查询词 匹配。
+    /// 搜索词中的 LIKE 通配符（%/_）转义，杜绝注入。
+    /// </summary>
+    public Task<List<LocalGroupMember>> SearchGroupMembersAsync(
+        long ownerUserId, string conversationId, string query, int limit = 50) =>
+        WriteAsync(() => SearchGroupMembersAsyncImpl(ownerUserId, conversationId, query, limit));
+
+    private async Task<List<LocalGroupMember>> SearchGroupMembersAsyncImpl(
+        long ownerUserId, string conversationId, string query, int limit)
+    {
+        var q = query.Trim();
+        if (q.Length == 0 || limit <= 0)
+            return new List<LocalGroupMember>();
+
+        // LIKE 转义：\% \_ \\（SQLite 默认 ESCAPE '\'）
+        var escaped = q
+            .Replace("\\", "\\\\")
+            .Replace("%", "\\%")
+            .Replace("_", "\\_");
+        var prefix = escaped + "%";
+        var contains = "%" + escaped + "%";
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.GroupMembers
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.RemovedAtMs == null)
+            .Where(m => EF.Functions.Like(m.UserId.ToString(), prefix)
+                     || db.Friends.Any(f => f.OwnerUserId == ownerUserId
+                                         && f.FriendId == m.UserId
+                                         && (EF.Functions.Like(f.DisplayName ?? string.Empty, contains)
+                                             || EF.Functions.Like(f.FriendName, contains))))
+            .OrderBy(m => m.JoinedAtMs)
+            .Take(limit)
+            .ToListAsync(None);
     }
 
     /// <inheritdoc />

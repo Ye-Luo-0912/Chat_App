@@ -152,6 +152,14 @@ public interface IDatabaseService
 
     // ---- 群聊领域仓储 ----
 
+    /// <summary>
+    /// FTS5 本地消息全文搜索（Content 匹配，带转义）；账户隔离必筛，
+    /// 可选会话过滤 + ReceivedAtMs 游标分页（倒序）。
+    /// </summary>
+    Task<List<LocalMessage>> SearchMessagesAsync(
+        long ownerUserId, string query, string? conversationId = null,
+        int limit = 50, long? beforeReceivedAtMs = null);
+
     /// <summary>成员加入/角色变更落库（OccurredAtMs 单调，防重放/乱序）。返回是否应用。</summary>
     Task<bool> UpsertGroupMemberAsync(long ownerUserId, string conversationId, long userId, byte role, long occurredAtMs, long revision);
 
@@ -169,6 +177,10 @@ public interface IDatabaseService
 
     /// <summary>查询群状态。</summary>
     Task<LocalGroupState?> GetGroupStateAsync(long ownerUserId, string conversationId);
+
+    /// <summary>群成员搜索（活跃成员）：UserId 前缀 或 好友显示名/备注包含匹配。LIKE 通配符已转义。</summary>
+    Task<List<LocalGroupMember>> SearchGroupMembersAsync(
+        long ownerUserId, string conversationId, string query, int limit = 50);
 
     /// <summary>手动重试：Failed/Cancelled → Queued，重置尝试元数据与分类。返回是否转换成功。</summary>
     Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId);

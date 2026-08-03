@@ -58,6 +58,87 @@ public class GroupDomainTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// 群成员搜索：UserId 前缀 + 好友显示名/备注包含匹配；LIKE 通配符不产生注入。
+    /// </summary>
+    [Fact]
+    public async Task Group_Member_Search_Matches_Id_Prefix_And_Friend_Name()
+    {
+        await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9101, (byte)ConversationMemberRole.Member, 1_000, 1_000);
+        await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9201, (byte)ConversationMemberRole.Member, 2_000, 2_000);
+        await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9301, (byte)ConversationMemberRole.Member, 3_000, 3_000);
+        // 好友名称：9101 → "小明"，9201 → "小红"
+        await _db.AddFriendAsync([
+            new LocalFriend { OwnerUserId = OwnerId, FriendId = 9101, FriendName = "小明", DisplayName = "小明", Status = FriendshipStatus.Approved, LastSynced = DateTime.UtcNow },
+            new LocalFriend { OwnerUserId = OwnerId, FriendId = 9201, FriendName = "小红", DisplayName = "小红", Status = FriendshipStatus.Approved, LastSynced = DateTime.UtcNow }
+        ]);
+
+        // 按 UserId 前缀
+        var byId = await _db.SearchGroupMembersAsync(OwnerId, GroupId, "91");
+        Assert.Single(byId);
+        Assert.Equal(9101, byId[0].UserId);
+
+        // 按好友名称包含
+        var byName = await _db.SearchGroupMembersAsync(OwnerId, GroupId, "小");
+        Assert.Equal(2, byName.Count);
+        Assert.Contains(byName, m => m.UserId == 9101);
+        Assert.Contains(byName, m => m.UserId == 9201);
+
+        // 无名称好友（9301）只按 Id 命中
+        var by9301 = await _db.SearchGroupMembersAsync(OwnerId, GroupId, "9301");
+        Assert.Single(by9301);
+
+        // LIKE 通配符转义：% 与 _ 不产生注入式全匹配
+        Assert.Empty(await _db.SearchGroupMembersAsync(OwnerId, GroupId, "%"));
+        Assert.Empty(await _db.SearchGroupMembersAsync(OwnerId, GroupId, "_"));
+    }
+
+    /// <summary>
+    /// 被移除/解散后的本地清理策略：
+    /// 成员记录保留（RemovedAtMs 记录历史，供"群已读成员"等后续能力），
+    /// 活跃列表立即为空；群解散 tombstone 保留；该会话 Outbox 永久失败。
+    /// </summary>
+    [Fact]
+    public async Task Removed_Or_Dissolved_Group_Local_Cleanup_Semantics()
+    {
+        const long t1 = 1_700_000_000_000;
+        await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9101, (byte)ConversationMemberRole.Member, t1, t1);
+        await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9201, (byte)ConversationMemberRole.Member, t1 + 1000, t1 + 1000);
+
+        // 成员被移除：活跃列表立即排除，历史记录保留（RemovedAtMs）
+        await _db.MarkGroupMemberRemovedAsync(OwnerId, GroupId, 9101, t1 + 2000, t1 + 2000);
+        var active = await _db.GetGroupMembersAsync(OwnerId, GroupId);
+        Assert.Single(active);
+        Assert.Equal(9201, active[0].UserId);
+
+        // 该会话未发送 Outbox 永久失败（成员移除清理）
+        var clientId = $"g-{Guid.NewGuid():N}"[..20];
+        await _db.EnqueueOutboxAsync(new LocalOutboxMessage
+        {
+            OwnerUserId = OwnerId,
+            ClientMessageId = clientId,
+            ConversationId = GroupId,
+            ConversationType = (byte)ConversationTypeDto.Group,
+            Content = "待发送",
+            Status = OutboxStatus.Queued,
+            QueuedAt = DateTime.UtcNow
+        });
+        await _db.MarkOutboxPermanentByConversationAsync(OwnerId, GroupId, "成员已被移出群聊");
+        var outbox = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
+        Assert.Equal(OutboxFailureKind.Permanent, outbox!.FailureKind);
+
+        // 群解散：tombstone 保留（DissolvedAtMs），成员历史不删除（供审计/已读成员等能力）；
+        // 解散由 GroupStates.DissolvedAtMs 表达，UI 侧解散事件已关闭成员面板。
+        await _db.MarkGroupDissolvedAsync(OwnerId, GroupId, t1 + 3000, t1 + 3000);
+        var state = await _db.GetGroupStateAsync(OwnerId, GroupId);
+        Assert.NotNull(state);
+        Assert.Equal(t1 + 3000, state!.DissolvedAtMs);
+        // 成员历史完整保留：9101 移除标记 + 9201 活跃记录都在
+        var activeAfterDissolve = await _db.GetGroupMembersAsync(OwnerId, GroupId);
+        Assert.Single(activeAfterDissolve);
+        Assert.Equal(9201, activeAfterDissolve[0].UserId);
+    }
+
     private sealed class DbContextFactoryStub(string dbPath) : IDbContextFactory<ClientDbContext>
     {
         public ClientDbContext CreateDbContext()
