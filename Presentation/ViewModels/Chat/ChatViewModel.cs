@@ -175,6 +175,75 @@ public class ChatViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand<LocalConversation> DeleteConversationCommand { get; }
     public AsyncRelayCommand CancelForwardCommand { get; }
 
+    // ── 群聊 UI 状态与命令 ──
+
+    private bool _isCreatingGroup;
+    public bool IsCreatingGroup
+    {
+        get => _isCreatingGroup;
+        private set
+        {
+            if (SetProperty(ref _isCreatingGroup, value))
+            {
+                CreateGroupCommand.RaiseCanExecuteChanged();
+                CancelCreateGroupCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    private string _groupTitleInput = string.Empty;
+    public string GroupTitleInput
+    {
+        get => _groupTitleInput;
+        set
+        {
+            if (SetProperty(ref _groupTitleInput, value))
+                CreateGroupCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    /// <summary>建群面板好友勾选列表（创建时从好友列表快照填充）。</summary>
+    public ObservableCollection<GroupMemberSelectionItem> GroupCreationCandidates { get; } = [];
+
+    private bool _isShowingGroupMembers;
+    public bool IsShowingGroupMembers
+    {
+        get => _isShowingGroupMembers;
+        private set
+        {
+            if (SetProperty(ref _isShowingGroupMembers, value))
+                CloseGroupMembersCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    /// <summary>成员面板列表（服务端 ListGroupMembers 投影）。</summary>
+    public ObservableCollection<GroupMemberUiItem> GroupMembers { get; } = [];
+
+    private bool _isAddingGroupMembers;
+    public bool IsAddingGroupMembers
+    {
+        get => _isAddingGroupMembers;
+        private set
+        {
+            if (SetProperty(ref _isAddingGroupMembers, value))
+                AddGroupMembersCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    /// <summary>添加成员时好友勾选列表（未入群的好友）。</summary>
+    public ObservableCollection<GroupMemberSelectionItem> GroupAddCandidates { get; } = [];
+
+    public AsyncRelayCommand OpenCreateGroupPanelCommand { get; }
+    public AsyncRelayCommand CreateGroupCommand { get; }
+    public AsyncRelayCommand CancelCreateGroupCommand { get; }
+    public AsyncRelayCommand<LocalConversation> ShowGroupMembersCommand { get; }
+    public AsyncRelayCommand<LocalConversation> LeaveGroupCommand { get; }
+    public AsyncRelayCommand CloseGroupMembersCommand { get; }
+    public AsyncRelayCommand<GroupMemberUiItem> RemoveGroupMemberCommand { get; }
+    public AsyncRelayCommand<GroupMemberUiItem> ToggleGroupMemberRoleCommand { get; }
+    public AsyncRelayCommand ToggleAddGroupMembersCommand { get; }
+    public AsyncRelayCommand AddGroupMembersCommand { get; }
+
 #pragma warning disable CS8618
     public ChatViewModel()
     {
@@ -218,6 +287,16 @@ public class ChatViewModel : ViewModelBase, IDisposable
             UnarchiveConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
             DeleteConversationCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
             CancelForwardCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            OpenCreateGroupPanelCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            CreateGroupCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            CancelCreateGroupCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            ShowGroupMembersCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            LeaveGroupCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            CloseGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            RemoveGroupMemberCommand = new AsyncRelayCommand<GroupMemberUiItem>(_ => Task.CompletedTask);
+            ToggleGroupMemberRoleCommand = new AsyncRelayCommand<GroupMemberUiItem>(_ => Task.CompletedTask);
+            ToggleAddGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            AddGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
         }
     }
 #pragma warning restore CS8618
@@ -286,6 +365,162 @@ public class ChatViewModel : ViewModelBase, IDisposable
                 return Task.CompletedTask;
             },
             () => IsSelectingForwardTarget);
+
+        // ── 群聊命令 ──
+
+        OpenCreateGroupPanelCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                if (!_chatSession.IsAuthenticated)
+                {
+                    _notificationService.ShowError("未连接服务器，无法创建群聊。");
+                    return Task.CompletedTask;
+                }
+                PopulateCandidates(GroupCreationCandidates, alreadyMemberIds: null);
+                GroupTitleInput = string.Empty;
+                IsCreatingGroup = true;
+                return Task.CompletedTask;
+            });
+
+        CreateGroupCommand = new AsyncRelayCommand(
+            async _ =>
+            {
+                var title = GroupTitleInput?.Trim();
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    _notificationService.ShowWarning("请输入群聊名称。");
+                    return;
+                }
+                var memberIds = GroupCreationCandidates
+                    .Where(c => c.IsSelected && c.UserId > 0)
+                    .Select(c => c.UserId)
+                    .ToArray();
+                var conversationId = await CreateGroupAsync(title, memberIds).ConfigureAwait(true);
+                if (conversationId is null)
+                    return;
+                IsCreatingGroup = false;
+                GroupTitleInput = string.Empty;
+            },
+            () => IsCreatingGroup && !string.IsNullOrWhiteSpace(GroupTitleInput),
+            ex => _notificationService.ShowError($"创建群聊失败: {ex.Message}"));
+
+        CancelCreateGroupCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                IsCreatingGroup = false;
+                GroupTitleInput = string.Empty;
+                return Task.CompletedTask;
+            },
+            () => IsCreatingGroup);
+
+        ShowGroupMembersCommand = new AsyncRelayCommand<LocalConversation>(
+            async conversation =>
+            {
+                if (conversation is null || !conversation.IsGroup)
+                    return;
+                await LoadGroupMembersAsync(conversation.ConversationId).ConfigureAwait(true);
+                IsShowingGroupMembers = true;
+            },
+            conversation => conversation is not null && conversation.IsGroup,
+            ex => _notificationService.ShowError($"加载群成员失败: {ex.Message}"));
+
+        LeaveGroupCommand = new AsyncRelayCommand<LocalConversation>(
+            LeaveGroupAsync,
+            conversation => conversation is not null && conversation.IsGroup,
+            ex => _notificationService.ShowError($"退出群聊失败: {ex.Message}"));
+
+        CloseGroupMembersCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                IsAddingGroupMembers = false;
+                IsShowingGroupMembers = false;
+                return Task.CompletedTask;
+            },
+            () => IsShowingGroupMembers);
+
+        RemoveGroupMemberCommand = new AsyncRelayCommand<GroupMemberUiItem>(
+            async member =>
+            {
+                var conversationId = SelectedConversation?.ConversationId;
+                if (member is null || string.IsNullOrWhiteSpace(conversationId) || member.IsSelf)
+                    return;
+                var response = await _chatSession.RemoveGroupMemberAsync(conversationId, member.UserId).ConfigureAwait(true);
+                if (!response.Succeeded)
+                {
+                    _notificationService.ShowError(response.ErrorMessage ?? response.ErrorCode ?? "移除成员失败");
+                    return;
+                }
+                _notificationService.ShowSuccess($"已移除 {member.DisplayName}");
+                await LoadGroupMembersAsync(conversationId).ConfigureAwait(true);
+            },
+            member => member is not null && !member.IsSelf,
+            ex => _notificationService.ShowError($"移除成员失败: {ex.Message}"));
+
+        ToggleGroupMemberRoleCommand = new AsyncRelayCommand<GroupMemberUiItem>(
+            async member =>
+            {
+                var conversationId = SelectedConversation?.ConversationId;
+                if (member is null || string.IsNullOrWhiteSpace(conversationId) || member.IsSelf)
+                    return;
+                var newRole = member.Role == ConversationMemberRole.Admin
+                    ? ConversationMemberRole.Member
+                    : ConversationMemberRole.Admin;
+                var response = await _chatSession.ChangeMemberRoleAsync(conversationId, member.UserId, newRole).ConfigureAwait(true);
+                if (!response.Succeeded)
+                {
+                    _notificationService.ShowError(response.ErrorMessage ?? response.ErrorCode ?? "变更角色失败");
+                    return;
+                }
+                member.Role = newRole;
+                _notificationService.ShowSuccess($"{member.DisplayName} 现为 {RoleName(newRole)}");
+            },
+            member => member is not null && !member.IsSelf && member.Role is ConversationMemberRole.Admin or ConversationMemberRole.Member,
+            ex => _notificationService.ShowError($"变更角色失败: {ex.Message}"));
+
+        ToggleAddGroupMembersCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                if (IsAddingGroupMembers)
+                {
+                    IsAddingGroupMembers = false;
+                    return Task.CompletedTask;
+                }
+                var conversationId = SelectedConversation?.ConversationId;
+                if (string.IsNullOrWhiteSpace(conversationId))
+                    return Task.CompletedTask;
+                var memberIds = GroupMembers.Select(m => m.UserId).ToHashSet();
+                PopulateCandidates(GroupAddCandidates, memberIds);
+                IsAddingGroupMembers = true;
+                return Task.CompletedTask;
+            });
+
+        AddGroupMembersCommand = new AsyncRelayCommand(
+            async _ =>
+            {
+                var conversationId = SelectedConversation?.ConversationId;
+                if (string.IsNullOrWhiteSpace(conversationId))
+                    return;
+                var memberIds = GroupAddCandidates
+                    .Where(c => c.IsSelected && c.UserId > 0)
+                    .Select(c => c.UserId)
+                    .ToArray();
+                if (memberIds.Length == 0)
+                {
+                    _notificationService.ShowWarning("请至少选择一名好友。");
+                    return;
+                }
+                var response = await _chatSession.AddGroupMembersAsync(conversationId, memberIds).ConfigureAwait(true);
+                if (!response.Succeeded)
+                {
+                    _notificationService.ShowError(response.ErrorMessage ?? response.ErrorCode ?? "添加成员失败");
+                    return;
+                }
+                _notificationService.ShowSuccess($"已添加 {memberIds.Length} 位成员");
+                IsAddingGroupMembers = false;
+                await LoadGroupMembersAsync(conversationId).ConfigureAwait(true);
+            },
+            () => IsAddingGroupMembers,
+            ex => _notificationService.ShowError($"添加成员失败: {ex.Message}"));
 
         _messageViewModel.ForwardRequested = BeginForwardSelection;
 
@@ -546,6 +781,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         {
             _friendListState.ApplyGroupTitle(e.ConversationId, e.Title);
             _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
+            RefreshOpenMembersPanel(e.ConversationId);
         });
     }
 
@@ -555,6 +791,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         {
             _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 退出了 {GroupTitleOf(e.ConversationId, null)}");
             HandleSelfRemoved(e.ConversationId, e.UserId);
+            RefreshOpenMembersPanel(e.ConversationId);
         });
     }
 
@@ -564,13 +801,22 @@ public class ChatViewModel : ViewModelBase, IDisposable
         {
             _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 被移出了 {GroupTitleOf(e.ConversationId, null)}");
             HandleSelfRemoved(e.ConversationId, e.UserId);
+            RefreshOpenMembersPanel(e.ConversationId);
         });
     }
 
     private void OnGroupRoleChanged(object? sender, RoleChangedUpdateDto e)
     {
         Dispatcher.UIThread.Post(() =>
-            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 的角色已变更为 {RoleName(e.NewRole)}"));
+        {
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 的角色已变更为 {RoleName(e.NewRole)}");
+            if (IsShowingGroupMembers && SelectedConversation?.ConversationId == e.ConversationId)
+            {
+                var item = GroupMembers.FirstOrDefault(m => m.UserId == e.UserId);
+                if (item is not null)
+                    item.Role = e.NewRole;
+            }
+        });
     }
 
     private void OnGroupMembersAdded(object? sender, MembersAddedUpdateDto e)
@@ -580,6 +826,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             _friendListState.ApplyGroupTitle(e.ConversationId, e.Title);
             if (e.AddedUserIds is { Length: > 0 })
                 _notificationService.ShowInfo($"{e.AddedUserIds.Length} 位成员加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
+            RefreshOpenMembersPanel(e.ConversationId);
         });
     }
 
@@ -589,12 +836,23 @@ public class ChatViewModel : ViewModelBase, IDisposable
         {
             _notificationService.ShowInfo($"群聊 {GroupTitleOf(e.ConversationId, null)} 已被解散");
             if (SelectedConversation?.ConversationId == e.ConversationId)
+            {
                 SelectedConversation = null;
+                IsShowingGroupMembers = false;
+                IsAddingGroupMembers = false;
+            }
             _friendListState.RemoveConversation(e.ConversationId);
             _ = _dbService.SetConversationLocalStateAsync(
                 _chatSession.CurrentUserId, e.ConversationId, deleted: true).ConfigureAwait(true);
             RaisePrefsCommands();
         });
+    }
+
+    /// <summary>成员面板打开且正在查看该群时，事件回流后重新拉取成员列表。</summary>
+    private void RefreshOpenMembersPanel(string conversationId)
+    {
+        if (IsShowingGroupMembers && SelectedConversation?.ConversationId == conversationId)
+            _ = LoadGroupMembersAsync(conversationId).ConfigureAwait(true);
     }
 
     private void HandleSelfRemoved(string conversationId, long removedUserId)
@@ -664,6 +922,93 @@ public class ChatViewModel : ViewModelBase, IDisposable
         SelectedConversation = conv;
         _notificationService.ShowInfo($"群聊创建成功: {conv.Title}");
         return conversationId;
+    }
+
+    /// <summary>以好友列表快照填充勾选条目（排除已在群成员集合中的 Id）。</summary>
+    private void PopulateCandidates(
+        ObservableCollection<GroupMemberSelectionItem> target,
+        IReadOnlyCollection<long>? alreadyMemberIds)
+    {
+        target.Clear();
+        foreach (var friendId in _friendListState.FriendIds)
+        {
+            if (alreadyMemberIds is not null && alreadyMemberIds.Contains(friendId))
+                continue;
+            if (!_friendListState.TryGetFriend(friendId, out var friend))
+                continue;
+            target.Add(new GroupMemberSelectionItem
+            {
+                UserId = friendId,
+                DisplayName = friend.Title
+            });
+        }
+    }
+
+    /// <summary>拉取群成员列表（分页聚合，最多 10 页）并投影到成员面板。</summary>
+    private async Task LoadGroupMembersAsync(string conversationId, CancellationToken ct = default)
+    {
+        var members = new List<ConversationMemberItemDto>();
+        string? cursor = null;
+        for (var page = 0; page < 10; page++)
+        {
+            var resp = await _chatSession.ListGroupMembersAsync(conversationId, pageSize: 100, cursor, ct)
+                .ConfigureAwait(false);
+            if (!resp.Succeeded)
+            {
+                _notificationService.ShowError(resp.ErrorMessage ?? resp.ErrorCode ?? "加载群成员失败");
+                return;
+            }
+            members.AddRange(resp.Members ?? []);
+            if (!resp.HasMore || string.IsNullOrWhiteSpace(resp.NextCursor))
+                break;
+            cursor = resp.NextCursor;
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            var selfId = _chatSession.CurrentUserId;
+            GroupMembers.Clear();
+            foreach (var item in members)
+            {
+                GroupMembers.Add(new GroupMemberUiItem
+                {
+                    UserId = item.UserId,
+                    DisplayName = DisplayNameOf(item.UserId) ?? $"用户 {item.UserId}",
+                    Role = item.Role,
+                    IsSelf = item.UserId == selfId
+                });
+            }
+            OnPropertyChanged(nameof(GroupMembersTitle));
+        });
+    }
+
+    public string GroupMembersTitle => $"群成员 ({GroupMembers.Count})";
+
+    /// <summary>退出群聊：调用服务端后本地移除会话（解散通知会由服务端另行广播）。</summary>
+    private async Task LeaveGroupAsync(LocalConversation? conversation)
+    {
+        if (conversation is null || !conversation.IsGroup)
+            return;
+        if (!_chatSession.IsAuthenticated)
+        {
+            _notificationService.ShowError("未连接服务器，无法退出群聊。");
+            return;
+        }
+
+        var response = await _chatSession.LeaveGroupAsync(conversation.ConversationId).ConfigureAwait(true);
+        if (!response.Succeeded)
+        {
+            _notificationService.ShowError(response.ErrorMessage ?? response.ErrorCode ?? "退出群聊失败");
+            return;
+        }
+
+        if (SelectedConversation?.ConversationId == conversation.ConversationId)
+            SelectedConversation = null;
+        _friendListState.RemoveConversation(conversation.ConversationId);
+        await _dbService.SetConversationLocalStateAsync(
+            _chatSession.CurrentUserId, conversation.ConversationId, deleted: true).ConfigureAwait(true);
+        RaisePrefsCommands();
+        _notificationService.ShowSuccess("已退出群聊");
     }
 
     private async Task<List<ConversationListItemDto>> RefreshConversationPrefsAsync(CancellationToken ct)
@@ -853,6 +1198,14 @@ public class ChatViewModel : ViewModelBase, IDisposable
         ClearForwardSelection();
         SearchText = string.Empty;
         _watchedPresenceUserIds = [];
+
+        IsCreatingGroup = false;
+        GroupTitleInput = string.Empty;
+        GroupCreationCandidates.Clear();
+        IsShowingGroupMembers = false;
+        IsAddingGroupMembers = false;
+        GroupMembers.Clear();
+        GroupAddCandidates.Clear();
 
         Conversations.Clear();
         FilteredConversations.Clear();
