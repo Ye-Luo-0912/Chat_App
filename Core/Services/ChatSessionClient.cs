@@ -68,6 +68,29 @@ namespace Core.Services
 
         public long CurrentUserId { get; private set; }
 
+        /// <summary>
+        /// 当前在途请求总数（15 类 pending 字典之和）。
+        /// 每次请求的 finally 都会回收自身条目，断线时批量失败并清空。
+        /// 测试以此断言"每次测试后 pending 字典均为空"，运维可据此观测积压。
+        /// </summary>
+        public int PendingRequestCount =>
+            _listPending.Count + _prefsPending.Count + _recallPending.Count + _editPending.Count
+            + _presencePending.Count + _syncPending.Count + _historyPending.Count + _receiptPending.Count
+            + _markReadPending.Count + _createGroupPending.Count + _addGroupMembersPending.Count
+            + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _changeRolePending.Count
+            + _listGroupMembersPending.Count;
+
+        /// <summary>
+        /// 请求超时缩放系数（仅测试使用）：乘法缩放全部请求/鉴权超时，
+        /// 使"服务器不响应"类验收测试在毫秒级完成，不依赖固定 Delay。
+        /// </summary>
+        internal double RequestTimeoutScale { get; set; } = 1.0;
+
+        private TimeSpan ScaleTimeout(TimeSpan timeout) =>
+            RequestTimeoutScale <= 0
+                ? timeout
+                : TimeSpan.FromTicks((long)(timeout.Ticks * RequestTimeoutScale));
+
         // 连接代际与连接 Id：每次成功建立连接递增/更换，
         // 供入站事件队列做 SessionStamp 代际校验，防止旧连接/旧账户事件写入新会话状态。
         private long _connectionGeneration;
@@ -201,7 +224,7 @@ namespace Core.Services
                 await SendPacketAsync(PacketCommand.AuthRequest, authRequest, ct).ConfigureAwait(false);
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(AuthTimeoutSec));
+                timeoutCts.CancelAfter(ScaleTimeout(TimeSpan.FromSeconds(AuthTimeoutSec)));
                 try
                 {
                     await state.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
@@ -773,7 +796,7 @@ namespace Core.Services
             {
                 await SendPacketAsync(command, request, ct).ConfigureAwait(false);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                linkedCts.CancelAfter(timeout);
+                linkedCts.CancelAfter(ScaleTimeout(timeout));
                 return await tcs.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
             }
             finally
@@ -1274,7 +1297,8 @@ namespace Core.Services
             ["packets_sent"] = Volatile.Read(ref _packetsSent),
             ["packets_received"] = Volatile.Read(ref _packetsReceived),
             ["heartbeats_sent"] = Volatile.Read(ref _heartbeatsSent),
-            ["disconnects"] = Volatile.Read(ref _disconnects)
+            ["disconnects"] = Volatile.Read(ref _disconnects),
+            ["pending_requests"] = PendingRequestCount
         };
 
         public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
