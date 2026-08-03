@@ -549,6 +549,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _messagesByServerId[msg.MessageId] = msg;
         if (!string.IsNullOrWhiteSpace(msg.ClientMessageId))
             _messagesByClientId[msg.ClientMessageId] = msg;
+        TrimMessageWindow();
     }
 
     // 插入旧历史时同步维护两个索引，确保后续编辑/撤回/去重能定位到这些消息。
@@ -559,6 +560,36 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _messagesByServerId[msg.MessageId] = msg;
         if (!string.IsNullOrWhiteSpace(msg.ClientMessageId))
             _messagesByClientId[msg.ClientMessageId] = msg;
+    }
+
+    /// <summary>内存消息窗口上限：更旧记录保留在 SQLite（历史分页可重新加载）。</summary>
+    private const int MaxMessageWindow = 500;
+
+    /// <summary>
+    /// 消息窗口裁剪：集合超过上限时从最旧端移除（Messages[0] 为最早消息），
+    /// 同步淘汰两个查找索引——虚拟化只减少视觉控件，此裁剪控制 ViewModel 与字符串内存。
+    /// 编辑/撤回对已淘汰消息：FindMessage 未命中即忽略（DB 层已持久化，无功能损失）。
+    /// </summary>
+    private void TrimMessageWindow()
+    {
+        var overflow = Messages.Count - MaxMessageWindow;
+        if (overflow <= 0)
+            return;
+        for (var i = 0; i < overflow; i++)
+        {
+            var msg = Messages[0];
+            Messages.RemoveAt(0);
+            if (!string.IsNullOrWhiteSpace(msg.MessageId)
+                && ReferenceEquals(_messagesByServerId.GetValueOrDefault(msg.MessageId), msg))
+            {
+                _messagesByServerId.Remove(msg.MessageId);
+            }
+            if (!string.IsNullOrWhiteSpace(msg.ClientMessageId)
+                && ReferenceEquals(_messagesByClientId.GetValueOrDefault(msg.ClientMessageId), msg))
+            {
+                _messagesByClientId.Remove(msg.ClientMessageId);
+            }
+        }
     }
 
     private void ClearMessages()

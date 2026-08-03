@@ -19,14 +19,39 @@ public class LocalConversation : INotifyPropertyChanged
     /// <summary>会话 Id，非空。</summary>
     public string ConversationId { get; set; } = string.Empty;
 
+    private byte _type = 1;
     /// <summary>会话类型：1=Direct, 2=Group。</summary>
-    public byte Type { get; set; } = 1;
+    public byte Type
+    {
+        get => _type;
+        set
+        {
+            if (SetField(ref _type, value))
+            {
+                OnPropertyChanged(nameof(IsGroup));
+                OnPropertyChanged(nameof(Title));
+                OnPropertyChanged(nameof(Initial));
+            }
+        }
+    }
 
     /// <summary>直聊对端用户 Id。</summary>
     public long? PeerUserId { get; set; }
 
+    private string? _groupTitle;
     /// <summary>群聊名称（Type=Group 时展示，服务端会话列表回填）。</summary>
-    public string? GroupTitle { get; set; }
+    public string? GroupTitle
+    {
+        get => _groupTitle;
+        set
+        {
+            if (SetField(ref _groupTitle, value))
+            {
+                OnPropertyChanged(nameof(Title));
+                OnPropertyChanged(nameof(Initial));
+            }
+        }
+    }
 
     public string? LastMessageId { get; set; }
 
@@ -41,7 +66,12 @@ public class LocalConversation : INotifyPropertyChanged
         }
     }
 
-    public long? LastMessageAtMs { get; set; }
+    private long? _lastMessageAtMs;
+    public long? LastMessageAtMs
+    {
+        get => _lastMessageAtMs;
+        set => SetField(ref _lastMessageAtMs, value);
+    }
 
     public long? LastSenderUserId { get; set; }
 
@@ -78,7 +108,12 @@ public class LocalConversation : INotifyPropertyChanged
         }
     }
 
-    public long? PinnedAtMs { get; set; }
+    private long? _pinnedAtMs;
+    public long? PinnedAtMs
+    {
+        get => _pinnedAtMs;
+        set => SetField(ref _pinnedAtMs, value);
+    }
 
     private bool _isMuted;
     public bool IsMuted
@@ -117,11 +152,21 @@ public class LocalConversation : INotifyPropertyChanged
     /// <summary>草稿修订号，单调递增，防止旧草稿覆盖新草稿。</summary>
     public int DraftRevision { get; set; }
 
+    private bool _archived;
     /// <summary>归档标记：已归档会话从主列表隐藏，可从归档视图恢复。</summary>
-    public bool Archived { get; set; }
+    public bool Archived
+    {
+        get => _archived;
+        set => SetField(ref _archived, value);
+    }
 
+    private bool _isDeleted;
     /// <summary>本地删除标记：已删除会话不再从服务端同步中复活。</summary>
-    public bool IsDeleted { get; set; }
+    public bool IsDeleted
+    {
+        get => _isDeleted;
+        set => SetField(ref _isDeleted, value);
+    }
 
     public DateTime LastSynced { get; set; }
 
@@ -218,3 +263,4 @@ public class LocalConversation : INotifyPropertyChanged
     protected void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
+

@@ -24,6 +24,8 @@ public sealed class ChatFriendListState : IDisposable
 
     // conversationId → 会话（含归档项，不含已删除项）
     private readonly Dictionary<string, LocalConversation> _byId = new(StringComparer.Ordinal);
+    // 本地删除 tombstone：RemoveConversation 后服务端投影不得复活（DB IsDeleted 的 UI 内存镜像）
+    private readonly HashSet<string> _deletedConversationIds = new(StringComparer.Ordinal);
     // 共享好友状态源：显示名/备注/在线状态（通讯录与聊天列表共用）
     private readonly Dictionary<long, LocalFriend> _friendsById = new();
 
@@ -95,12 +97,14 @@ public sealed class ChatFriendListState : IDisposable
         conv.Type = (byte)ConversationTypeDto.Group;
     }
 
-    /// <summary>从会话外入口（如通讯录跳转）新建/更新会话并展示。</summary>
+    /// <summary>从会话外入口（如通讯录跳转）新建/更新会话并展示。
+    /// 已存在时就地合并（保留列表/绑定中的同一对象实例），绝不替换集合对象。</summary>
     public void UpsertLocalConversation(LocalConversation conversation)
     {
-        if (_byId.ContainsKey(conversation.ConversationId))
+        if (_byId.TryGetValue(conversation.ConversationId, out var existing))
         {
-            _byId[conversation.ConversationId] = conversation;
+            // 就地合并：保留 UI 与字典指向同一实例，服务端字段更新、本地状态保留。
+            CopyConversationFields(existing, conversation);
             ApplyFilter();
             return;
         }
@@ -108,6 +112,25 @@ public sealed class ChatFriendListState : IDisposable
         _byId[conversation.ConversationId] = conversation;
         _conversations.Add(conversation);
         ApplyFilter();
+    }
+
+    /// <summary>服务端可投影字段复制（不覆盖本地草稿/归档/删除状态）。</summary>
+    private static void CopyConversationFields(LocalConversation target, LocalConversation src)
+    {
+        target.Type = src.Type;
+        target.PeerUserId = src.PeerUserId;
+        target.GroupTitle = src.GroupTitle;
+        target.LastMessageId = src.LastMessageId;
+        target.LastMessagePreview = src.LastMessagePreview;
+        target.LastMessageAtMs = src.LastMessageAtMs;
+        target.LastSenderUserId = src.LastSenderUserId;
+        target.UnreadCount = src.UnreadCount;
+        target.LastReadMessageId = src.LastReadMessageId;
+        target.LastReadAtMs = src.LastReadAtMs;
+        target.IsPinned = src.IsPinned;
+        target.PinnedAtMs = src.PinnedAtMs;
+        target.IsMuted = src.IsMuted;
+        target.MutedUntilMs = src.MutedUntilMs;
     }
 
     // ── 共享好友状态源 ────────────────────────────────────
@@ -148,7 +171,8 @@ public sealed class ChatFriendListState : IDisposable
 
     // ── 会话层 ──────────────────────────────────────────
 
-    /// <summary>服务端会话列表投影：新增/更新会话（不覆盖本地草稿/归档/删除状态）。</summary>
+    /// <summary>服务端会话列表投影：新增/更新会话（不覆盖本地草稿/归档/删除状态）。
+    /// 本地已删除的会话（tombstone）跳过，不得复活。</summary>
     public void ApplyConversationPrefs(IReadOnlyList<ConversationListItemDto> items, long selfUserId)
     {
         foreach (var item in items)
@@ -156,6 +180,8 @@ public sealed class ChatFriendListState : IDisposable
             if (string.IsNullOrEmpty(item.ConversationId))
                 continue;
             var conv = GetOrCreate(item.ConversationId, selfUserId);
+            if (conv is null)
+                continue; // 本地已删除：服务端投影不得复活
             CopyDtoToConversation(conv, item);
             RefreshDisplayName(conv);
         }
@@ -163,13 +189,15 @@ public sealed class ChatFriendListState : IDisposable
         ApplyFilter();
     }
 
-    /// <summary>实时会话变化（新消息/置顶/免打扰等）。</summary>
+    /// <summary>实时会话变化（新消息/置顶/免打扰等）。本地已删除的会话跳过。</summary>
     public void ApplyConversationChanged(ConversationChangedDto changed, long selfUserId)
     {
         if (string.IsNullOrEmpty(changed.ConversationId))
             return;
 
         var conv = GetOrCreate(changed.ConversationId, selfUserId);
+        if (conv is null)
+            return; // 本地已删除：不得复活
         if (changed.Type != 0)
             conv.Type = (byte)changed.Type;
         if (changed.Title is not null)
@@ -239,12 +267,14 @@ public sealed class ChatFriendListState : IDisposable
         }
     }
 
-    /// <summary>本地删除会话：从列表与索引移除，DB 保留删除标记防止服务端同步复活。</summary>
+    /// <summary>本地删除会话：从列表与索引移除并记入 tombstone（DB 与内存双标记，
+    /// 服务端同步投影不得复活）。</summary>
     public void RemoveConversation(string conversationId)
     {
         if (!_byId.TryGetValue(conversationId, out var conv))
             return;
         _byId.Remove(conversationId);
+        _deletedConversationIds.Add(conversationId);
         _conversations.Remove(conv);
         _filteredConversations.Remove(conv);
         if (ReferenceEquals(_selectedConversation, conv))
@@ -278,6 +308,8 @@ public sealed class ChatFriendListState : IDisposable
 
     /// <summary>
     /// 增量更新绑定列表：删除消失项、插入新增项、移动顺序变化的项。
+    /// keyed reconciliation：预建 target 的 key→位置索引，Move/Insert 查找为 O(1)
+    ///（旧实现对每个源位置线性扫描剩余集合，大量重排时最坏 O(n²)）。
     /// 保留未变化项的 item container，避免 UI 重建。
     /// </summary>
     private static void ApplyIncrementalDiff<T>(
@@ -300,49 +332,60 @@ public sealed class ChatFriendListState : IDisposable
         for (var i = 0; i < source.Count; i++)
             sourceIds[keyOf(source[i])] = i;
 
+        // 预建 target 位置索引（keyed reconciliation 的查找表）
+        var targetIds = new Dictionary<string, int>(target.Count);
+        for (var i = 0; i < target.Count; i++)
+            targetIds[keyOf(target[i])] = i;
+
+        // 删除消失项（从后往前，索引维护 O(1)）
         for (var i = target.Count - 1; i >= 0; i--)
         {
-            if (!sourceIds.ContainsKey(keyOf(target[i])))
+            var key = keyOf(target[i]);
+            if (!sourceIds.ContainsKey(key))
+            {
+                targetIds.Remove(key);
                 target.RemoveAt(i);
+            }
         }
 
-        for (int srcIdx = 0, tgtIdx = 0; srcIdx < source.Count; srcIdx++)
+        // 顺序调和：目标项按源顺序归位（查找 O(1)，仅被移动/插入的项修正索引）
+        var tgtIdx = 0;
+        for (var srcIdx = 0; srcIdx < source.Count; srcIdx++)
         {
-            var srcItem = source[srcIdx];
-            if (tgtIdx < target.Count && keyOf(target[tgtIdx]) == keyOf(srcItem))
+            var srcKey = keyOf(source[srcIdx]);
+            if (tgtIdx < target.Count && keyOf(target[tgtIdx]) == srcKey)
             {
                 tgtIdx++;
                 continue;
             }
 
-            var found = -1;
-            for (var j = tgtIdx; j < target.Count; j++)
-            {
-                if (keyOf(target[j]) == keyOf(srcItem))
-                {
-                    found = j;
-                    break;
-                }
-            }
-
-            if (found >= 0)
+            if (targetIds.TryGetValue(srcKey, out var found) && found >= tgtIdx)
             {
                 target.Move(found, tgtIdx);
+                // 维护索引：found 移到 tgtIdx，[tgtIdx, found) 区间右移一位
+                for (var k = tgtIdx; k <= found; k++)
+                    targetIds[keyOf(target[k])] = k;
                 tgtIdx++;
             }
             else
             {
-                target.Insert(tgtIdx, srcItem);
+                target.Insert(tgtIdx, source[srcIdx]);
+                // 维护索引：新项在 tgtIdx，其后整体右移
+                for (var k = tgtIdx; k < target.Count; k++)
+                    targetIds[keyOf(target[k])] = k;
                 tgtIdx++;
             }
         }
     }
 
-    /// <summary>按会话 Id 获取或创建会话项（新建时加入列表与索引）。</summary>
-    private LocalConversation GetOrCreate(string conversationId, long selfUserId)
+    /// <summary>按会话 Id 获取或创建会话项（新建时加入列表与索引）。
+    /// 本地已删除（tombstone）的会话返回 null——服务端投影不得复活。</summary>
+    private LocalConversation? GetOrCreate(string conversationId, long selfUserId)
     {
         if (_byId.TryGetValue(conversationId, out var existing))
             return existing;
+        if (_deletedConversationIds.Contains(conversationId))
+            return null;
 
         var conv = new LocalConversation
         {
