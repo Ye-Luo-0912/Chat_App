@@ -52,6 +52,8 @@ def main() -> int:
 
     with open(baseline_path, encoding="utf-8") as f:
         baseline = json.load(f)
+    # 兼容两种结构：平铺 {FullName: Mean} 与带环境标注的 {environment, benchmarks: {...}}
+    baseline_means = baseline.get("benchmarks") if isinstance(baseline, dict) and "benchmarks" in baseline else baseline
 
     results = load_benchmarks(results_dir)
     if not results:
@@ -60,7 +62,7 @@ def main() -> int:
 
     failures = []
     for full, mean_ns in results.items():
-        base = baseline.get(full)
+        base = baseline_means.get(full)
         if base is None:
             print(f"WARN: 基准 {full} 无基线（请重新生成基线）")
             continue
@@ -81,3 +83,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

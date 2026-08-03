@@ -1,17 +1,21 @@
 {
-  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 512)": 61.01,
-  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 64)": 33.05,
-  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 4096)": 205.87,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 512)": 152992.69,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 0)": 48.01,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 0)": 33064.0,
-  "Benchmarks.SerializationBenchmarks.RoundTrip": 1148.02,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 4096)": 473015.3,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 512)": 102.42,
-  "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 0)": 20.21,
-  "Benchmarks.SerializationBenchmarks.DeserializeSingleSegment": 607.39,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 4096)": 304.94,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 64)": 64.62,
-  "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 64)": 78058.88,
-  "Benchmarks.SerializationBenchmarks.Serialize": 349.93
+  "environment": "ubuntu-latest (GitHub Actions, .NET 10, ShortRunJob)",
+  "generated": "2026-08-04",
+  "benchmarks": {
+    "Benchmarks.SerializationBenchmarks.DeserializeSingleSegment": 772.79,
+    "Benchmarks.SerializationBenchmarks.RoundTrip": 1285.24,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 64)": 63999.99,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 512)": 225345.94,
+    "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 64)": 32.92,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 0)": 33979.09,
+    "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 4096)": 317.96,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeThousandFrames(BodySize: 4096)": 815658.73,
+    "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 512)": 66.01,
+    "Benchmarks.SerializationBenchmarks.Serialize": 401.74,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 0)": 70.61,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 64)": 71.62,
+    "Benchmarks.ProtocolCodecBenchmarks.EncodeSingleFrame(BodySize: 0)": 20.86,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 4096)": 521.77,
+    "Benchmarks.ProtocolCodecBenchmarks.DecodeSingleFrame(BodySize: 512)": 121.98
+  }
 }
