@@ -348,7 +348,8 @@ public sealed class AttachmentApiService : IAttachmentClientService
             Content = new HttpResponseStream(stream, response),
             ContentType = contentType,
             ContentLength = length,
-            FileName = fileName
+            FileName = fileName,
+            IsPartialContent = response.StatusCode == System.Net.HttpStatusCode.PartialContent
         };
     }
 

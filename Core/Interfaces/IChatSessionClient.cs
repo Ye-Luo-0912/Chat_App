@@ -46,6 +46,7 @@ public interface IChatSessionClient : IDisposable
     /// <summary>
     /// 发送聊天消息；文本与附件至少其一非空。回复与转发互斥。
     /// 返回客户端消息 Id（上行 MessageId），用于与后续 MessageAck.CommandId 绑定。
+    /// 群聊场景传 conversationId（群会话编号）+ mentionedUserIds（@提及）。
     /// </summary>
     Task<string> SendChatMessageAsync(
         long targetUserId,
@@ -58,6 +59,8 @@ public interface IChatSessionClient : IDisposable
         long? forwardedFromSenderUserId = null,
         string? forwardedFromPreview = null,
         string? clientMessageId = null,
+        string? conversationId = null,
+        IReadOnlyList<long>? mentionedUserIds = null,
         CancellationToken ct = default);
 
     /// <summary>发送心跳包；若距上次 ACK 超过阈值则主动判定半开并断连。</summary>
@@ -136,6 +139,45 @@ public interface IChatSessionClient : IDisposable
         long? lastReadAtMs = null,
         CancellationToken ct = default);
 
+    // ── 群聊命令（超时 8 秒）──
+
+    /// <summary>创建群聊，返回会话 Id 与成员列表。memberUserIds 可空（建空群由服务端决定）。</summary>
+    Task<CreateGroupResponseDto> CreateGroupAsync(
+        string title,
+        IReadOnlyList<long>? memberUserIds = null,
+        CancellationToken ct = default);
+
+    /// <summary>批量添加群成员。</summary>
+    Task<AddGroupMembersResponseDto> AddGroupMembersAsync(
+        string conversationId,
+        IReadOnlyList<long> memberUserIds,
+        CancellationToken ct = default);
+
+    /// <summary>将指定成员移出群聊。</summary>
+    Task<RemoveGroupMemberResponseDto> RemoveGroupMemberAsync(
+        string conversationId,
+        long targetUserId,
+        CancellationToken ct = default);
+
+    /// <summary>主动退出群聊。</summary>
+    Task<LeaveGroupResponseDto> LeaveGroupAsync(
+        string conversationId,
+        CancellationToken ct = default);
+
+    /// <summary>变更成员角色（Owner/Admin/Member）。</summary>
+    Task<ChangeMemberRoleResponseDto> ChangeMemberRoleAsync(
+        string conversationId,
+        long targetUserId,
+        ConversationMemberRole newRole,
+        CancellationToken ct = default);
+
+    /// <summary>分页查询群成员列表。</summary>
+    Task<ListGroupMembersResponseDto> ListGroupMembersAsync(
+        string conversationId,
+        int? pageSize = null,
+        string? cursor = null,
+        CancellationToken ct = default);
+
     event EventHandler? Connected;
     event EventHandler<long>? Authenticated;
     event EventHandler<string>? AuthenticationFailed;
@@ -154,4 +196,12 @@ public interface IChatSessionClient : IDisposable
     event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
     event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
     event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
+
+    // ── 群聊事件 ──
+    event EventHandler<MemberJoinedUpdateDto>? GroupMemberJoined;
+    event EventHandler<MemberLeftUpdateDto>? GroupMemberLeft;
+    event EventHandler<MemberRemovedUpdateDto>? GroupMemberRemoved;
+    event EventHandler<RoleChangedUpdateDto>? GroupRoleChanged;
+    event EventHandler<MembersAddedUpdateDto>? GroupMembersAdded;
+    event EventHandler<ConversationDissolvedUpdateDto>? GroupConversationDissolved;
 }

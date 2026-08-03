@@ -86,6 +86,15 @@ public sealed class ChatFriendListState : IDisposable
     public LocalConversation? FindConversation(string conversationId) =>
         _byId.TryGetValue(conversationId, out var conv) ? conv : null;
 
+    /// <summary>群聊事件附带 Title 时更新群名（成员加入/批量加入通知）。</summary>
+    public void ApplyGroupTitle(string conversationId, string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title) || !_byId.TryGetValue(conversationId, out var conv))
+            return;
+        conv.GroupTitle = title;
+        conv.Type = (byte)ConversationTypeDto.Group;
+    }
+
     /// <summary>从会话外入口（如通讯录跳转）新建/更新会话并展示。</summary>
     public void UpsertLocalConversation(LocalConversation conversation)
     {
@@ -161,6 +170,10 @@ public sealed class ChatFriendListState : IDisposable
             return;
 
         var conv = GetOrCreate(changed.ConversationId, selfUserId);
+        if (changed.Type != 0)
+            conv.Type = (byte)changed.Type;
+        if (changed.Title is not null)
+            conv.GroupTitle = changed.Title;
         if (changed.LastMessageId is not null)
             conv.LastMessageId = changed.LastMessageId;
         if (changed.LastMessagePreview is not null)
@@ -344,6 +357,14 @@ public sealed class ChatFriendListState : IDisposable
     /// <summary>从共享好友索引注入显示名/在线状态（无好友记录时 Title 兜底"用户 {id}"）。</summary>
     private void RefreshDisplayName(LocalConversation conv)
     {
+        if (conv.IsGroup)
+        {
+            // 群聊无单端好友：标题由群名承担，不注入对端显示名。
+            conv.PeerDisplayName = null;
+            conv.PeerIsOnline = false;
+            return;
+        }
+
         if (conv.PeerUserId is long peerId && _friendsById.TryGetValue(peerId, out var friend))
         {
             conv.PeerDisplayName = string.IsNullOrWhiteSpace(friend.DisplayName)
@@ -363,6 +384,7 @@ public sealed class ChatFriendListState : IDisposable
     {
         target.Type = (byte)src.Type;
         target.PeerUserId = src.PeerUserId;
+        target.GroupTitle = src.Title;
         target.LastMessageId = src.LastMessageId;
         target.LastMessagePreview = src.LastMessagePreview;
         target.LastMessageAtMs = src.LastMessageAtMs;

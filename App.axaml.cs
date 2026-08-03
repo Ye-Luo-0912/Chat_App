@@ -1,5 +1,6 @@
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Identity;
+using Chat_App.Infrastructure.Diagnostics;
 using Chat_App.Presentation.ViewModels.Auth;
 using Chat_App.Presentation.ViewModels.Chat;
 using Chat_App.Presentation.ViewModels.Friends;
@@ -114,7 +115,8 @@ public partial class App : Application
             .AddSingleton<ISyncEngine, SyncEngine>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
-            .AddSingleton<AttachmentRecoveryService>();
+            .AddSingleton<AttachmentRecoveryService>()
+            .AddSingleton<DiagnosticsService>();
 
 
         services.AddHttpClient<IAuthClientService, AuthClientService>("AuthClient", (sp, client) =>
@@ -191,6 +193,16 @@ public partial class App : Application
         // 启动 Outbox 排空处理器（事务化 Outbox）
         var outboxProcessor = _services.GetRequiredService<OutboxProcessor>();
         outboxProcessor.Start();
+
+        // 注册诊断指标源并启动周期聚合导出（队列积压 / 写延迟 p95/p99 / 网络重连 / 同步统计）
+        var diagnostics = _services.GetRequiredService<DiagnosticsService>();
+        diagnostics.AddSource(_services.GetRequiredService<DatabaseWriteQueue>());
+        diagnostics.AddSource(outboxProcessor);
+        diagnostics.AddSource(_services.GetRequiredService<ChatSessionClient>());
+        diagnostics.AddSource(_services.GetRequiredService<ChatConnectionCoordinator>());
+        diagnostics.AddSource(_services.GetRequiredService<SyncEngine>());
+        diagnostics.AddSource(_services.GetRequiredService<ChatMessageCoordinator>());
+        diagnostics.Start();
 
         // 实例化附件恢复服务以注册鉴权事件订阅：恢复任务在 Authenticated 事件触发，
         // 不再依赖启动固定延迟，未登录会在鉴权成功时自动重试。若当前已鉴权则立即尝试一次。

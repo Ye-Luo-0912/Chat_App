@@ -293,6 +293,13 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _connectionCoordinator.StatusChanged += OnConnectionStatusChanged;
         ConnectionStatus = _connectionCoordinator.Status;
         _chatSession.ConversationChanged += OnConversationChanged;
+        // 群聊事件：成员变化做通知，解散移除本地会话。
+        _chatSession.GroupMemberJoined += OnGroupMemberJoined;
+        _chatSession.GroupMemberLeft += OnGroupMemberLeft;
+        _chatSession.GroupMemberRemoved += OnGroupMemberRemoved;
+        _chatSession.GroupRoleChanged += OnGroupRoleChanged;
+        _chatSession.GroupMembersAdded += OnGroupMembersAdded;
+        _chatSession.GroupConversationDissolved += OnGroupConversationDissolved;
         // 鉴权后的会话服务（SyncEngine/好友同步/附件恢复）由 UserSessionOrchestrator 统一启动，
         // ChatViewModel 仅订阅好友投影变化刷新会话列表。
         _friendStore.FriendsChanged += OnFriendsChanged;
@@ -524,6 +531,141 @@ public class ChatViewModel : ViewModelBase, IDisposable
         });
     }
 
+    // ──────────── 群聊事件 ────────────
+
+    private string? DisplayNameOf(long userId)
+    {
+        if (_friendListState.TryGetFriend(userId, out var friend))
+            return string.IsNullOrWhiteSpace(friend.DisplayName) ? friend.FriendName : friend.DisplayName;
+        return $"用户 {userId}";
+    }
+
+    private void OnGroupMemberJoined(object? sender, MemberJoinedUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _friendListState.ApplyGroupTitle(e.ConversationId, e.Title);
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
+        });
+    }
+
+    private void OnGroupMemberLeft(object? sender, MemberLeftUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 退出了 {GroupTitleOf(e.ConversationId, null)}");
+            HandleSelfRemoved(e.ConversationId, e.UserId);
+        });
+    }
+
+    private void OnGroupMemberRemoved(object? sender, MemberRemovedUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 被移出了 {GroupTitleOf(e.ConversationId, null)}");
+            HandleSelfRemoved(e.ConversationId, e.UserId);
+        });
+    }
+
+    private void OnGroupRoleChanged(object? sender, RoleChangedUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 的角色已变更为 {RoleName(e.NewRole)}"));
+    }
+
+    private void OnGroupMembersAdded(object? sender, MembersAddedUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _friendListState.ApplyGroupTitle(e.ConversationId, e.Title);
+            if (e.AddedUserIds is { Length: > 0 })
+                _notificationService.ShowInfo($"{e.AddedUserIds.Length} 位成员加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
+        });
+    }
+
+    private void OnGroupConversationDissolved(object? sender, ConversationDissolvedUpdateDto e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _notificationService.ShowInfo($"群聊 {GroupTitleOf(e.ConversationId, null)} 已被解散");
+            if (SelectedConversation?.ConversationId == e.ConversationId)
+                SelectedConversation = null;
+            _friendListState.RemoveConversation(e.ConversationId);
+            _ = _dbService.SetConversationLocalStateAsync(
+                _chatSession.CurrentUserId, e.ConversationId, deleted: true).ConfigureAwait(true);
+            RaisePrefsCommands();
+        });
+    }
+
+    private void HandleSelfRemoved(string conversationId, long removedUserId)
+    {
+        if (removedUserId == _chatSession.CurrentUserId)
+        {
+            if (SelectedConversation?.ConversationId == conversationId)
+                SelectedConversation = null;
+            _friendListState.RemoveConversation(conversationId);
+            _ = _dbService.SetConversationLocalStateAsync(
+                _chatSession.CurrentUserId, conversationId, deleted: true).ConfigureAwait(true);
+            RaisePrefsCommands();
+        }
+    }
+
+    private string GroupTitleOf(string conversationId, string? fallback)
+        => _friendListState.FindConversation(conversationId)?.GroupTitle
+            ?? (!string.IsNullOrWhiteSpace(fallback) ? fallback! : conversationId);
+
+    private static string RoleName(ConversationMemberRole role) => role switch
+    {
+        ConversationMemberRole.Owner => "群主",
+        ConversationMemberRole.Admin => "管理员",
+        _ => "普通成员"
+    };
+
+    /// <summary>
+    /// 创建群聊（会话层入口）：调用服务端建群命令，成功后创建本地群会话并打开。
+    /// 返回服务端会话 Id；失败返回 null。
+    /// </summary>
+    public async Task<string?> CreateGroupAsync(
+        string title, IReadOnlyList<long>? memberUserIds = null, CancellationToken ct = default)
+    {
+        if (!_chatSession.IsConnected || !_chatSession.IsAuthenticated)
+        {
+            _notificationService.ShowError("未连接到服务器或未鉴权，无法创建群聊。");
+            return null;
+        }
+
+        var response = await _chatSession.CreateGroupAsync(title, memberUserIds, ct).ConfigureAwait(true);
+        if (!response.Succeeded || string.IsNullOrWhiteSpace(response.ConversationId))
+        {
+            _notificationService.ShowError($"创建群聊失败: {response.ErrorMessage ?? response.ErrorCode ?? "未知错误"}");
+            return null;
+        }
+
+        var conversationId = response.ConversationId;
+        var conv = _friendListState.FindConversation(conversationId);
+        if (conv is null)
+        {
+            conv = new LocalConversation
+            {
+                OwnerUserId = _chatSession.CurrentUserId,
+                ConversationId = conversationId,
+                Type = (byte)ConversationTypeDto.Group,
+                GroupTitle = response.Title ?? title
+            };
+            _friendListState.UpsertLocalConversation(conv);
+        }
+        else
+        {
+            conv.Type = (byte)ConversationTypeDto.Group;
+            conv.GroupTitle = response.Title ?? title;
+            _friendListState.ApplyFilter();
+        }
+
+        SelectedConversation = conv;
+        _notificationService.ShowInfo($"群聊创建成功: {conv.Title}");
+        return conversationId;
+    }
+
     private async Task<List<ConversationListItemDto>> RefreshConversationPrefsAsync(CancellationToken ct)
     {
         if (!_chatSession.IsAuthenticated)
@@ -727,6 +869,12 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
         _disposed = true;
         _chatSession.ConversationChanged -= OnConversationChanged;
+        _chatSession.GroupMemberJoined -= OnGroupMemberJoined;
+        _chatSession.GroupMemberLeft -= OnGroupMemberLeft;
+        _chatSession.GroupMemberRemoved -= OnGroupMemberRemoved;
+        _chatSession.GroupRoleChanged -= OnGroupRoleChanged;
+        _chatSession.GroupMembersAdded -= OnGroupMembersAdded;
+        _chatSession.GroupConversationDissolved -= OnGroupConversationDissolved;
         _chatSession.PresenceChanged -= OnPresenceChanged;
         _connectionCoordinator.StatusChanged -= OnConnectionStatusChanged;
         _ = UnwatchPresenceSubscriptionsAsync();

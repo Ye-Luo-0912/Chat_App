@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Events;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models;
 using Chat_App.Infrastructure.Models;
@@ -22,7 +24,7 @@ namespace Chat_App.Infrastructure.Services;
 /// - 结束（Ack/Cleanup）：ACK 单事务推进 Sent 并清租约；Sent/Cancelled 定期归档清理。
 /// UI 只做事务化入库（OutboxEnqueuedEvent 触发即时排空），全部网络发送均在本处理器。
 /// </summary>
-public sealed class OutboxProcessor : IDisposable
+public sealed class OutboxProcessor : IDisposable, IMetricsSource
 {
     /// <summary>轮询 Outbox 的周期间隔（秒）。</summary>
     private const int DrainIntervalSec = 5;
@@ -53,6 +55,15 @@ public sealed class OutboxProcessor : IDisposable
     private Task? _loopTask;
     private DateTime _lastCleanupUtc = DateTime.MinValue;
     private bool _disposed;
+
+    // ── 诊断指标 ──
+    private long _processedCount;
+    private long _succeededCount;
+    private long _retryableFailures;
+    private long _permanentFailures;
+    private long _leaseRecoveries;
+    private long _claimEmptyRounds;
+    private readonly LatencyHistogram _sendLatency = new();
 
     public OutboxProcessor(
         IDatabaseService db,
@@ -153,7 +164,10 @@ public sealed class OutboxProcessor : IDisposable
             {
                 var recovered = await _db.RecoverStaleSendingAsync(userId, now).ConfigureAwait(false);
                 if (recovered > 0)
+                {
                     Log.Information("回收陈旧 Sending Outbox {Count} 条", recovered);
+                    Interlocked.Add(ref _leaseRecoveries, recovered);
+                }
             }
             catch (Exception ex)
             {
@@ -173,6 +187,10 @@ public sealed class OutboxProcessor : IDisposable
                 return;
             }
 
+            Interlocked.Add(ref _processedCount, claimed.Count);
+            if (claimed.Count == 0)
+                Interlocked.Increment(ref _claimEmptyRounds);
+
             // 3. 逐条发送。
             foreach (var entry in claimed)
             {
@@ -181,6 +199,7 @@ public sealed class OutboxProcessor : IDisposable
 
                 _eventBus.Publish(new OutboxStatusChangedEvent(entry.ClientMessageId, OutboxStatus.Sending, null));
 
+                var sw = Stopwatch.StartNew();
                 try
                 {
                     await _chatSession.SendChatMessageAsync(
@@ -194,9 +213,11 @@ public sealed class OutboxProcessor : IDisposable
                         entry.ForwardedFromSenderUserId,
                         entry.ForwardedFromPreview,
                         entry.ClientMessageId,
-                        _cts.Token).ConfigureAwait(false);
+                        conversationId: entry.ConversationId,
+                        ct: _cts.Token).ConfigureAwait(false);
 
                     // 已上行成功：保持 Sending，等待 MessageAck 单事务推进 Sent。
+                    Interlocked.Increment(ref _succeededCount);
                 }
                 catch (OperationCanceledException)
                 {
@@ -207,6 +228,11 @@ public sealed class OutboxProcessor : IDisposable
                 {
                     Log.Warning(ex, "Outbox 发送失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
                     await MarkFailedAsync(userId, entry, ex).ConfigureAwait(false);
+                }
+                finally
+                {
+                    sw.Stop();
+                    _sendLatency.Add(sw.Elapsed);
                 }
             }
 
@@ -249,7 +275,14 @@ public sealed class OutboxProcessor : IDisposable
         }
 
         if (kind == OutboxFailureKind.Permanent)
+        {
+            Interlocked.Increment(ref _permanentFailures);
             Log.Warning("Outbox 永久失败（不再自动重试）ClientMessageId={ClientMessageId}", entry.ClientMessageId);
+        }
+        else
+        {
+            Interlocked.Increment(ref _retryableFailures);
+        }
         _eventBus.Publish(new OutboxStatusChangedEvent(
             entry.ClientMessageId, OutboxStatus.Failed, null, $"{errorCode}: {ex.Message}"));
     }
@@ -270,6 +303,21 @@ public sealed class OutboxProcessor : IDisposable
         var seconds = Math.Min(BackoffBaseSec * (1 << Math.Min(retryCount, 10)), MaxBackoffSec);
         return DateTime.UtcNow.AddSeconds(seconds + Random.Shared.Next(0, 5000) / 1000.0);
     }
+
+    public string Name => "outbox";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["claimed"] = Volatile.Read(ref _processedCount),
+        ["succeeded"] = Volatile.Read(ref _succeededCount),
+        ["retryable_failures"] = Volatile.Read(ref _retryableFailures),
+        ["permanent_failures"] = Volatile.Read(ref _permanentFailures),
+        ["lease_recoveries"] = Volatile.Read(ref _leaseRecoveries),
+        ["claim_empty_rounds"] = Volatile.Read(ref _claimEmptyRounds)
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot> { ["send_latency_ms"] = _sendLatency.Snapshot() };
 
     public void Dispose()
     {

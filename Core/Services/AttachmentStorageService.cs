@@ -28,10 +28,10 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     // 每账户缓存版本只校验一次：登录前 UserId=0 的目录不能抢占首次校验。
     private readonly ConcurrentDictionary<long, byte> _cacheVersionChecked = new();
 
-    public AttachmentStorageService(ICurrentUserContext currentUserContext)
+    public AttachmentStorageService(ICurrentUserContext currentUserContext, string? basePath = null)
     {
         _currentUserContext = currentUserContext;
-        _basePath = Path.Combine(
+        _basePath = basePath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
             "Attachments");
@@ -208,10 +208,24 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         return null;
     }
 
-    public async Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null)
+    public string? GetPartialDownloadPath(string attachmentId, string fileName)
     {
-        // 同一 AttachmentId 的并发下载合并：复用进行中的写入任务，避免重复下载。
-        var coalesceKey = $"{_currentUserContext.UserId ?? 0}:{attachmentId}";
+        var downloadsDir = GetDownloadsDir();
+        var safeName = SanitizeFileName(fileName);
+        var path = Path.Combine(downloadsDir, $"{HashAttachmentName(attachmentId)}_{safeName}.partial");
+        if (!File.Exists(path))
+            return null;
+        var info = new FileInfo(path);
+        // 空 partial 无续传价值（上次写入可能从零开始即失败），返回 null 走全新下载。
+        return info.Length > 0 ? path : null;
+    }
+
+    public async Task<string> WriteToDownloadsAsync(
+        string attachmentId, string fileName, Stream content, CancellationToken ct = default,
+        string? expectedSha256 = null, bool append = false)
+    {
+        // 同一 (AttachmentId, append) 的并发下载合并：复用进行中的写入任务，避免重复下载。
+        var coalesceKey = $"{_currentUserContext.UserId ?? 0}:{attachmentId}:{(append ? 1 : 0)}";
         var existing = _inFlightDownloads.GetValueOrDefault(coalesceKey);
         if (existing is not null)
         {
@@ -223,18 +237,20 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         var safeName = SanitizeFileName(fileName);
         var destName = $"{HashAttachmentName(attachmentId)}_{safeName}";
         var fullPath = Path.Combine(downloadsDir, destName);
+        var partialPath = fullPath + ".partial";
 
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         _inFlightDownloads[coalesceKey] = tcs.Task;
 
         try
         {
-            // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
-            // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
-            var partialPath = fullPath + ".partial";
-            var written = 0L;
-            using var sha = expectedSha256 is null ? null : SHA256.Create();
-            await using (var fs = File.Create(partialPath))
+        // 下载完整性校验 + 原子 rename：先写 .partial 临时文件，
+        // 写入完成后再原子 rename 到目标路径，避免半成品文件被当作完整缓存。
+        var written = 0L;
+        if (append && !File.Exists(partialPath))
+            throw new IOException("续传目标 partial 不存在");
+        var mode = append ? FileMode.Append : FileMode.Create;
+            await using (var fs = new FileStream(partialPath, mode, FileAccess.Write, FileShare.None, 65536, useAsync: true))
             {
                 var buffer = new byte[65536];
                 int read;
@@ -242,21 +258,27 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
                 {
                     await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                     written += read;
-                    sha?.TransformBlock(buffer, 0, read, buffer, 0);
                 }
-                sha?.TransformFinalBlock([], 0, 0);
                 await fs.FlushAsync(ct).ConfigureAwait(false);
             }
 
-            // 写入长度校验：禁止空文件落盘为完整缓存。
-            if (written <= 0)
+            // 全新下载禁止空文件落盘为完整缓存（append 续传 0 字节表示已完整，跳过该检查）。
+            if (!append && written <= 0)
+            {
+                // 空 partial 无续传价值，直接删除。
+                try { if (File.Exists(partialPath)) File.Delete(partialPath); } catch { /* 忽略 */ }
                 throw new IOException("下载内容为空");
+            }
 
             // 内容哈希校验：调用方持有期望值时比对，不一致视为损坏。
-            if (expectedSha256 is not null
-                && !string.Equals(ToHexLower(sha!.Hash!), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            // append 模式下载流只是文件尾部，改为对落盘后的完整文件计算哈希。
+            if (expectedSha256 is not null)
             {
-                throw new IOException("下载内容哈希校验失败");
+                var actual = await ComputeFileSha256Async(partialPath, ct).ConfigureAwait(false);
+                if (!string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException("下载内容哈希校验失败");
+                }
             }
 
             if (File.Exists(fullPath))
@@ -272,17 +294,8 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         }
         catch
         {
-            // 失败时清理 .partial，避免残留半成品。
-            try
-            {
-                var partialPath = fullPath + ".partial";
-                if (File.Exists(partialPath))
-                    File.Delete(partialPath);
-            }
-            catch
-            {
-                // 忽略清理失败
-            }
+            // 失败时保留 .partial 半成品供断点续传复用（服务层负责后续重试/清理）；
+            // 仅当写入完全未开始时无文件可留，无需处理。
             tcs.TrySetException(new IOException("下载缓存写入失败"));
             throw;
         }
@@ -290,6 +303,20 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         {
             _inFlightDownloads.TryRemove(coalesceKey, out _);
         }
+    }
+
+    private static async Task<string> ComputeFileSha256Async(string filePath, CancellationToken ct)
+    {
+        using var sha = SHA256.Create();
+        await using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
+        var buffer = new byte[65536];
+        int read;
+        while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+        {
+            sha.TransformBlock(buffer, 0, read, buffer, 0);
+        }
+        sha.TransformFinalBlock([], 0, 0);
+        return ToHexLower(sha.Hash!);
     }
 
     /// <summary>LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。</summary>

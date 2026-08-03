@@ -1,13 +1,14 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Core.Interfaces;
 using Chat_App.Infrastructure.Persistence;
 using Serilog;
 
-namespace Chat_App.Services;
+namespace Chat_App.Infrastructure.Services;
 
 public interface IAttachmentDownloadService
 {
@@ -94,11 +95,27 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         try
         {
             var expectedSha256 = await TryGetAttachmentSha256Async(attachmentId).ConfigureAwait(false);
-            var result = await _attachments.DownloadAsync(hint, ct: ct).ConfigureAwait(false);
+
+            // 断点续传：已有 .partial 则按已写字节数发起 Range 请求续传。
+            var partialPath = _storage.GetPartialDownloadPath(attachmentId, fileName);
+            var append = false;
+            long? resumeFrom = null;
+            if (partialPath is not null)
+            {
+                resumeFrom = new FileInfo(partialPath).Length;
+                if (resumeFrom > 0)
+                    append = true;
+            }
+
+            var result = await _attachments.DownloadAsync(hint, rangeFrom: resumeFrom, ct: ct).ConfigureAwait(false);
             try
             {
+                // 请求了 Range 但服务端返回 200 全量：以新内容为准，从头写入。
+                if (!result.IsPartialContent)
+                    append = false;
+
                 var path = await _storage.WriteToDownloadsAsync(
-                        attachmentId, fileName, result.Content, ct, expectedSha256)
+                        attachmentId, fileName, result.Content, ct, expectedSha256, append)
                     .ConfigureAwait(false);
 
                 await TryUpdateAttachmentCachePathAsync(attachmentId, path).ConfigureAwait(false);
@@ -113,10 +130,64 @@ public sealed class AttachmentDownloadService : IAttachmentDownloadService
         {
             throw;
         }
+        catch (HttpRequestException ex)
+            when (ex.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            // 服务端无该 Range（本地 partial 长于远端文件）：清掉残留，整文件重下。
+            Log.Warning(ex, "断点续传范围无效，重置后整文件重下 AttachmentId={AttachmentId}", attachmentId);
+            try
+            {
+                var stalePartial = _storage.GetPartialDownloadPath(attachmentId, fileName);
+                if (stalePartial is not null)
+                    File.Delete(stalePartial);
+            }
+            catch (Exception cleanupEx)
+            {
+                Log.Debug(cleanupEx, "清理无效 partial 失败");
+            }
+            return await DownloadFreshAsync(attachmentId, fileName, hint, ct).ConfigureAwait(false);
+        }
+        catch (IOException ex) when (ex.Message.Contains("哈希校验失败", StringComparison.Ordinal))
+        {
+            // 续传拼接后哈希不匹配（本地 partial 已损坏）：清掉后整文件重下。
+            Log.Warning(ex, "续传结果哈希校验失败，重置后整文件重下 AttachmentId={AttachmentId}", attachmentId);
+            try
+            {
+                var stalePartial = _storage.GetPartialDownloadPath(attachmentId, fileName);
+                if (stalePartial is not null)
+                    File.Delete(stalePartial);
+            }
+            catch (Exception cleanupEx)
+            {
+                Log.Debug(cleanupEx, "清理损坏 partial 失败");
+            }
+            return await DownloadFreshAsync(attachmentId, fileName, hint, ct).ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
             Log.Warning(ex, "下载附件失败 AttachmentId={AttachmentId}", attachmentId);
             return null;
+        }
+    }
+
+    /// <summary>不带 Range 的整文件下载（续传校验失败后的兜底路径）。</summary>
+    private async Task<string?> DownloadFreshAsync(
+        string attachmentId, string fileName, string hint, CancellationToken ct)
+    {
+        var expectedSha256 = await TryGetAttachmentSha256Async(attachmentId).ConfigureAwait(false);
+        var result = await _attachments.DownloadAsync(hint, ct: ct).ConfigureAwait(false);
+        try
+        {
+            var path = await _storage.WriteToDownloadsAsync(
+                    attachmentId, fileName, result.Content, ct, expectedSha256, append: false)
+                .ConfigureAwait(false);
+
+            await TryUpdateAttachmentCachePathAsync(attachmentId, path).ConfigureAwait(false);
+            return path;
+        }
+        finally
+        {
+            result.Content.Dispose();
         }
     }
 

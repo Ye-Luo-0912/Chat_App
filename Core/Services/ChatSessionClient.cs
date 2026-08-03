@@ -1,16 +1,18 @@
 using Core.Buffers;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text;
 using System.Diagnostics;
 
 namespace Core.Services
 {
-    public class ChatSessionClient : IChatSessionClient
+    public class ChatSessionClient : IChatSessionClient, IMetricsSource
     {
         private readonly ITcpClient _tcpClient;
         private readonly IMessagePacketCodec _codec;
@@ -25,9 +27,23 @@ namespace Core.Services
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageHistoryPageDto>> _historyPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageReceiptAckDto>> _receiptPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationMarkReadResponseDto>> _markReadPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<CreateGroupResponseDto>> _createGroupPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<AddGroupMembersResponseDto>> _addGroupMembersPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<RemoveGroupMemberResponseDto>> _removeGroupMemberPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<LeaveGroupResponseDto>> _leaveGroupPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<ChangeMemberRoleResponseDto>> _changeRolePending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<ListGroupMembersResponseDto>> _listGroupMembersPending = new(StringComparer.Ordinal);
 
         private long _lastHeartbeatAckTicks;
         private const int HeartbeatTimeoutSeconds = 60;
+
+        // ── 诊断指标 ──
+        private long _packetsReceived;
+        private long _packetsSent;
+        private long _heartbeatsSent;
+        private long _disconnects;
+        private long _lastHeartbeatSentTicks;
+        private readonly LatencyHistogram _heartbeatRtt = new();
 
         // 请求超时（秒）—— 按业务类型分级
         private const int AuthTimeoutSec = 5;
@@ -43,6 +59,8 @@ namespace Core.Services
         private const int MaxPreviewLength = 256;
         private const int MaxEditContentLength = 4000;
         private const int MaxPresenceIdsPerRequest = 100;
+        private const int MaxGroupTitleLength = 100;
+        private const int MaxGroupMembersPerRequest = 200;
 
         public bool IsConnected => _tcpClient.IsConnected;
 
@@ -84,6 +102,14 @@ namespace Core.Services
         public event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
         public event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
         public event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
+
+        // ── 群聊事件 ──
+        public event EventHandler<MemberJoinedUpdateDto>? GroupMemberJoined;
+        public event EventHandler<MemberLeftUpdateDto>? GroupMemberLeft;
+        public event EventHandler<MemberRemovedUpdateDto>? GroupMemberRemoved;
+        public event EventHandler<RoleChangedUpdateDto>? GroupRoleChanged;
+        public event EventHandler<MembersAddedUpdateDto>? GroupMembersAdded;
+        public event EventHandler<ConversationDissolvedUpdateDto>? GroupConversationDissolved;
 
         public ChatSessionClient(ITcpClient tcpClient, IMessagePacketCodec codec, IPacketBodySerializer bodySerializer)
         {
@@ -131,6 +157,7 @@ namespace Core.Services
             }
             else
             {
+                Interlocked.Increment(ref _disconnects);
                 IsAuthenticated = false;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
                 // 鉴权中的请求必须显式结束，否则等待方只能靠超时兜底。
@@ -252,6 +279,8 @@ namespace Core.Services
             long? forwardedFromSenderUserId = null,
             string? forwardedFromPreview = null,
             string? clientMessageIdParam = null,
+            string? conversationId = null,
+            IReadOnlyList<long>? mentionedUserIds = null,
             CancellationToken ct = default)
         {
             var hasAttachments = attachmentIds is { Count: > 0 };
@@ -312,6 +341,7 @@ namespace Core.Services
             var chatPayload = new ChatMessageDto
             {
                 MessageId = clientMessageId,
+                ConversationId = string.IsNullOrWhiteSpace(conversationId) ? null : conversationId.Trim(),
                 TargetUserId = targetUserId,
                 Content = content,
                 SentUtc = DateTime.UtcNow,
@@ -321,7 +351,10 @@ namespace Core.Services
                 ReplyToPreview = hasReply ? preview : null,
                 ForwardedFromMessageId = hasForward ? forwardedFromMessageId : null,
                 ForwardedFromSenderUserId = hasForward ? forwardedFromSenderUserId : null,
-                ForwardedFromPreview = hasForward ? forwardPreview : null
+                ForwardedFromPreview = hasForward ? forwardPreview : null,
+                MentionedUserIds = mentionedUserIds is { Count: > 0 }
+                    ? NormalizeMemberIds(mentionedUserIds)
+                    : null
             };
 
             await SendPacketAsync(PacketCommand.ChatMessage, chatPayload, ct);
@@ -343,6 +376,8 @@ namespace Core.Services
                 }
             }
 
+            Interlocked.Exchange(ref _lastHeartbeatSentTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Increment(ref _heartbeatsSent);
             await SendPacketAsync(PacketCommand.Heartbeat, (object?)null, ct);
         }
 
@@ -434,6 +469,138 @@ namespace Core.Services
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
                 "消息编辑请求 Id 冲突", ct);
         }
+
+        // ──────────── 群聊命令 ────────────
+
+        public Task<CreateGroupResponseDto> CreateGroupAsync(
+            string title,
+            IReadOnlyList<long>? memberUserIds = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            var trimmed = title?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+                throw new ArgumentException("群名称不能为空");
+            if (trimmed.Length > MaxGroupTitleLength)
+                throw new ArgumentException("群名称过长");
+            var members = NormalizeMemberIds(memberUserIds);
+
+            return SendRequestAsync(_createGroupPending, PacketCommand.CreateGroupRequest,
+                new CreateGroupRequestDto
+                {
+                    Title = trimmed,
+                    MemberUserIds = members.Length > 0 ? members : null
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "创建群聊请求 Id 冲突", ct);
+        }
+
+        public Task<AddGroupMembersResponseDto> AddGroupMembersAsync(
+            string conversationId,
+            IReadOnlyList<long> memberUserIds,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+            var members = NormalizeMemberIds(memberUserIds);
+            if (members.Length == 0)
+                throw new ArgumentException("至少需要一名成员");
+
+            return SendRequestAsync(_addGroupMembersPending, PacketCommand.AddGroupMembersRequest,
+                new AddGroupMembersRequestDto
+                {
+                    ConversationId = conversationId.Trim(),
+                    MemberUserIds = members
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "添加群成员请求 Id 冲突", ct);
+        }
+
+        public Task<RemoveGroupMemberResponseDto> RemoveGroupMemberAsync(
+            string conversationId,
+            long targetUserId,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+            if (targetUserId <= 0)
+                throw new ArgumentException("targetUserId 无效");
+
+            return SendRequestAsync(_removeGroupMemberPending, PacketCommand.RemoveGroupMemberRequest,
+                new RemoveGroupMemberRequestDto
+                {
+                    ConversationId = conversationId.Trim(),
+                    TargetUserId = targetUserId
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "移除群成员请求 Id 冲突", ct);
+        }
+
+        public Task<LeaveGroupResponseDto> LeaveGroupAsync(
+            string conversationId,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+
+            return SendRequestAsync(_leaveGroupPending, PacketCommand.LeaveGroupRequest,
+                new LeaveGroupRequestDto { ConversationId = conversationId.Trim() },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "退出群聊请求 Id 冲突", ct);
+        }
+
+        public Task<ChangeMemberRoleResponseDto> ChangeMemberRoleAsync(
+            string conversationId,
+            long targetUserId,
+            ConversationMemberRole newRole,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+            if (targetUserId <= 0)
+                throw new ArgumentException("targetUserId 无效");
+            if (newRole is not (ConversationMemberRole.Owner or ConversationMemberRole.Admin or ConversationMemberRole.Member))
+                throw new ArgumentException("newRole 无效");
+
+            return SendRequestAsync(_changeRolePending, PacketCommand.ChangeMemberRoleRequest,
+                new ChangeMemberRoleRequestDto
+                {
+                    ConversationId = conversationId.Trim(),
+                    TargetUserId = targetUserId,
+                    NewRole = newRole
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "变更成员角色请求 Id 冲突", ct);
+        }
+
+        public Task<ListGroupMembersResponseDto> ListGroupMembersAsync(
+            string conversationId,
+            int? pageSize = null,
+            string? cursor = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+
+            return SendRequestAsync(_listGroupMembersPending, PacketCommand.ListGroupMembersRequest,
+                new ListGroupMembersRequestDto
+                {
+                    ConversationId = conversationId.Trim(),
+                    PageSize = pageSize is > 0 ? Math.Min(pageSize.Value, 200) : null,
+                    Cursor = cursor
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "群成员列表请求 Id 冲突", ct);
+        }
+
+        /// <summary>规整成员 Id 列表：过滤无效值、去重、截断到上限。</summary>
+        private static long[] NormalizeMemberIds(IReadOnlyList<long>? userIds)
+            => (userIds ?? []).Where(static id => id > 0).Distinct().Take(MaxGroupMembersPerRequest).ToArray();
 
         public async Task SendTypingNotifyAsync(
             long targetUserId,
@@ -638,6 +805,12 @@ namespace Core.Services
             FailAll(_historyPending, ex);
             FailAll(_receiptPending, ex);
             FailAll(_markReadPending, ex);
+            FailAll(_createGroupPending, ex);
+            FailAll(_addGroupMembersPending, ex);
+            FailAll(_removeGroupMemberPending, ex);
+            FailAll(_leaveGroupPending, ex);
+            FailAll(_changeRolePending, ex);
+            FailAll(_listGroupMembersPending, ex);
         }
 
 
@@ -650,6 +823,7 @@ namespace Core.Services
         /// <returns></returns>
         private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct)
         {
+            Interlocked.Increment(ref _packetsSent);
             // 热路径：池化出站帧缓冲，JSON 直写同一缓冲，无中间 byte[] 分配，
             // 传输层接管所有权发送完成后归还 ArrayPool，无 ToArray 复制。
             var frameWriter = new PooledBufferWriter(MessagePacket.HeaderSize + 64);
@@ -696,6 +870,7 @@ namespace Core.Services
         /// <param name="packet"></param>
         private void RoutePacket(MessagePacket packet)
         {
+            Interlocked.Increment(ref _packetsReceived);
             switch (packet.Command)
             {
                 case PacketCommand.AuthResponse:
@@ -790,6 +965,9 @@ namespace Core.Services
                     return;
                 case PacketCommand.HeartbeatAck:
                     Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
+                    var sentTicks = Interlocked.Exchange(ref _lastHeartbeatSentTicks, 0);
+                    if (sentTicks > 0)
+                        _heartbeatRtt.Add(TimeSpan.FromTicks(DateTime.UtcNow.Ticks - sentTicks));
                     return;
                 case PacketCommand.MessageAck:
                     var ack = _bodySerializer.Deserialize<MessageAcknowledgementDto>(packet.Body);
@@ -841,6 +1019,90 @@ namespace Core.Services
                     var unreadChanged = _bodySerializer.Deserialize<UnreadCountChangedDto>(packet.Body);
                     if (unreadChanged is not null)
                         UnreadCountChanged?.Invoke(this, unreadChanged);
+                    return;
+                case PacketCommand.CreateGroupResponse:
+                    var createGroup = _bodySerializer.Deserialize<CreateGroupResponseDto>(packet.Body);
+                    if (createGroup is not null
+                        && !string.IsNullOrWhiteSpace(createGroup.RequestId)
+                        && _createGroupPending.TryRemove(createGroup.RequestId, out var createGroupTcs))
+                    {
+                        createGroupTcs.TrySetResult(createGroup);
+                    }
+                    return;
+                case PacketCommand.AddGroupMembersResponse:
+                    var addMembers = _bodySerializer.Deserialize<AddGroupMembersResponseDto>(packet.Body);
+                    if (addMembers is not null
+                        && !string.IsNullOrWhiteSpace(addMembers.RequestId)
+                        && _addGroupMembersPending.TryRemove(addMembers.RequestId, out var addMembersTcs))
+                    {
+                        addMembersTcs.TrySetResult(addMembers);
+                    }
+                    return;
+                case PacketCommand.RemoveGroupMemberResponse:
+                    var removeMember = _bodySerializer.Deserialize<RemoveGroupMemberResponseDto>(packet.Body);
+                    if (removeMember is not null
+                        && !string.IsNullOrWhiteSpace(removeMember.RequestId)
+                        && _removeGroupMemberPending.TryRemove(removeMember.RequestId, out var removeMemberTcs))
+                    {
+                        removeMemberTcs.TrySetResult(removeMember);
+                    }
+                    return;
+                case PacketCommand.LeaveGroupResponse:
+                    var leaveGroup = _bodySerializer.Deserialize<LeaveGroupResponseDto>(packet.Body);
+                    if (leaveGroup is not null
+                        && !string.IsNullOrWhiteSpace(leaveGroup.RequestId)
+                        && _leaveGroupPending.TryRemove(leaveGroup.RequestId, out var leaveGroupTcs))
+                    {
+                        leaveGroupTcs.TrySetResult(leaveGroup);
+                    }
+                    return;
+                case PacketCommand.ChangeMemberRoleResponse:
+                    var changeRole = _bodySerializer.Deserialize<ChangeMemberRoleResponseDto>(packet.Body);
+                    if (changeRole is not null
+                        && !string.IsNullOrWhiteSpace(changeRole.RequestId)
+                        && _changeRolePending.TryRemove(changeRole.RequestId, out var changeRoleTcs))
+                    {
+                        changeRoleTcs.TrySetResult(changeRole);
+                    }
+                    return;
+                case PacketCommand.ListGroupMembersResponse:
+                    var listMembers = _bodySerializer.Deserialize<ListGroupMembersResponseDto>(packet.Body);
+                    if (listMembers is not null
+                        && !string.IsNullOrWhiteSpace(listMembers.RequestId)
+                        && _listGroupMembersPending.TryRemove(listMembers.RequestId, out var listMembersTcs))
+                    {
+                        listMembersTcs.TrySetResult(listMembers);
+                    }
+                    return;
+                case PacketCommand.MemberJoined:
+                    var memberJoined = _bodySerializer.Deserialize<MemberJoinedUpdateDto>(packet.Body);
+                    if (memberJoined is not null)
+                        GroupMemberJoined?.Invoke(this, memberJoined);
+                    return;
+                case PacketCommand.MemberLeft:
+                    var memberLeft = _bodySerializer.Deserialize<MemberLeftUpdateDto>(packet.Body);
+                    if (memberLeft is not null)
+                        GroupMemberLeft?.Invoke(this, memberLeft);
+                    return;
+                case PacketCommand.MemberRemoved:
+                    var memberRemoved = _bodySerializer.Deserialize<MemberRemovedUpdateDto>(packet.Body);
+                    if (memberRemoved is not null)
+                        GroupMemberRemoved?.Invoke(this, memberRemoved);
+                    return;
+                case PacketCommand.RoleChanged:
+                    var roleChanged = _bodySerializer.Deserialize<RoleChangedUpdateDto>(packet.Body);
+                    if (roleChanged is not null)
+                        GroupRoleChanged?.Invoke(this, roleChanged);
+                    return;
+                case PacketCommand.MembersAddedUpdate:
+                    var membersAdded = _bodySerializer.Deserialize<MembersAddedUpdateDto>(packet.Body);
+                    if (membersAdded is not null)
+                        GroupMembersAdded?.Invoke(this, membersAdded);
+                    return;
+                case PacketCommand.ConversationDissolvedUpdate:
+                    var dissolved = _bodySerializer.Deserialize<ConversationDissolvedUpdateDto>(packet.Body);
+                    if (dissolved is not null)
+                        GroupConversationDissolved?.Invoke(this, dissolved);
                     return;
                 case PacketCommand.Error:
                     HandleErrorCommand(packet.Body);
@@ -1004,5 +1266,18 @@ namespace Core.Services
             public required long Generation { get; init; }
             public required TaskCompletionSource<AuthResponseDto> Tcs { get; init; }
         }
+
+        public string Name => "network";
+
+        public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+        {
+            ["packets_sent"] = Volatile.Read(ref _packetsSent),
+            ["packets_received"] = Volatile.Read(ref _packetsReceived),
+            ["heartbeats_sent"] = Volatile.Read(ref _heartbeatsSent),
+            ["disconnects"] = Volatile.Read(ref _disconnects)
+        };
+
+        public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+            new Dictionary<string, HistogramSnapshot> { ["heartbeat_rtt_ms"] = _heartbeatRtt.Snapshot() };
     }
 }

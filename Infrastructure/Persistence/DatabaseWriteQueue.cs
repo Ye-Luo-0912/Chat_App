@@ -1,7 +1,11 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Core.Diagnostics;
+using Core.Interfaces;
 using Serilog;
 
 namespace Chat_App.Infrastructure.Persistence;
@@ -18,16 +22,25 @@ namespace Chat_App.Infrastructure.Persistence;
 ///   调用方只能放弃等待；DB 副作用必然发生。
 /// - 队列关闭：先完成通道写入，已入队操作仍执行完毕（限时等待），消费者随后退出。
 /// </summary>
-public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
+public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, IMetricsSource
 {
+    private const int QueueCapacity = 1024;
+
     private readonly Channel<WriteOperation> _channel;
     private readonly Task _consumerTask;
     private readonly CancellationTokenSource _cts = new();
+
+    // ── 诊断指标 ──
+    private long _processedCount;
+    private long _failedCount;
+    private long _inFlightCount;
+    private readonly LatencyHistogram _writeLatency = new();
 
     /// <summary>写入操作封装：携带唯一 Id 便于诊断，自包含执行并通过 TCS 通知完成。</summary>
     private abstract class WriteOperation
     {
         public Guid Id { get; } = Guid.NewGuid();
+        public long EnqueuedAtTicks { get; } = Stopwatch.GetTimestamp();
         public abstract Task ExecuteAsync(CancellationToken ct);
         public abstract void SetResult();
         public abstract void SetException(Exception ex);
@@ -72,7 +85,7 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
 
     public DatabaseWriteQueue()
     {
-        _channel = Channel.CreateBounded<WriteOperation>(new BoundedChannelOptions(1024)
+        _channel = Channel.CreateBounded<WriteOperation>(new BoundedChannelOptions(QueueCapacity)
         {
             SingleReader = true,
             SingleWriter = false,
@@ -107,18 +120,42 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable
     {
         await foreach (var op in _channel.Reader.ReadAllAsync(_cts.Token))
         {
+            var sw = Stopwatch.StartNew();
+            Interlocked.Increment(ref _inFlightCount);
             try
             {
                 await op.ExecuteAsync(CancellationToken.None).ConfigureAwait(false);
                 op.SetResult();
+                Interlocked.Increment(ref _processedCount);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "写入队列操作失败 OperationId={OperationId}", op.Id);
                 op.SetException(ex);
+                Interlocked.Increment(ref _failedCount);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlightCount);
+                sw.Stop();
+                _writeLatency.Add(sw.Elapsed);
             }
         }
     }
+
+    public string Name => "db_write_queue";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["queued"] = _channel.Reader.Count,
+        ["in_flight"] = Volatile.Read(ref _inFlightCount),
+        ["processed"] = Volatile.Read(ref _processedCount),
+        ["failed"] = Volatile.Read(ref _failedCount),
+        ["capacity"] = QueueCapacity
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot> { ["write_latency_ms"] = _writeLatency.Snapshot() };
 
     public async ValueTask DisposeAsync()
     {

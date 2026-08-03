@@ -52,11 +52,15 @@ public interface IAttachmentStorageService
     /// <summary>检查下载缓存中是否已有该附件，返回完整路径或 null。</summary>
     string? GetDownloadCachePath(string attachmentId, string fileName);
 
+    /// <summary>检查是否存在未完成的 .partial 下载缓存，返回完整路径或 null（空文件视为无效）。</summary>
+    string? GetPartialDownloadPath(string attachmentId, string fileName);
+
     /// <summary>
     /// 将下载流写入缓存，返回完整路径。
-    /// expectedSha256 非空时校验内容哈希，不一致则删除并抛异常。
+    /// expectedSha256 非空时校验内容哈希（append=true 时对落盘后的完整文件计算），不一致则删除并抛异常。
+    /// append=false：写 .partial 临时文件后原子 rename；append=true：向已有 .partial 追加续传。
     /// </summary>
-    Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null);
+    Task<string> WriteToDownloadsAsync(string attachmentId, string fileName, Stream content, CancellationToken ct = default, string? expectedSha256 = null, bool append = false);
 
     /// <summary>获取磁盘可用空间（字节）。返回 null 表示无法确定。</summary>
     long? GetAvailableDiskSpace();

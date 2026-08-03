@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Persistence;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
@@ -18,7 +19,7 @@ namespace Chat_App.Infrastructure.Services;
 /// catch-up（含继续分页）→ 完成事件。水位推进由 MessageStore.PersistHistoryAsync 单调完成。
 /// 单同步任务：每次 Start 取消旧任务，断线/重连/切账户时旧任务安全退出。
 /// </summary>
-public sealed class SyncEngine : ISyncEngine
+public sealed class SyncEngine : ISyncEngine, IMetricsSource
 {
     private const int ConversationListLimit = 100;
     private const int HistoryLimitPerConversation = 30;
@@ -36,6 +37,24 @@ public sealed class SyncEngine : ISyncEngine
     private readonly object _startLock = new();
     private CancellationTokenSource? _syncCts;
     private Task? _syncTask;
+
+    public string Name => "sync_engine";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["sync_count"] = _diagnostics.SyncCount,
+        ["conversations_synced"] = _diagnostics.ConversationsSynced,
+        ["messages_synced"] = _diagnostics.MessagesSynced,
+        ["is_running"] = _diagnostics.IsRunning ? 1 : 0
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot>
+        {
+            ["sync_duration_ms"] = _diagnostics.LastDurationMs > 0
+                ? HistogramSnapshot.Point(_diagnostics.LastDurationMs)
+                : HistogramSnapshot.Empty
+        };
 
     public SyncEngine(
         IChatSessionClient chatSession,

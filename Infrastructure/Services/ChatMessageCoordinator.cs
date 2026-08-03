@@ -1,5 +1,7 @@
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Channels;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
@@ -18,8 +20,23 @@ namespace Chat_App.Infrastructure.Services;
 /// 账户/连接隔离：事件入队时捕获 SessionStamp，消费时校验代际，
 /// 过期事件丢弃，绝不写入当前新账户。
 /// </summary>
-public sealed class ChatMessageCoordinator : IDisposable
+public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
 {
+    public string Name => "inbound_pump";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["inbound_queue_depth"] = _inboundChannel.Reader.Count,
+        ["total_processed"] = TotalProcessed,
+        ["stale_dropped"] = StaleDropped,
+        ["backpressure_disconnects"] = InboundBackpressureDisconnects,
+        ["overflow_count"] = InboundOverflowCount,
+        ["queue_wait_duration_ms"] = InboundQueueWaitDurationMs,
+        ["last_processed_sequence"] = LastProcessedSequence
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot>();
     private readonly IMessageStore _messageStore;
     private readonly IChatSessionClient _chatSession;
     private readonly ICurrentUserContext _currentUserContext;

@@ -25,6 +25,9 @@ public class LocalConversation : INotifyPropertyChanged
     /// <summary>直聊对端用户 Id。</summary>
     public long? PeerUserId { get; set; }
 
+    /// <summary>群聊名称（Type=Group 时展示，服务端会话列表回填）。</summary>
+    public string? GroupTitle { get; set; }
+
     public string? LastMessageId { get; set; }
 
     private string? _lastMessagePreview;
@@ -158,11 +161,23 @@ public class LocalConversation : INotifyPropertyChanged
     [NotMapped]
     public bool IsOffline => !PeerIsOnline;
 
+    /// <summary>会话类型是否为群聊。</summary>
     [NotMapped]
-    public string Title =>
-        !string.IsNullOrWhiteSpace(PeerDisplayName)
-            ? PeerDisplayName!
-            : PeerUserId is long peer ? $"用户 {peer}" : "会话";
+    public bool IsGroup => Type == 2;
+
+    /// <summary>会话标题：群聊优先群名；直聊优先好友显示名，其次"用户 {id}"。</summary>
+    [NotMapped]
+    public string Title
+    {
+        get
+        {
+            if (IsGroup)
+                return !string.IsNullOrWhiteSpace(GroupTitle) ? GroupTitle! : "群聊";
+            return !string.IsNullOrWhiteSpace(PeerDisplayName)
+                ? PeerDisplayName!
+                : PeerUserId is long peer ? $"用户 {peer}" : "会话";
+        }
+    }
 
     [NotMapped]
     public string Initial =>

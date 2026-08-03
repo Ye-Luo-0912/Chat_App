@@ -64,4 +64,6 @@ public sealed class AttachmentDownloadResult
     public required string ContentType { get; init; }
     public long? ContentLength { get; init; }
     public string? FileName { get; init; }
+    /// <summary>是否 206 Partial Content（服务端按 Range 返回了部分内容）。</summary>
+    public bool IsPartialContent { get; init; }
 }

@@ -21,6 +21,7 @@ public sealed class ConversationListItemDto
     public string ConversationId { get; set; } = string.Empty;
     public ConversationTypeDto Type { get; set; } = ConversationTypeDto.Direct;
     public long? PeerUserId { get; set; }
+    public string? Title { get; set; }
     public string? LastMessageId { get; set; }
     public string? LastMessagePreview { get; set; }
     public long? LastMessageAtMs { get; set; }
@@ -58,6 +59,7 @@ public sealed class ConversationChangedDto
     public string ConversationId { get; set; } = string.Empty;
     public ConversationTypeDto Type { get; set; }
     public long? PeerUserId { get; set; }
+    public string? Title { get; set; }
     public string? LastMessageId { get; set; }
     public string? LastMessagePreview { get; set; }
     public long? LastMessageAtMs { get; set; }

@@ -1,16 +1,19 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Services;
+using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models.DTO;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Chat;
 
-public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDisposable
+public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDisposable, IMetricsSource
 {
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
@@ -31,6 +34,12 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
     private CancellationTokenSource? _lifecycleCts;
     private CancellationTokenSource? _heartbeatCts;
     private ChatConnectionStatus _status = ChatConnectionStatus.Disconnected;
+
+    // ── 诊断指标 ──
+    private long _connectAttempts;
+    private long _connectFailures;
+    private long _reconnectCycles;
+    private readonly LatencyHistogram _connectLatency = new();
 
     public ChatConnectionStatus Status
     {
@@ -158,24 +167,35 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
             ? unchecked((ulong?)authToken.DeviceIdHash.Value)
             : null;
 
-        Log.Information(
-            "正在连接 TCP 服务器: {Server}:{Port} (attempt={Attempt})...",
-            serverInfo.ServerIpAddress,
-            serverInfo.ServerPort,
-            _attempt + 1);
+        Interlocked.Increment(ref _connectAttempts);
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            Log.Information(
+                "正在连接 TCP 服务器: {Server}:{Port} (attempt={Attempt})...",
+                serverInfo.ServerIpAddress,
+                serverInfo.ServerPort,
+                _attempt + 1);
 
-        await _chatSessionClient.ConnectAsync(serverInfo, ct).ConfigureAwait(false);
+            await _chatSessionClient.ConnectAsync(serverInfo, ct).ConfigureAwait(false);
 
-        Status = ChatConnectionStatus.Authenticating;
-        _pendingSessionId = authToken.SessionId;
-        _pendingDeviceIdHash = deviceIdHash;
-        await _chatSessionClient.AuthenticateAsync(
-                authToken.AccessToken,
-                userId,
-                authToken.SessionId,
-                deviceIdHash,
-                ct)
-            .ConfigureAwait(false);
+            Status = ChatConnectionStatus.Authenticating;
+            _pendingSessionId = authToken.SessionId;
+            _pendingDeviceIdHash = deviceIdHash;
+            await _chatSessionClient.AuthenticateAsync(
+                    authToken.AccessToken,
+                    userId,
+                    authToken.SessionId,
+                    deviceIdHash,
+                    ct)
+                .ConfigureAwait(false);
+            _connectLatency.Add(sw.Elapsed);
+        }
+        catch
+        {
+            Interlocked.Increment(ref _connectFailures);
+            throw;
+        }
     }
 
     private void OnAuthenticated(object? sender, long userId)
@@ -247,6 +267,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
             if (_reconnectLoopRunning)
                 return;
             _reconnectLoopRunning = true;
+            Interlocked.Increment(ref _reconnectCycles);
         }
 
         var ct = _lifecycleCts?.Token ?? CancellationToken.None;
@@ -350,4 +371,19 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         _lifecycleCts = null;
     }
+
+    public string Name => "network_coordinator";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["connect_attempts"] = Volatile.Read(ref _connectAttempts),
+        ["connect_failures"] = Volatile.Read(ref _connectFailures),
+        ["reconnect_cycles"] = Volatile.Read(ref _reconnectCycles),
+        ["current_backoff_ms"] = (long)(Math.Min(
+            MaxBackoff.TotalMilliseconds,
+            Math.Pow(2, Math.Min(_attempt - 1, 5)) * 1000))
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot> { ["connect_latency_ms"] = _connectLatency.Snapshot() };
 }
