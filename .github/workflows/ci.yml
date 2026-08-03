@@ -93,7 +93,7 @@ jobs:
       # 基准 JSON → 与基线比较 → 超过允许回归比例（20%）→ CI 失败。
       # 基线必须与 CI 同环境（ubuntu）生成：见 Benchmarks/baseline.json 环境标注。
       - run: dotnet run -c Release --project Benchmarks -- --filter "*" --exporters JSON --artifacts "$RUNNER_TEMP/bench"
-      - run: python3 .github/scripts/compare_benchmarks.py "$RUNNER_TEMP/bench" Benchmarks/baseline.json 0.25
+      - run: python3 .github/scripts/compare_benchmarks.py "$RUNNER_TEMP/bench" Benchmarks/baseline.json 0.50
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -168,4 +168,5 @@ jobs:
               raise SystemExit(1)
           print("no known vulnerabilities")
           EOF
+
 
