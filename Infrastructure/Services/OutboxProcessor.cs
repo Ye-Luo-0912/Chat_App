@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -219,62 +220,10 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
             if (claimed.Count == 0)
                 Interlocked.Increment(ref _claimEmptyRounds);
 
-            // 3. 逐条发送。
-            foreach (var entry in claimed)
-            {
-                if (_cts.IsCancellationRequested)
-                {
-                    // 停止：释放本批次尚未开始条目的租约（Sending → Queued），
-                    // 避免等待 2 分钟租约过期才能重新发送。
-                    var released = await ReleaseRemainingLeasesAsync(userId, claimed, entry)
-                        .ConfigureAwait(false);
-                    if (released > 0)
-                        Interlocked.Add(ref _leaseReleasedOnStop, released);
-                    break;
-                }
-
-                _eventBus.Publish(new OutboxStatusChangedEvent(entry.ClientMessageId, OutboxStatus.Sending, null));
-
-                var sw = Stopwatch.StartNew();
-                try
-                {
-                    await _chatSession.SendChatMessageAsync(
-                        entry.TargetUserId ?? 0,
-                        entry.Content,
-                        AttachmentJson.DeserializeIds(entry.AttachmentIdsJson),
-                        entry.ReplyToMessageId,
-                        entry.ReplyToSenderUserId,
-                        entry.ReplyToPreview,
-                        entry.ForwardedFromMessageId,
-                        entry.ForwardedFromSenderUserId,
-                        entry.ForwardedFromPreview,
-                        entry.ClientMessageId,
-                        conversationId: entry.ConversationId,
-                        ct: _cts.Token).ConfigureAwait(false);
-
-                    // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。
-                    Interlocked.Increment(ref _transportWrites);
-                }
-                catch (OperationCanceledException)
-                {
-                    // 处理器关闭：释放本批次剩余租约后退出。
-                    var released = await ReleaseRemainingLeasesAsync(userId, claimed, entry)
-                        .ConfigureAwait(false);
-                    if (released > 0)
-                        Interlocked.Add(ref _leaseReleasedOnStop, released);
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Log.Warning(ex, "Outbox 发送失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
-                    await MarkFailedAsync(userId, entry, ex).ConfigureAwait(false);
-                }
-                finally
-                {
-                    sw.Stop();
-                    _sendLatency.Add(sw.Elapsed);
-                }
-            }
+            // 3. 有限并发发送（MaxConcurrentSends 上限，含失败/取消/停止释放语义）。
+            // Sending 事件按批次顺序统一发布；停止时仅释放"尚未开始"条目的租约
+            //（在途条目保持 Sending，等待租约过期或 ack）。
+            await SendBatchAsync(userId, claimed).ConfigureAwait(false);
 
             // 4. 归档清理（节流）：删除超过保留期的 Sent/Cancelled。
             if (now - _lastCleanupUtc >= TimeSpan.FromHours(CleanupIntervalHours))
@@ -296,28 +245,102 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         }
     }
 
+    /// <summary>发送批次最大并发数（S3：有限并发，不放大服务器/网络突发）。</summary>
+    private const int MaxConcurrentSends = 2;
+
     /// <summary>
-    /// 停止时释放本批次尚未开始发送条目的租约（Sending → Queued 并清租约字段），
-    /// 使下轮排空（重启后）无需等待租约过期即可重新发送。
+    /// 有限并发发送一个批次：Sending 事件按批次顺序发布；
+    /// 停止/取消时仅释放"尚未开始"条目的租约（在途条目保持 Sending 等租约/ack）。
     /// </summary>
-    private async Task<int> ReleaseRemainingLeasesAsync(long userId, List<LocalOutboxMessage> claimed, LocalOutboxMessage current)
+    private async Task SendBatchAsync(long userId, List<LocalOutboxMessage> claimed)
     {
-        var remaining = claimed
-            .SkipWhile(c => c.ClientMessageId != current.ClientMessageId)
-            .Skip(1)
-            .Select(c => c.ClientMessageId)
-            .ToList();
-        if (remaining.Count == 0)
-            return 0;
-        try
+        if (claimed.Count == 0)
+            return;
+
+        // 按批次顺序发布 Sending（UI 顺序一致）
+        foreach (var entry in claimed)
+            _eventBus.Publish(new OutboxStatusChangedEvent(entry.ClientMessageId, OutboxStatus.Sending, null));
+
+        // 尚未开始（未获信号量即被取消）的条目：停止时释放租约
+        var notStarted = new ConcurrentDictionary<string, LocalOutboxMessage>();
+        foreach (var entry in claimed)
+            notStarted[entry.ClientMessageId] = entry;
+
+        var gate = new SemaphoreSlim(MaxConcurrentSends);
+        var tasks = new List<Task>(claimed.Count);
+        foreach (var entry in claimed)
         {
-            return await _db.ReleaseOutboxLeasesAsync(userId, remaining, current.AttemptId ?? string.Empty)
-                .ConfigureAwait(false);
+            tasks.Add(Task.Run(async () =>
+            {
+                await gate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (_cts.IsCancellationRequested)
+                        return; // 尚未开始：留在 notStarted，统一释放租约
+
+                    notStarted.TryRemove(entry.ClientMessageId, out _); // 已开始：在途
+
+                    var sw = Stopwatch.StartNew();
+                    try
+                    {
+                        await _chatSession.SendChatMessageAsync(
+                            entry.TargetUserId ?? 0,
+                            entry.Content,
+                            AttachmentJson.DeserializeIds(entry.AttachmentIdsJson),
+                            entry.ReplyToMessageId,
+                            entry.ReplyToSenderUserId,
+                            entry.ReplyToPreview,
+                            entry.ForwardedFromMessageId,
+                            entry.ForwardedFromSenderUserId,
+                            entry.ForwardedFromPreview,
+                            entry.ClientMessageId,
+                            conversationId: entry.ConversationId,
+                            ct: _cts.Token).ConfigureAwait(false);
+
+                        // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。
+                        Interlocked.Increment(ref _transportWrites);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // 处理器关闭：在途条目保持 Sending（租约过期后由下轮恢复）；不释放（防重复发送）。
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Outbox 发送失败 ClientMessageId={ClientMessageId}", entry.ClientMessageId);
+                        await MarkFailedAsync(userId, entry, ex).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        sw.Stop();
+                        _sendLatency.Add(sw.Elapsed);
+                    }
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
         }
-        catch (Exception ex)
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        // 停止/取消后：释放"尚未开始"条目的租约（Sending → Queued），重启后立即可重新发送
+        if (notStarted.Count > 0)
         {
-            Log.Warning(ex, "释放未开始发送的 Outbox 租约失败 Count={Count}", remaining.Count);
-            return 0;
+            var attemptId = claimed[0].AttemptId ?? string.Empty;
+            try
+            {
+                var released = await _db.ReleaseOutboxLeasesAsync(
+                        userId, notStarted.Keys.ToList(), attemptId)
+                    .ConfigureAwait(false);
+                if (released > 0)
+                    Interlocked.Add(ref _leaseReleasedOnStop, released);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "释放未开始发送的 Outbox 租约失败 Count={Count}", notStarted.Count);
+            }
         }
     }
 
@@ -402,3 +425,4 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         _wakeSignal.Dispose();
     }
 }
+

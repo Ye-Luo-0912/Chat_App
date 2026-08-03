@@ -1674,6 +1674,30 @@ public class DatabaseService(
             .ToListAsync(None);
     }
 
+    /// <summary>
+    /// 活跃成员分页（升序游标）：返回 JoinedAtMs 大于 afterJoinedAtMs 的前 limit 条。
+    /// 大群成员列表虚拟化分页的仓储层支持。
+    /// </summary>
+    public Task<List<LocalGroupMember>> GetGroupMembersPageAsync(
+        long ownerUserId, string conversationId, int limit, long? afterJoinedAtMs = null) =>
+        WriteAsync(() => GetGroupMembersPageAsyncImpl(ownerUserId, conversationId, limit, afterJoinedAtMs));
+
+    private async Task<List<LocalGroupMember>> GetGroupMembersPageAsyncImpl(
+        long ownerUserId, string conversationId, int limit, long? afterJoinedAtMs)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var query = db.GroupMembers
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.RemovedAtMs == null);
+        if (afterJoinedAtMs is not null)
+            query = query.Where(m => m.JoinedAtMs > afterJoinedAtMs);
+        return await query
+            .OrderBy(m => m.JoinedAtMs)
+            .Take(limit)
+            .ToListAsync(None);
+    }
+
     /// <summary>群状态 upsert（标题/修订版本单调）：仅当事件时间晚于已记录时间才应用。</summary>
     public Task<bool> UpsertGroupStateAsync(
         long ownerUserId, string conversationId, string? title,

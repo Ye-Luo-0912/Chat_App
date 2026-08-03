@@ -372,6 +372,54 @@ public class RealTcpLoopbackTests
         return frameWriter.WrittenMemory.ToArray();
     }
 
+    /// <summary>
+    /// S0 验收：旧连接迟到异常不能关闭新连接。
+    /// 旧服务端强制断开（RST）后立即重连新服务端——旧接收循环随后抛异常
+    /// （迟到的 session-scoped 异常），必须只作用于旧会话，新连接保持连通可收发。
+    /// </summary>
+    [Fact]
+    public async Task RealSocket_Old_Session_Late_Error_Does_Not_Kill_New_Connection()
+    {
+        var server1 = await StartEchoServerAsync();
+        using var client = new TcpClientExample();
+        var serializer = new JsonPacketBodySerializer();
+
+        await client.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = server1.Port });
+        Assert.True(client.IsConnected);
+        await SendOneAsync(client, serializer, "old-session");
+
+        // 旧服务端强制关闭：旧连接的接收循环将收到 RST/EOF（迟到的异常源）
+        server1.Dispose();
+
+        // 立即重连新服务端（旧循环可能尚未退出）
+        using var server2 = await StartEchoServerAsync();
+        await client.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = server2.Port });
+        Assert.True(client.IsConnected);
+
+        // 给旧接收循环时间抛出迟到异常（旧会话 RST 处理）
+        await Task.Delay(300);
+
+        // 新连接必须仍然连通且可正常收发
+        Assert.True(client.IsConnected);
+        await SendOneAsync(client, serializer, "new-session");
+        await Task.Delay(200);
+        client.Disconnect("done");
+
+        var received = server2.GetReceivedBytes();
+        var codec = new MessagePacketCodec();
+        codec.Append(received);
+        var count = 0;
+        string? lastContent = null;
+        while (codec.TryRead(out var pkt))
+        {
+            var dto = serializer.Deserialize<ChatMessageDto>(pkt.Body);
+            lastContent = dto!.Content;
+            count++;
+        }
+        Assert.Equal(1, count);
+        Assert.Equal("new-session", lastContent);
+    }
+
     private static async Task SendOneAsync(TcpClientExample client, JsonPacketBodySerializer serializer, string content)
         => await client.SendAsync(BuildFrame(serializer, new ChatMessageDto { MessageId = content, TargetUserId = 1, Content = content }));
 }

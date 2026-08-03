@@ -189,6 +189,31 @@ public class AttachmentResumeDownloadTests : IDisposable
         return Path.Combine(_storage.GetDownloadsDir(OwnerId), $"{hash}_{FileName}.partial");
     }
 
+    /// <summary>
+    /// S0 验收：100 个并发附件下载共享同一次网络请求（惰性 single-flight 真合并）。
+    /// 并发调用 GetOrDownloadAsync（无缓存命中），网络层 DownloadAsync 只允许调用一次。
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_100_Downloads_Issue_Single_Network_Request()
+    {
+        // 1MB 载荷：写盘耗时制造并发窗口；同一附件并发首次下载
+        _attachments.Payload = new byte[1024 * 1024];
+        Random.Shared.NextBytes(_attachments.Payload);
+
+        // 清除可能的缓存命中干扰：并发首次下载同一附件
+        var tasks = new List<Task<string?>>();
+        for (var i = 0; i < 100; i++)
+            tasks.Add(_service.GetOrDownloadAsync(AttachmentId, FileName, null));
+
+        var results = await Task.WhenAll(tasks);
+        Assert.All(results, r => Assert.NotNull(r));
+        Assert.All(results, r => Assert.Equal(results[0], r));
+
+        // 只发起一次完整下载请求（无 Range、无重复）
+        Assert.Equal(1, _attachments.FullRequestCount);
+        Assert.Equal(0, _attachments.RangeRequestCount);
+    }
+
     private async Task SeedExpectedSha256Async()
     {
         var sha256 = Convert.ToHexStringLower(SHA256.HashData(_attachments.Payload));

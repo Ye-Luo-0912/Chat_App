@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
@@ -132,13 +133,20 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
 
         using var sha = SHA256.Create();
         await using var fs = File.Create(fullPath);
-        var buffer = new byte[65536];
-        int read;
-        while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        var buffer = ArrayPool<byte>.Shared.Rent(65536);
+        try
         {
-            // 同一缓冲既落盘又喂给哈希，单次读取完成复制+哈希。
-            await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-            sha.TransformBlock(buffer, 0, read, buffer, 0);
+            int read;
+            while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            {
+                // 同一缓冲既落盘又喂给哈希，单次读取完成复制+哈希。
+                await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                sha.TransformBlock(buffer, 0, read, buffer, 0);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
         sha.TransformFinalBlock([], 0, 0);
 
@@ -246,12 +254,19 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
             var mode = append ? FileMode.Append : FileMode.Create;
             await using (var fs = new FileStream(partialPath, mode, FileAccess.Write, FileShare.None, 65536, useAsync: true))
             {
-                var buffer = new byte[65536];
-                int read;
-                while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+                var buffer = ArrayPool<byte>.Shared.Rent(65536);
+                try
                 {
-                    await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-                    written += read;
+                    int read;
+                    while ((read = await content.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+                    {
+                        await fs.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                        written += read;
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
                 }
                 await fs.FlushAsync(ct).ConfigureAwait(false);
             }
@@ -303,11 +318,18 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     {
         using var sha = SHA256.Create();
         await using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
-        var buffer = new byte[65536];
-        int read;
-        while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+        var buffer = ArrayPool<byte>.Shared.Rent(65536);
+        try
         {
-            sha.TransformBlock(buffer, 0, read, buffer, 0);
+            int read;
+            while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+            {
+                sha.TransformBlock(buffer, 0, read, buffer, 0);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
         sha.TransformFinalBlock([], 0, 0);
         return ToHexLower(sha.Hash!);

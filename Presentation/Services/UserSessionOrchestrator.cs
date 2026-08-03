@@ -35,6 +35,10 @@ public sealed class UserSessionOrchestrator : IDisposable
     private bool _eventHandlersRegistered;
     private bool _disposed;
 
+    /// <summary>在途会话后台任务计数（好友同步/附件恢复）：StopSessionAsync 等待其退出。</summary>
+    private long _inFlightTasks;
+    private readonly object _taskSignal = new();
+
     /// <summary>会话启动完成（TCP 已连接+已鉴权）或停止完成时触发，供 UI 导航。</summary>
     public event EventHandler? SessionStarted;
     public event EventHandler<string>? SessionStopped;
@@ -130,8 +134,8 @@ public sealed class UserSessionOrchestrator : IDisposable
     }
 
     /// <summary>
-    /// 统一停止会话：停止 SyncEngine / OutboxProcessor / 好友同步，断开 TCP，
-    /// 并通知 UI。
+    /// 统一停止会话：停止 SyncEngine（严格等待退出）/ OutboxProcessor，等待在途
+    /// 好友同步与附件恢复收尾，断开 TCP，并通知 UI。
     /// </summary>
     public async Task StopSessionAsync(string? reason = null, CancellationToken ct = default)
     {
@@ -144,6 +148,10 @@ public sealed class UserSessionOrchestrator : IDisposable
             _sessionRunning = false;
             await _syncEngine.StopAsync().ConfigureAwait(false);
             _outboxProcessor.Stop();
+            // 等待在途好友同步/附件恢复退出（不等待则可能在新会话/退出后污染数据）
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (Volatile.Read(ref _inFlightTasks) > 0 && DateTime.UtcNow < deadline)
+                await Task.Delay(20, ct).ConfigureAwait(false);
             _friendStore.Reset();
             await _connectionCoordinator.StopAsync().ConfigureAwait(false);
 
@@ -166,13 +174,34 @@ public sealed class UserSessionOrchestrator : IDisposable
         _ = RestartSyncSafeAsync(session);
 
         // 好友增量同步：与通讯录页共享 FriendStore，同步完成后两处 UI 统一刷新。
-        _ = Task.Run(() => _friendStore.SyncFromServerAsync());
+        StartSessionTask(() => _friendStore.SyncFromServerAsync());
 
         // 附件恢复：重连重新鉴权也会触发（AttachmentRecoveryService 自身已防重入）。
         if (_currentUserState.UserId is { } ownerUserId)
-            _ = _attachmentRecovery.RecoverFailedUploadsAsync(ownerUserId);
+            StartSessionTask(() => _attachmentRecovery.RecoverFailedUploadsAsync(ownerUserId));
 
         Dispatcher.UIThread.Post(() => SessionStarted?.Invoke(this, EventArgs.Empty));
+    }
+
+    /// <summary>启动并跟踪会话后台任务（停止时等待其收尾）。</summary>
+    private void StartSessionTask(Func<Task> taskFactory)
+    {
+        Interlocked.Increment(ref _inFlightTasks);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await taskFactory().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "会话后台任务异常");
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlightTasks);
+            }
+        });
     }
 
     /// <summary>

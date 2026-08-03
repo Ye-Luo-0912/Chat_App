@@ -139,6 +139,29 @@ public class GroupDomainTests : IDisposable
         Assert.Equal(9201, activeAfterDissolve[0].UserId);
     }
 
+    /// <summary>活跃成员分页：JoinedAtMs 升序游标，两页无重叠且覆盖全量。</summary>
+    [Fact]
+    public async Task Group_Member_Pagination_By_JoinedAt_Cursor()
+    {
+        for (var i = 0; i < 10; i++)
+            await _db.UpsertGroupMemberAsync(OwnerId, GroupId, 9000 + i, (byte)ConversationMemberRole.Member, 1_000 + i * 100, 1_000 + i * 100);
+
+        var page1 = await _db.GetGroupMembersPageAsync(OwnerId, GroupId, limit: 4);
+        Assert.Equal(4, page1.Count);
+        Assert.Equal(9000, page1[0].UserId);
+
+        var page2 = await _db.GetGroupMembersPageAsync(OwnerId, GroupId, limit: 4, afterJoinedAtMs: page1[^1].JoinedAtMs);
+        Assert.Equal(4, page2.Count);
+        Assert.DoesNotContain(page1, m => page2.Any(p => p.Id == m.Id));
+
+        var page3 = await _db.GetGroupMembersPageAsync(OwnerId, GroupId, limit: 4, afterJoinedAtMs: page2[^1].JoinedAtMs);
+        Assert.Equal(2, page3.Count);
+        Assert.Equal(9009, page3[^1].UserId);
+
+        // 全量覆盖
+        Assert.Equal(10, page1.Count + page2.Count + page3.Count);
+    }
+
     private sealed class DbContextFactoryStub(string dbPath) : IDbContextFactory<ClientDbContext>
     {
         public ClientDbContext CreateDbContext()

@@ -169,6 +169,9 @@ public interface IDatabaseService
     /// <summary>活跃成员列表（未被移除），按加入时间升序。</summary>
     Task<List<LocalGroupMember>> GetGroupMembersAsync(long ownerUserId, string conversationId);
 
+    /// <summary>活跃成员分页（升序游标）：JoinedAtMs 大于 afterJoinedAtMs 的前 limit 条。</summary>
+    Task<List<LocalGroupMember>> GetGroupMembersPageAsync(long ownerUserId, string conversationId, int limit, long? afterJoinedAtMs = null);
+
     /// <summary>群状态 upsert（标题/修订版本单调）。返回是否应用。</summary>
     Task<bool> UpsertGroupStateAsync(long ownerUserId, string conversationId, string? title, long occurredAtMs, long memberRevision, long conversationRevision);
 
