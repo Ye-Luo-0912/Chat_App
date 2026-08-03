@@ -1465,6 +1465,199 @@ public class DatabaseService(
         return affected;
     }
 
+    // ---- 群聊领域仓储 ----
+
+    /// <summary>
+    /// 成员加入/角色变更落库（版本单调）：仅当事件时间晚于已记录时间才应用（防重放/乱序）。
+    /// 成员存在时同时更新角色；被移除成员被更新的加入事件重新激活。
+    /// </summary>
+    public Task<bool> UpsertGroupMemberAsync(
+        long ownerUserId, string conversationId, long userId, byte role,
+        long occurredAtMs, long revision) =>
+        WriteAsync(() => UpsertGroupMemberAsyncImpl(ownerUserId, conversationId, userId, role, occurredAtMs, revision));
+
+    private async Task<bool> UpsertGroupMemberAsyncImpl(
+        long ownerUserId, string conversationId, long userId, byte role,
+        long occurredAtMs, long revision)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+        var existing = await db.GroupMembers
+            .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId
+                                   && m.ConversationId == conversationId
+                                   && m.UserId == userId, None);
+        if (existing is not null)
+        {
+            // 版本单调：仅接受更晚的事件（重放/乱序保护）。
+            if (existing.JoinedAtMs > occurredAtMs && (existing.RemovedAtMs is null || existing.RemovedAtMs > occurredAtMs))
+                return false;
+            var applied = false;
+            if (occurredAtMs >= existing.JoinedAtMs)
+            {
+                existing.Role = role;
+                existing.JoinedAtMs = occurredAtMs;
+                existing.Revision = revision;
+                applied = true;
+            }
+            if (existing.RemovedAtMs is not null)
+            {
+                // 重新加入：清除移除时间。
+                existing.RemovedAtMs = null;
+                applied = true;
+            }
+            if (!applied)
+                return false;
+            existing.UpdatedAt = now;
+            await db.SaveChangesAsync(None);
+            return true;
+        }
+
+        db.GroupMembers.Add(new LocalGroupMember
+        {
+            OwnerUserId = ownerUserId,
+            ConversationId = conversationId,
+            UserId = userId,
+            Role = role,
+            JoinedAtMs = occurredAtMs,
+            RemovedAtMs = null,
+            Revision = revision,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync(None);
+        return true;
+    }
+
+    /// <summary>成员被移除/退出落库（RemovedAtMs 单调）：仅当事件时间晚于已记录移除时间才应用。</summary>
+    public Task<bool> MarkGroupMemberRemovedAsync(
+        long ownerUserId, string conversationId, long userId, long occurredAtMs, long revision) =>
+        WriteAsync(() => MarkGroupMemberRemovedAsyncImpl(ownerUserId, conversationId, userId, occurredAtMs, revision));
+
+    private async Task<bool> MarkGroupMemberRemovedAsyncImpl(
+        long ownerUserId, string conversationId, long userId, long occurredAtMs, long revision)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+        var existing = await db.GroupMembers
+            .FirstOrDefaultAsync(m => m.OwnerUserId == ownerUserId
+                                   && m.ConversationId == conversationId
+                                   && m.UserId == userId, None);
+        if (existing is null)
+            return false; // 未知成员移除：无本地记录可标记
+
+        // 版本单调：仅接受更晚的移除（已移除的旧事件重放不得复活成员）。
+        if (existing.RemovedAtMs is > 0 && existing.RemovedAtMs >= occurredAtMs)
+            return false;
+        existing.RemovedAtMs = occurredAtMs;
+        existing.Revision = revision;
+        existing.UpdatedAt = now;
+        await db.SaveChangesAsync(None);
+        return true;
+    }
+
+    /// <summary>查询活跃成员列表（未被移除），按加入时间升序。</summary>
+    public Task<List<LocalGroupMember>> GetGroupMembersAsync(long ownerUserId, string conversationId) =>
+        WriteAsync(() => GetGroupMembersAsyncImpl(ownerUserId, conversationId));
+
+    private async Task<List<LocalGroupMember>> GetGroupMembersAsyncImpl(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.GroupMembers
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.RemovedAtMs == null)
+            .OrderBy(m => m.JoinedAtMs)
+            .ToListAsync(None);
+    }
+
+    /// <summary>群状态 upsert（标题/修订版本单调）：仅当事件时间晚于已记录时间才应用。</summary>
+    public Task<bool> UpsertGroupStateAsync(
+        long ownerUserId, string conversationId, string? title,
+        long occurredAtMs, long memberRevision, long conversationRevision) =>
+        WriteAsync(() => UpsertGroupStateAsyncImpl(ownerUserId, conversationId, title, occurredAtMs, memberRevision, conversationRevision));
+
+    private async Task<bool> UpsertGroupStateAsyncImpl(
+        long ownerUserId, string conversationId, string? title,
+        long occurredAtMs, long memberRevision, long conversationRevision)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+        var existing = await db.GroupStates
+            .FirstOrDefaultAsync(g => g.OwnerUserId == ownerUserId && g.ConversationId == conversationId, None);
+        if (existing is not null)
+        {
+            if (existing.LastEventAtMs >= occurredAtMs)
+                return false; // 重放/乱序：更早事件不覆盖
+            existing.Title = title;
+            existing.MemberRevision = memberRevision;
+            existing.ConversationRevision = conversationRevision;
+            existing.LastEventAtMs = occurredAtMs;
+            existing.UpdatedAt = now;
+            await db.SaveChangesAsync(None);
+            return true;
+        }
+
+        db.GroupStates.Add(new LocalGroupState
+        {
+            OwnerUserId = ownerUserId,
+            ConversationId = conversationId,
+            Title = title,
+            MemberRevision = memberRevision,
+            ConversationRevision = conversationRevision,
+            LastEventAtMs = occurredAtMs,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync(None);
+        return true;
+    }
+
+    /// <summary>群解散 tombstone：DissolvedAtMs 单调，仅接受更晚的事件。</summary>
+    public Task<bool> MarkGroupDissolvedAsync(long ownerUserId, string conversationId, long occurredAtMs, long revision) =>
+        WriteAsync(() => MarkGroupDissolvedAsyncImpl(ownerUserId, conversationId, occurredAtMs, revision));
+
+    private async Task<bool> MarkGroupDissolvedAsyncImpl(long ownerUserId, string conversationId, long occurredAtMs, long revision)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var now = DateTime.UtcNow;
+        var existing = await db.GroupStates
+            .FirstOrDefaultAsync(g => g.OwnerUserId == ownerUserId && g.ConversationId == conversationId, None);
+        if (existing is not null)
+        {
+            if (existing.DissolvedAtMs is > 0 && existing.DissolvedAtMs >= occurredAtMs)
+                return false;
+            existing.DissolvedAtMs = occurredAtMs;
+            existing.ConversationRevision = revision;
+            existing.LastEventAtMs = occurredAtMs;
+            existing.UpdatedAt = now;
+            await db.SaveChangesAsync(None);
+            return true;
+        }
+
+        db.GroupStates.Add(new LocalGroupState
+        {
+            OwnerUserId = ownerUserId,
+            ConversationId = conversationId,
+            LastEventAtMs = occurredAtMs,
+            ConversationRevision = revision,
+            DissolvedAtMs = occurredAtMs,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync(None);
+        return true;
+    }
+
+    public Task<LocalGroupState?> GetGroupStateAsync(long ownerUserId, string conversationId) =>
+        WriteAsync(() => GetGroupStateAsyncImpl(ownerUserId, conversationId));
+
+    private async Task<LocalGroupState?> GetGroupStateAsyncImpl(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.GroupStates
+            .FirstOrDefaultAsync(g => g.OwnerUserId == ownerUserId && g.ConversationId == conversationId, None);
+    }
+
     /// <inheritdoc />
     public Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId) => WriteAsync(() => RetryOutboxAsyncImpl(ownerUserId, clientMessageId));
 

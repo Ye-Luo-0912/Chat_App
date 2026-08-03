@@ -94,7 +94,8 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
         }
     }
 
-    /// <summary>停止后台排空循环并等待退出。幂等。</summary>
+    /// <summary>停止后台排空循环并等待退出。幂等。
+    /// 同时等待事件触发的在途 fire-and-forget 排空完成，保证 Dispose 后无遗留 DB 访问。</summary>
     public void Stop()
     {
         lock (_startLock)
@@ -109,18 +110,41 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                 // 忽略关闭时的等待异常
             }
             _loopTask = null;
+            // 等待事件触发的在途排空（OnOutboxEnqueued/OnAuthenticated 的 Task.Run）收尾
+            var deadline = DateTime.UtcNow.AddSeconds(StopTimeoutSec);
+            while (Volatile.Read(ref _drainInFlight) > 0 && DateTime.UtcNow < deadline)
+                Thread.Sleep(10);
         }
     }
 
     private void OnAuthenticated(object? sender, long userId)
     {
         // 鉴权成功后立即触发一次排空（与后台循环通过信号量串行化）
-        _ = Task.Run(DrainOnceAsync);
+        StartDrainOnce();
     }
 
     private void OnOutboxEnqueued(OutboxEnqueuedEvent e)
     {
-        _ = Task.Run(DrainOnceAsync);
+        StartDrainOnce();
+    }
+
+    /// <summary>事件触发的在途排空计数：Stop/Dispose 等待其收尾，避免遗留 DB 访问与文件锁。</summary>
+    private long _drainInFlight;
+
+    private void StartDrainOnce()
+    {
+        Interlocked.Increment(ref _drainInFlight);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await DrainOnceAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _drainInFlight);
+            }
+        });
     }
 
     private async Task DrainLoopAsync()

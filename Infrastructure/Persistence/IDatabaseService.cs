@@ -147,6 +147,26 @@ public interface IDatabaseService
     /// <summary>按会话将未发送 Outbox 标记为永久失败（群聊成员移除/退出/解散）。返回受影响条数。</summary>
     Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason);
 
+    // ---- 群聊领域仓储 ----
+
+    /// <summary>成员加入/角色变更落库（OccurredAtMs 单调，防重放/乱序）。返回是否应用。</summary>
+    Task<bool> UpsertGroupMemberAsync(long ownerUserId, string conversationId, long userId, byte role, long occurredAtMs, long revision);
+
+    /// <summary>成员被移除/退出落库（RemovedAtMs 单调）。返回是否应用。</summary>
+    Task<bool> MarkGroupMemberRemovedAsync(long ownerUserId, string conversationId, long userId, long occurredAtMs, long revision);
+
+    /// <summary>活跃成员列表（未被移除），按加入时间升序。</summary>
+    Task<List<LocalGroupMember>> GetGroupMembersAsync(long ownerUserId, string conversationId);
+
+    /// <summary>群状态 upsert（标题/修订版本单调）。返回是否应用。</summary>
+    Task<bool> UpsertGroupStateAsync(long ownerUserId, string conversationId, string? title, long occurredAtMs, long memberRevision, long conversationRevision);
+
+    /// <summary>群解散 tombstone（DissolvedAtMs 单调）。返回是否应用。</summary>
+    Task<bool> MarkGroupDissolvedAsync(long ownerUserId, string conversationId, long occurredAtMs, long revision);
+
+    /// <summary>查询群状态。</summary>
+    Task<LocalGroupState?> GetGroupStateAsync(long ownerUserId, string conversationId);
+
     /// <summary>手动重试：Failed/Cancelled → Queued，重置尝试元数据与分类。返回是否转换成功。</summary>
     Task<bool> RetryOutboxAsync(long ownerUserId, string clientMessageId);
 

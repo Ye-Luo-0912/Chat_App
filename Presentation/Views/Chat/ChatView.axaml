@@ -271,7 +271,8 @@
                         </Grid>
                     </Border>
 
-                    <ListBox ItemsSource="{Binding GroupMembers}"
+                    <ListBox x:Name="GroupMembersList"
+                             ItemsSource="{Binding GroupMembers}"
                              Background="Transparent"
                              Padding="8"
                              BorderThickness="0">

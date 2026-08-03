@@ -30,3 +30,23 @@ public record OutboxStatusChangedEvent(
 
 /// <summary>新 Outbox 条目已入库（UI 事务持久化完成），提示排空器立即发送。</summary>
 public record OutboxEnqueuedEvent(string ClientMessageId, string ConversationId, long TargetUserId);
+
+// ---- 群聊领域事件（协调器持久化后发布，UI 投影订阅）----
+
+/// <summary>群成员加入已持久化。</summary>
+public record GroupMemberJoinedEvent(long OwnerUserId, string ConversationId, long UserId, byte Role, string? Title, long OccurredAtMs);
+
+/// <summary>群成员退出已持久化。</summary>
+public record GroupMemberLeftEvent(long OwnerUserId, string ConversationId, long UserId, long OccurredAtMs);
+
+/// <summary>群成员被移除已持久化。</summary>
+public record GroupMemberRemovedEvent(long OwnerUserId, string ConversationId, long UserId, long OccurredAtMs);
+
+/// <summary>群成员角色变更已持久化。</summary>
+public record GroupRoleChangedEvent(long OwnerUserId, string ConversationId, long UserId, byte NewRole, long OccurredAtMs);
+
+/// <summary>群成员批量加入已持久化。</summary>
+public record GroupMembersAddedEvent(long OwnerUserId, string ConversationId, long[] UserIds, string? Title, long OccurredAtMs);
+
+/// <summary>群解散已持久化（tombstone）。</summary>
+public record GroupConversationDissolvedEvent(long OwnerUserId, string ConversationId, long OccurredAtMs);

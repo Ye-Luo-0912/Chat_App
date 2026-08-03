@@ -2,6 +2,8 @@ namespace Core.Models.DTO;
 
 public enum ConversationTypeDto : byte
 {
+    /// <summary>未知：群消息先于会话元数据到达时临时使用，等待同步修正（不得默认 Direct）。</summary>
+    Unknown = 0,
     Direct = 1,
     Group = 2
 }

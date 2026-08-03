@@ -69,5 +69,25 @@ public interface IMessageStore
     /// <summary>按会话将未发送 Outbox 标记为永久失败（群聊成员移除/退出/解散后不再重试）。</summary>
     Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default);
 
+    // ---- 群聊领域事件持久化（版本单调，防重放/乱序；应用后发布领域事件供 UI 投影）----
+
+    /// <summary>群成员加入持久化。</summary>
+    Task HandleGroupMemberJoinedAsync(SessionStamp session, MemberJoinedUpdateDto dto, CancellationToken ct = default);
+
+    /// <summary>群成员退出持久化。</summary>
+    Task HandleGroupMemberLeftAsync(SessionStamp session, MemberLeftUpdateDto dto, CancellationToken ct = default);
+
+    /// <summary>群成员被移除持久化（被移除者为当前用户时同时冻结该会话 Outbox）。</summary>
+    Task HandleGroupMemberRemovedAsync(SessionStamp session, MemberRemovedUpdateDto dto, CancellationToken ct = default);
+
+    /// <summary>群成员角色变更持久化。</summary>
+    Task HandleGroupRoleChangedAsync(SessionStamp session, RoleChangedUpdateDto dto, CancellationToken ct = default);
+
+    /// <summary>群成员批量加入持久化。</summary>
+    Task HandleGroupMembersAddedAsync(SessionStamp session, MembersAddedUpdateDto dto, CancellationToken ct = default);
+
+    /// <summary>群解散持久化（tombstone；同时冻结该会话 Outbox）。</summary>
+    Task HandleGroupConversationDissolvedAsync(SessionStamp session, ConversationDissolvedUpdateDto dto, CancellationToken ct = default);
+
     void Reset();
 }

@@ -1,4 +1,5 @@
 using Avalonia.Threading;
+using Chat_App.Infrastructure.Events;
 using Chat_App.Models;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
@@ -35,6 +36,12 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private bool _disposed;
     private Message? _pendingForwardMessage;
     private long[] _watchedPresenceUserIds = [];
+
+    /// <summary>事件总线：订阅协调器持久化后发布的群聊领域事件。</summary>
+    private readonly Core.Interfaces.IEventBus _eventBus = null!;
+
+    /// <summary>群聊领域事件订阅（协调器持久化后发布，UI 投影）。</summary>
+    private IDisposable[] _groupEventSubscriptions = [];
 
     public ObservableCollection<LocalConversation> Conversations { get; } = [];
     public ObservableCollection<LocalConversation> FilteredConversations { get; } = [];
@@ -219,6 +226,21 @@ public class ChatViewModel : ViewModelBase, IDisposable
     /// <summary>成员面板列表（服务端 ListGroupMembers 投影）。</summary>
     public ObservableCollection<GroupMemberUiItem> GroupMembers { get; } = [];
 
+    /// <summary>成员列表分页游标与"尚有更多"状态（虚拟化分页）。</summary>
+    private string? _groupMembersCursor;
+    private bool _groupMembersHasMore;
+    public bool GroupMembersHasMore
+    {
+        get => _groupMembersHasMore;
+        private set
+        {
+            if (SetProperty(ref _groupMembersHasMore, value))
+                LoadMoreGroupMembersCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public AsyncRelayCommand LoadMoreGroupMembersCommand { get; }
+
     private bool _isAddingGroupMembers;
     public bool IsAddingGroupMembers
     {
@@ -310,7 +332,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
         ISyncEngine syncEngine,
         IDatabaseService dbService,
         ICurrentUserContext currentUserContext,
-        IFriendStore friendStore)
+        IFriendStore friendStore,
+        Core.Interfaces.IEventBus eventBus)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
@@ -321,6 +344,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _dbService = dbService;
         _currentUserContext = currentUserContext;
         _friendStore = friendStore;
+        _eventBus = eventBus;
         _friendListState = new ChatFriendListState(Conversations, FilteredConversations);
 
         PinConversationCommand = new AsyncRelayCommand<LocalConversation>(
@@ -438,6 +462,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
             },
             () => IsShowingGroupMembers);
 
+        LoadMoreGroupMembersCommand = new AsyncRelayCommand(
+            LoadMoreGroupMembersAsync,
+            () => GroupMembersHasMore);
+
         RemoveGroupMemberCommand = new AsyncRelayCommand<GroupMemberUiItem>(
             async member =>
             {
@@ -528,13 +556,17 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _connectionCoordinator.StatusChanged += OnConnectionStatusChanged;
         ConnectionStatus = _connectionCoordinator.Status;
         _chatSession.ConversationChanged += OnConversationChanged;
-        // 群聊事件：成员变化做通知，解散移除本地会话。
-        _chatSession.GroupMemberJoined += OnGroupMemberJoined;
-        _chatSession.GroupMemberLeft += OnGroupMemberLeft;
-        _chatSession.GroupMemberRemoved += OnGroupMemberRemoved;
-        _chatSession.GroupRoleChanged += OnGroupRoleChanged;
-        _chatSession.GroupMembersAdded += OnGroupMembersAdded;
-        _chatSession.GroupConversationDissolved += OnGroupConversationDissolved;
+        // 群聊领域事件：协调器已完成有序持久化（SessionStamp 校验 → 版本比较 → 事务落库），
+        // UI 仅订阅领域事件做通知与投影刷新。
+        _groupEventSubscriptions =
+        [
+            _eventBus.Subscribe<GroupMemberJoinedEvent>(OnGroupMemberJoined),
+            _eventBus.Subscribe<GroupMemberLeftEvent>(OnGroupMemberLeft),
+            _eventBus.Subscribe<GroupMemberRemovedEvent>(OnGroupMemberRemoved),
+            _eventBus.Subscribe<GroupRoleChangedEvent>(OnGroupRoleChanged),
+            _eventBus.Subscribe<GroupMembersAddedEvent>(OnGroupMembersAdded),
+            _eventBus.Subscribe<GroupConversationDissolvedEvent>(OnGroupConversationDissolved)
+        ];
         // 鉴权后的会话服务（SyncEngine/好友同步/附件恢复）由 UserSessionOrchestrator 统一启动，
         // ChatViewModel 仅订阅好友投影变化刷新会话列表。
         _friendStore.FriendsChanged += OnFriendsChanged;
@@ -775,7 +807,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         return $"用户 {userId}";
     }
 
-    private void OnGroupMemberJoined(object? sender, MemberJoinedUpdateDto e)
+    private void OnGroupMemberJoined(GroupMemberJoinedEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
@@ -785,7 +817,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         });
     }
 
-    private void OnGroupMemberLeft(object? sender, MemberLeftUpdateDto e)
+    private void OnGroupMemberLeft(GroupMemberLeftEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
@@ -795,7 +827,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
         });
     }
 
-    private void OnGroupMemberRemoved(object? sender, MemberRemovedUpdateDto e)
+    private void OnGroupMemberRemoved(GroupMemberRemovedEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
@@ -805,32 +837,33 @@ public class ChatViewModel : ViewModelBase, IDisposable
         });
     }
 
-    private void OnGroupRoleChanged(object? sender, RoleChangedUpdateDto e)
+    private void OnGroupRoleChanged(GroupRoleChangedEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
-            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 的角色已变更为 {RoleName(e.NewRole)}");
+            var role = (ConversationMemberRole)e.NewRole;
+            _notificationService.ShowInfo($"{DisplayNameOf(e.UserId)} 的角色已变更为 {RoleName(role)}");
             if (IsShowingGroupMembers && SelectedConversation?.ConversationId == e.ConversationId)
             {
                 var item = GroupMembers.FirstOrDefault(m => m.UserId == e.UserId);
                 if (item is not null)
-                    item.Role = e.NewRole;
+                    item.Role = role;
             }
         });
     }
 
-    private void OnGroupMembersAdded(object? sender, MembersAddedUpdateDto e)
+    private void OnGroupMembersAdded(GroupMembersAddedEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
             _friendListState.ApplyGroupTitle(e.ConversationId, e.Title);
-            if (e.AddedUserIds is { Length: > 0 })
-                _notificationService.ShowInfo($"{e.AddedUserIds.Length} 位成员加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
+            if (e.UserIds is { Length: > 0 })
+                _notificationService.ShowInfo($"{e.UserIds.Length} 位成员加入了 {GroupTitleOf(e.ConversationId, e.Title)}");
             RefreshOpenMembersPanel(e.ConversationId);
         });
     }
 
-    private void OnGroupConversationDissolved(object? sender, ConversationDissolvedUpdateDto e)
+    private void OnGroupConversationDissolved(GroupConversationDissolvedEvent e)
     {
         Dispatcher.UIThread.Post(() =>
         {
@@ -944,31 +977,57 @@ public class ChatViewModel : ViewModelBase, IDisposable
         }
     }
 
-    /// <summary>拉取群成员列表（分页聚合，最多 10 页）并投影到成员面板。</summary>
+    /// <summary>拉取群成员列表（首屏：第一页 100 人）并投影到成员面板。
+    /// 剩余成员通过 LoadMoreGroupMembersCommand 游标续页（虚拟化分页，无一次性聚合上限）。</summary>
     private async Task LoadGroupMembersAsync(string conversationId, CancellationToken ct = default)
     {
-        var members = new List<ConversationMemberItemDto>();
-        string? cursor = null;
-        for (var page = 0; page < 10; page++)
+        var resp = await _chatSession.ListGroupMembersAsync(conversationId, pageSize: 100, null, ct)
+            .ConfigureAwait(false);
+        if (!resp.Succeeded)
         {
-            var resp = await _chatSession.ListGroupMembersAsync(conversationId, pageSize: 100, cursor, ct)
-                .ConfigureAwait(false);
-            if (!resp.Succeeded)
-            {
-                _notificationService.ShowError(resp.ErrorMessage ?? resp.ErrorCode ?? "加载群成员失败");
-                return;
-            }
-            members.AddRange(resp.Members ?? []);
-            if (!resp.HasMore || string.IsNullOrWhiteSpace(resp.NextCursor))
-                break;
-            cursor = resp.NextCursor;
+            _notificationService.ShowError(resp.ErrorMessage ?? resp.ErrorCode ?? "加载群成员失败");
+            return;
         }
+
+        _groupMembersCursor = string.IsNullOrWhiteSpace(resp.NextCursor) ? null : resp.NextCursor;
+        GroupMembersHasMore = resp.HasMore && _groupMembersCursor is not null;
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
             var selfId = _chatSession.CurrentUserId;
             GroupMembers.Clear();
-            foreach (var item in members)
+            foreach (var item in resp.Members ?? [])
+            {
+                GroupMembers.Add(new GroupMemberUiItem
+                {
+                    UserId = item.UserId,
+                    DisplayName = DisplayNameOf(item.UserId) ?? $"用户 {item.UserId}",
+                    Role = item.Role,
+                    IsSelf = item.UserId == selfId
+                });
+            }
+            OnPropertyChanged(nameof(GroupMembersTitle));
+        });
+    }
+
+    /// <summary>游标续页加载下一批成员（虚拟化分页入口，滚动到底部触发）。</summary>
+    private async Task LoadMoreGroupMembersAsync(CancellationToken ct = default)
+    {
+        if (SelectedConversation is null || !GroupMembersHasMore || _groupMembersCursor is null)
+            return;
+        var resp = await _chatSession.ListGroupMembersAsync(
+                SelectedConversation.ConversationId, pageSize: 100, _groupMembersCursor, ct)
+            .ConfigureAwait(false);
+        if (!resp.Succeeded)
+            return;
+
+        _groupMembersCursor = string.IsNullOrWhiteSpace(resp.NextCursor) ? null : resp.NextCursor;
+        GroupMembersHasMore = resp.HasMore && _groupMembersCursor is not null;
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            var selfId = _chatSession.CurrentUserId;
+            foreach (var item in resp.Members ?? [])
             {
                 GroupMembers.Add(new GroupMemberUiItem
                 {
@@ -1222,12 +1281,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
         _disposed = true;
         _chatSession.ConversationChanged -= OnConversationChanged;
-        _chatSession.GroupMemberJoined -= OnGroupMemberJoined;
-        _chatSession.GroupMemberLeft -= OnGroupMemberLeft;
-        _chatSession.GroupMemberRemoved -= OnGroupMemberRemoved;
-        _chatSession.GroupRoleChanged -= OnGroupRoleChanged;
-        _chatSession.GroupMembersAdded -= OnGroupMembersAdded;
-        _chatSession.GroupConversationDissolved -= OnGroupConversationDissolved;
+        foreach (var sub in _groupEventSubscriptions)
+            sub.Dispose();
         _chatSession.PresenceChanged -= OnPresenceChanged;
         _connectionCoordinator.StatusChanged -= OnConnectionStatusChanged;
         _ = UnwatchPresenceSubscriptionsAsync();

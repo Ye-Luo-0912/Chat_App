@@ -16,7 +16,6 @@ namespace Chat_App.Infrastructure.Services;
 /// </summary>
 public sealed class MessageStore : IMessageStore
 {
-    private const byte ConversationTypeDirect = 1;
 
     private readonly IDatabaseService _db;
     private readonly IEventBus _eventBus;
@@ -109,7 +108,11 @@ public sealed class MessageStore : IMessageStore
         {
             OwnerUserId = owner,
             ConversationId = conversationId,
-            Type = ConversationTypeDirect,
+            // 会话类型解析：已有元数据优先（不得覆盖已确认的群/直聊身份）；
+            // 新建会话时按会话 Id 判定——可解析为直聊则 Direct，
+            // 否则（如群会话先于元数据到达）用 Unknown，绝不默认 Direct。
+            Type = existingConversation?.Type
+                ?? ResolveIncomingConversationType(conversationId),
             PeerUserId = ConversationId.TryGetPeerUserId(conversationId, owner),
             LastMessageId = message.MessageId,
             LastMessagePreview = PreviewText.Truncate(content, 100),
@@ -459,6 +462,83 @@ public sealed class MessageStore : IMessageStore
     public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default)
         => _db.MarkOutboxPermanentByConversationAsync(ownerUserId, conversationId, reason);
 
+    // ---- 群聊领域事件持久化：版本单调（OccurredAtMs）防重放/乱序，应用后发布领域事件供 UI 投影 ----
+
+    /// <inheritdoc />
+    public async Task HandleGroupMemberJoinedAsync(SessionStamp session, MemberJoinedUpdateDto dto, CancellationToken ct = default)
+    {
+        if (await _db.UpsertGroupMemberAsync(
+                session.OwnerUserId, dto.ConversationId, dto.UserId, (byte)dto.Role, dto.OccurredAtMs, dto.OccurredAtMs))
+        {
+            if (!string.IsNullOrWhiteSpace(dto.Title))
+                await _db.UpsertGroupStateAsync(session.OwnerUserId, dto.ConversationId, dto.Title, dto.OccurredAtMs, dto.OccurredAtMs, dto.OccurredAtMs);
+            _eventBus.Publish(new GroupMemberJoinedEvent(session.OwnerUserId, dto.ConversationId, dto.UserId, (byte)dto.Role, dto.Title, dto.OccurredAtMs));
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task HandleGroupMemberLeftAsync(SessionStamp session, MemberLeftUpdateDto dto, CancellationToken ct = default)
+    {
+        if (await _db.MarkGroupMemberRemovedAsync(
+                session.OwnerUserId, dto.ConversationId, dto.UserId, dto.OccurredAtMs, dto.OccurredAtMs))
+        {
+            _eventBus.Publish(new GroupMemberLeftEvent(session.OwnerUserId, dto.ConversationId, dto.UserId, dto.OccurredAtMs));
+        }
+        if (dto.UserId == session.OwnerUserId)
+            await _db.MarkOutboxPermanentByConversationAsync(session.OwnerUserId, dto.ConversationId, "已退出群聊");
+    }
+
+    /// <inheritdoc />
+    public async Task HandleGroupMemberRemovedAsync(SessionStamp session, MemberRemovedUpdateDto dto, CancellationToken ct = default)
+    {
+        if (await _db.MarkGroupMemberRemovedAsync(
+                session.OwnerUserId, dto.ConversationId, dto.UserId, dto.OccurredAtMs, dto.OccurredAtMs))
+        {
+            _eventBus.Publish(new GroupMemberRemovedEvent(session.OwnerUserId, dto.ConversationId, dto.UserId, dto.OccurredAtMs));
+        }
+        if (dto.UserId == session.OwnerUserId)
+            await _db.MarkOutboxPermanentByConversationAsync(session.OwnerUserId, dto.ConversationId, "成员已被移出群聊");
+    }
+
+    /// <inheritdoc />
+    public async Task HandleGroupRoleChangedAsync(SessionStamp session, RoleChangedUpdateDto dto, CancellationToken ct = default)
+    {
+        if (await _db.UpsertGroupMemberAsync(
+                session.OwnerUserId, dto.ConversationId, dto.UserId, (byte)dto.NewRole, dto.OccurredAtMs, dto.OccurredAtMs))
+        {
+            _eventBus.Publish(new GroupRoleChangedEvent(session.OwnerUserId, dto.ConversationId, dto.UserId, (byte)dto.NewRole, dto.OccurredAtMs));
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task HandleGroupMembersAddedAsync(SessionStamp session, MembersAddedUpdateDto dto, CancellationToken ct = default)
+    {
+        if (dto.AddedUserIds.Length == 0)
+            return;
+        var applied = false;
+        foreach (var userId in dto.AddedUserIds)
+        {
+            if (await _db.UpsertGroupMemberAsync(
+                    session.OwnerUserId, dto.ConversationId, userId, (byte)ConversationMemberRole.Member, dto.OccurredAtMs, dto.OccurredAtMs))
+                applied = true;
+        }
+        if (!string.IsNullOrWhiteSpace(dto.Title))
+            await _db.UpsertGroupStateAsync(session.OwnerUserId, dto.ConversationId, dto.Title, dto.OccurredAtMs, dto.OccurredAtMs, dto.OccurredAtMs);
+        if (applied)
+            _eventBus.Publish(new GroupMembersAddedEvent(session.OwnerUserId, dto.ConversationId, dto.AddedUserIds, dto.Title, dto.OccurredAtMs));
+    }
+
+    /// <inheritdoc />
+    public async Task HandleGroupConversationDissolvedAsync(SessionStamp session, ConversationDissolvedUpdateDto dto, CancellationToken ct = default)
+    {
+        if (await _db.MarkGroupDissolvedAsync(
+                session.OwnerUserId, dto.ConversationId, dto.OccurredAtMs, dto.OccurredAtMs))
+        {
+            _eventBus.Publish(new GroupConversationDissolvedEvent(session.OwnerUserId, dto.ConversationId, dto.OccurredAtMs));
+        }
+        await _db.MarkOutboxPermanentByConversationAsync(session.OwnerUserId, dto.ConversationId, "群聊已解散");
+    }
+
     public void Reset()
     {
         // 无内存状态需清理；DB 数据按 OwnerUserId 隔离，登出时不删除。
@@ -474,9 +554,19 @@ public sealed class MessageStore : IMessageStore
         return ConversationId.CreateDirect(selfId, peer);
     }
 
+    /// <summary>
+    /// 新建会话的类型解析：可解析为直聊会话 Id（dm:lo:hi）→ Direct；
+    /// 否则（群会话先于元数据到达等）→ Unknown，等待同步/会话列表投影修正为 Group。
+    /// </summary>
+    private static byte ResolveIncomingConversationType(string conversationId)
+        => ConversationId.TryParseDirect(conversationId, out _, out _)
+            ? (byte)ConversationTypeDto.Direct
+            : (byte)ConversationTypeDto.Unknown;
+
     private static long ToUnixMs(DateTime utc)
     {
         var kind = utc.Kind == DateTimeKind.Utc ? utc : DateTime.SpecifyKind(utc, DateTimeKind.Utc);
         return new DateTimeOffset(kind).ToUnixTimeMilliseconds();
     }
 }
+

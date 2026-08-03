@@ -100,6 +100,24 @@ public class CoordinatorBackpressureTests
         public Task<int> MarkOutboxPermanentByConversationAsync(long ownerUserId, string conversationId, string reason, CancellationToken ct = default)
         { Calls.Add((new SessionStamp(ownerUserId, 0, Guid.Empty), "outbox_permanent")); return Task.FromResult(1); }
 
+        public Task HandleGroupMemberJoinedAsync(SessionStamp session, MemberJoinedUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_joined")); return Task.CompletedTask; }
+
+        public Task HandleGroupMemberLeftAsync(SessionStamp session, MemberLeftUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_left")); return Task.CompletedTask; }
+
+        public Task HandleGroupMemberRemovedAsync(SessionStamp session, MemberRemovedUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_removed")); return Task.CompletedTask; }
+
+        public Task HandleGroupRoleChangedAsync(SessionStamp session, RoleChangedUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_role")); return Task.CompletedTask; }
+
+        public Task HandleGroupMembersAddedAsync(SessionStamp session, MembersAddedUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_added")); return Task.CompletedTask; }
+
+        public Task HandleGroupConversationDissolvedAsync(SessionStamp session, ConversationDissolvedUpdateDto dto, CancellationToken ct = default)
+        { Calls.Add((session, "group_dissolved")); return Task.CompletedTask; }
+
         public void Reset() => Calls.Clear();
     }
 

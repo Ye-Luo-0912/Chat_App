@@ -25,6 +25,10 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     // ---- 阶段 3 附件元数据 ----
     public DbSet<LocalAttachment> Attachments => Set<LocalAttachment>();
 
+    // ---- 群聊领域 ----
+    public DbSet<LocalGroupMember> GroupMembers => Set<LocalGroupMember>();
+    public DbSet<LocalGroupState> GroupStates => Set<LocalGroupState>();
+
     // PRAGMA 由 SqlitePragmaInterceptor（EF Core DbConnectionInterceptor，在 AddPooledDbContextFactory
     // 的 options 中注册）在每个连接打开时统一执行，不在此处调用 ExecuteSqlRaw。
     // OnConfiguring 由池化工厂在租用上下文时调用一次，不适合做 PRAGMA。
@@ -134,6 +138,29 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         entity.HasIndex(e => new { e.OwnerUserId, e.ClientAttachmentId }).IsUnique().HasDatabaseName("ix_attachments_owner_clientattid");
         entity.HasIndex(e => new { e.OwnerUserId, e.MessageId }).HasDatabaseName("ix_attachments_owner_msgid");
         entity.HasIndex(e => new { e.OwnerUserId, e.Sha256 }).HasDatabaseName("ix_attachments_owner_sha256");
+
+        // ---- 群成员（群聊领域）----
+        var member = modelBuilder.Entity<LocalGroupMember>();
+        member.HasKey(e => e.Id);
+        member.Property(e => e.ConversationId).HasMaxLength(128);
+        member.Property(e => e.UserId).IsRequired();
+        member.Property(e => e.Role).IsRequired();
+        member.Property(e => e.JoinedAtMs).IsRequired();
+        member.Property(e => e.Revision);
+        member.HasIndex(e => new { e.OwnerUserId, e.ConversationId, e.UserId })
+            .IsUnique()
+            .HasDatabaseName("ix_group_members_owner_conv_user");
+
+        // ---- 群状态（群聊领域）----
+        var group = modelBuilder.Entity<LocalGroupState>();
+        group.HasKey(e => e.Id);
+        group.Property(e => e.ConversationId).HasMaxLength(128);
+        group.Property(e => e.Title).HasMaxLength(512);
+        group.Property(e => e.MemberRevision);
+        group.Property(e => e.ConversationRevision);
+        group.HasIndex(e => new { e.OwnerUserId, e.ConversationId })
+            .IsUnique()
+            .HasDatabaseName("ix_group_states_owner_conv");
 
         base.OnModelCreating(modelBuilder);
     }

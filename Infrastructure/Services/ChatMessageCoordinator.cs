@@ -107,9 +107,12 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         _chatSession.MessageReceiptUpdated += OnMessageReceiptUpdated;
         _chatSession.UnreadCountChanged += OnUnreadCountChanged;
 
-        // 群聊成员被移除/退出/解散：该会话未发送 Outbox 永久失败，不再重试。
-        _chatSession.GroupMemberRemoved += OnGroupMemberRemoved;
+        // 群聊领域事件：进入同一有序入站队列（SessionStamp 校验 → 版本比较 → 事务落库 → 领域事件）。
+        _chatSession.GroupMemberJoined += OnGroupMemberJoined;
         _chatSession.GroupMemberLeft += OnGroupMemberLeft;
+        _chatSession.GroupMemberRemoved += OnGroupMemberRemoved;
+        _chatSession.GroupRoleChanged += OnGroupRoleChanged;
+        _chatSession.GroupMembersAdded += OnGroupMembersAdded;
         _chatSession.GroupConversationDissolved += OnGroupConversationDissolved;
 
         // 启动单消费者
@@ -143,44 +146,23 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
     private void OnUnreadCountChanged(object? sender, UnreadCountChangedDto dto)
         => EnqueueMutation(dto, InboundMutationKind.UnreadCountChanged, "未读数变更", dto.ConversationId);
 
-    // 成员被移出群聊：若被移除的是当前用户，该会话未发送 Outbox 永久失败（不再重试）。
-    private void OnGroupMemberRemoved(object? sender, MemberRemovedUpdateDto dto)
-    {
-        if (_currentUserContext.TryGetUserId(out var userId) && dto.UserId == userId)
-            MarkConversationOutboxPermanent(dto.ConversationId, "成员已被移出群聊");
-    }
+    private void OnGroupMemberJoined(object? sender, MemberJoinedUpdateDto dto)
+        => EnqueueMutation(dto, InboundMutationKind.GroupMemberJoined, "成员加入", dto.UserId);
 
-    // 当前用户主动退出群聊：未发送 Outbox 永久失败。
     private void OnGroupMemberLeft(object? sender, MemberLeftUpdateDto dto)
-    {
-        if (_currentUserContext.TryGetUserId(out var userId) && dto.UserId == userId)
-            MarkConversationOutboxPermanent(dto.ConversationId, "已退出群聊");
-    }
+        => EnqueueMutation(dto, InboundMutationKind.GroupMemberLeft, "成员退出", dto.UserId);
 
-    // 群聊解散：未发送 Outbox 永久失败。
+    private void OnGroupMemberRemoved(object? sender, MemberRemovedUpdateDto dto)
+        => EnqueueMutation(dto, InboundMutationKind.GroupMemberRemoved, "成员被移除", dto.UserId);
+
+    private void OnGroupRoleChanged(object? sender, RoleChangedUpdateDto dto)
+        => EnqueueMutation(dto, InboundMutationKind.GroupRoleChanged, "角色变更", dto.UserId);
+
+    private void OnGroupMembersAdded(object? sender, MembersAddedUpdateDto dto)
+        => EnqueueMutation(dto, InboundMutationKind.GroupMembersAdded, "批量加入", dto.ConversationId);
+
     private void OnGroupConversationDissolved(object? sender, ConversationDissolvedUpdateDto dto)
-        => MarkConversationOutboxPermanent(dto.ConversationId, "群聊已解散");
-
-    private void MarkConversationOutboxPermanent(string conversationId, string reason)
-    {
-        if (!_currentUserContext.TryGetUserId(out var userId))
-            return;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var affected = await _messageStore.MarkOutboxPermanentByConversationAsync(userId, conversationId, reason)
-                    .ConfigureAwait(false);
-                if (affected > 0)
-                    Log.Information("群聊会话 {ConversationId} 的 {Count} 条未发送 Outbox 已永久失败：{Reason}",
-                        conversationId, affected, reason);
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "标记群聊会话 Outbox 永久失败出错 ConversationId={ConversationId}", conversationId);
-            }
-        });
-    }
+        => EnqueueMutation(dto, InboundMutationKind.GroupConversationDissolved, "群解散", dto.ConversationId);
 
     /// <summary>
     /// 统一入站事件入队模板：捕获当前 SessionStamp 后写入 Channel。
@@ -321,6 +303,24 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
             case InboundMutationKind.UnreadCountChanged:
                 await _messageStore.HandleUnreadCountChangedAsync(mutation.Session, (UnreadCountChangedDto)mutation.Payload!, ct);
                 break;
+            case InboundMutationKind.GroupMemberJoined:
+                await _messageStore.HandleGroupMemberJoinedAsync(mutation.Session, (MemberJoinedUpdateDto)mutation.Payload!, ct);
+                break;
+            case InboundMutationKind.GroupMemberLeft:
+                await _messageStore.HandleGroupMemberLeftAsync(mutation.Session, (MemberLeftUpdateDto)mutation.Payload!, ct);
+                break;
+            case InboundMutationKind.GroupMemberRemoved:
+                await _messageStore.HandleGroupMemberRemovedAsync(mutation.Session, (MemberRemovedUpdateDto)mutation.Payload!, ct);
+                break;
+            case InboundMutationKind.GroupRoleChanged:
+                await _messageStore.HandleGroupRoleChangedAsync(mutation.Session, (RoleChangedUpdateDto)mutation.Payload!, ct);
+                break;
+            case InboundMutationKind.GroupMembersAdded:
+                await _messageStore.HandleGroupMembersAddedAsync(mutation.Session, (MembersAddedUpdateDto)mutation.Payload!, ct);
+                break;
+            case InboundMutationKind.GroupConversationDissolved:
+                await _messageStore.HandleGroupConversationDissolvedAsync(mutation.Session, (ConversationDissolvedUpdateDto)mutation.Payload!, ct);
+                break;
         }
     }
 
@@ -338,6 +338,12 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         _chatSession.MessageReceiptReceived -= OnMessageReceiptReceived;
         _chatSession.MessageReceiptUpdated -= OnMessageReceiptUpdated;
         _chatSession.UnreadCountChanged -= OnUnreadCountChanged;
+        _chatSession.GroupMemberJoined -= OnGroupMemberJoined;
+        _chatSession.GroupMemberLeft -= OnGroupMemberLeft;
+        _chatSession.GroupMemberRemoved -= OnGroupMemberRemoved;
+        _chatSession.GroupRoleChanged -= OnGroupRoleChanged;
+        _chatSession.GroupMembersAdded -= OnGroupMembersAdded;
+        _chatSession.GroupConversationDissolved -= OnGroupConversationDissolved;
 
         _cts.Cancel();
         _inboundChannel.Writer.TryComplete();
@@ -355,7 +361,13 @@ public sealed class ChatMessageCoordinator : IDisposable, IMetricsSource
         MessageEdited,
         MessageReceiptReceived,
         MessageReceiptUpdated,
-        UnreadCountChanged
+        UnreadCountChanged,
+        GroupMemberJoined,
+        GroupMemberLeft,
+        GroupMemberRemoved,
+        GroupRoleChanged,
+        GroupMembersAdded,
+        GroupConversationDissolved
     }
 
     private readonly record struct InboundMutation(
