@@ -116,6 +116,9 @@ public partial class App : Application
             .AddSingleton<ISyncEngine, SyncEngine>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
+            .AddSingleton<IAttachmentThumbnailService, AttachmentThumbnailService>()
+            .AddSingleton<IThumbnailImageCodec, SkiaThumbnailImageCodec>()
+            .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<AttachmentRecoveryService>()
             .AddSingleton<DiagnosticsService>();
 
@@ -206,6 +209,7 @@ public partial class App : Application
         diagnostics.AddSource(_services.GetRequiredService<SyncEngine>());
         diagnostics.AddSource(_services.GetRequiredService<ChatMessageCoordinator>());
         diagnostics.AddSource(_services.GetRequiredService<MessageStore>());
+        diagnostics.AddSource((IMetricsSource)_services.GetRequiredService<IAttachmentThumbnailService>());
         diagnostics.Start();
 
         // 实例化附件恢复服务以注册鉴权事件订阅：恢复任务在 Authenticated 事件触发，

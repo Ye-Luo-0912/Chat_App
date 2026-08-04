@@ -8,6 +8,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Chat_App.Models;
 using Chat_App.Presentation.ViewModels.Chat;
 
 namespace Chat_App.Presentation.Views.Chat;
@@ -16,7 +17,7 @@ public partial class MessageView : UserControl
 {
     private ScrollViewer? _scroll;
     private bool _loadingOlder;
-    // 接近顶部即触发向上加载的距离阈值。
+    // �ӽ��������������ϼ��صľ�����ֵ��
     private const double TopLoadThreshold = 80;
 
     public MessageView()
@@ -25,6 +26,16 @@ public partial class MessageView : UserControl
         DataContextChanged += OnDataContextChanged;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        // 列表项进入可视区域（虚拟化 realize）时通知 VM 预取图片缩略图。
+        MessageList.ContainerPrepared += OnContainerPrepared;
+    }
+
+    private void OnContainerPrepared(object? sender, ContainerPreparedEventArgs e)
+    {
+        if (DataContext is not MessageViewModel vm)
+            return;
+        if (e.Container?.DataContext is Message message)
+            vm.OnMessageContainerPrepared(message);
     }
 
     private void OnLoaded(object? sender, EventArgs e)

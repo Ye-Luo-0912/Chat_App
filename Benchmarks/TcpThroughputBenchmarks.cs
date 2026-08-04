@@ -126,7 +126,7 @@ public class TcpThroughputBenchmarks : IDisposable
         using var raw = request.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
         // 导出再导入：使私钥可导出，Windows SChannel 不接受临时密钥集（ephemeral keys）。
-        return new X509Certificate2(raw.Export(X509ContentType.Pfx));
+        return X509CertificateLoader.LoadPkcs12(raw.Export(X509ContentType.Pfx), null);
     }
 
     public void Dispose()

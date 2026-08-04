@@ -22,6 +22,7 @@
                                    FalseBrush="#E5E7EB"/>
         <conv:LongToBoolConverter x:Key="LongToBool"/>
         <conv:MessageStatusMatchConverter x:Key="StatusMatch"/>
+        <conv:PathToBitmapConverter x:Key="PathToBitmap"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -160,6 +161,40 @@
                                                    TextWrapping="Wrap"
                                                    Foreground="#1A1A2E"
                                                    IsVisible="{Binding DisplayContent, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                        <!-- 图片附件内联缩略图条：后台预取成功后逐个显示，点击下载/保存原图 -->
+                                        <ItemsControl ItemsSource="{Binding ImageThumbnails}"
+                                                      IsVisible="{Binding HasImageThumbnails}"
+                                                      Margin="0 2">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <WrapPanel/>
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="models:ImageThumbnailItem">
+                                                    <Button MinWidth="0"
+                                                            MinHeight="0"
+                                                            Padding="0"
+                                                            Margin="0 2 4 2"
+                                                            Background="Transparent"
+                                                            BorderThickness="0"
+                                                            Cursor="Hand"
+                                                            IsVisible="{Binding HasThumbnail}"
+                                                            Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
+                                                            CommandParameter="{Binding Attachment}">
+                                                        <Border CornerRadius="8"
+                                                                ClipToBounds="True"
+                                                                BorderBrush="#E2E8F0"
+                                                                BorderThickness="1">
+                                                            <Image Source="{Binding ThumbnailPath, Converter={StaticResource PathToBitmap}}"
+                                                                   Width="88"
+                                                                   Height="88"
+                                                                   Stretch="UniformToFill"/>
+                                                        </Border>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
                                         <ItemsControl ItemsSource="{Binding Attachments}"
                                                       IsVisible="{Binding HasAttachments}">
                                             <ItemsControl.ItemTemplate>

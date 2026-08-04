@@ -41,6 +41,7 @@ public class Message : INotifyPropertyChanged
     private string _content = string.Empty;
     private string? _messageId;
     private IReadOnlyList<AttachmentRefDto>? _attachments;
+    private IReadOnlyList<ImageThumbnailItem>? _imageThumbnails;
 
     /// <summary>客户端本地发送 Id，用于匹配 MessageAck。</summary>
     public string? ClientMessageId { get; set; }
@@ -182,14 +183,38 @@ public class Message : INotifyPropertyChanged
             if (ReferenceEquals(_attachments, value))
                 return;
             _attachments = value;
+            // 图片附件同步派生缩略图项（撤回置空时自动清空）。
+            ImageThumbnails = value is null
+                ? null
+                : value
+                    .Where(a => Core.Helpers.AttachmentType.IsImage(a.ContentType))
+                    .Select(a => new ImageThumbnailItem(a))
+                    .ToList();
             OnPropertyChanged();
             OnPropertyChanged(nameof(HasAttachments));
             OnPropertyChanged(nameof(AttachmentSummary));
+            OnPropertyChanged(nameof(HasImageThumbnails));
+        }
+    }
+
+    /// <summary>图片附件缩略图项（后台预取成功后填充 ThumbnailPath）。</summary>
+    public IReadOnlyList<ImageThumbnailItem>? ImageThumbnails
+    {
+        get => _imageThumbnails;
+        private set
+        {
+            if (ReferenceEquals(_imageThumbnails, value))
+                return;
+            _imageThumbnails = value;
+            OnPropertyChanged();
         }
     }
 
     /// <summary>单一真相：仅由 Status 决定，不再依赖独立的 RecalledAtMs 布尔通道。</summary>
     public bool IsRecalled => Status == MessageStatus.Recalled;
+
+    /// <summary>消息含图片附件且未撤回：气泡内联展示缩略图条。</summary>
+    public bool HasImageThumbnails => !IsRecalled && ImageThumbnails is { Count: > 0 };
 
     public int EditVersion
     {

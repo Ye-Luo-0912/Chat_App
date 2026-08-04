@@ -41,6 +41,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IAttachmentStorageService _storage;
     private readonly IAttachmentDownloadService _downloadService;
+    private readonly IAttachmentThumbnailService _thumbnailService;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
     private long CurrPeerId { get; set; }
@@ -202,6 +203,10 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly Dictionary<string, Message> _messagesByClientId = new(StringComparer.Ordinal);
     private static readonly User EmptyUser = new();
 
+    // 图片缩略图预取：按附件 Id 去重（同一附件只触发一次），并发上限 2 防止快速滚动时突发网络/解码。
+    private readonly HashSet<string> _thumbnailsRequested = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _thumbnailGate = new(2, 2);
+
     public AsyncRelayCommand SendMessageCommand { get; }
     public AsyncRelayCommand AttachFileCommand { get; }
     public AsyncRelayCommand CancelUploadCommand { get; }
@@ -236,13 +241,15 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IDatabaseService dbService,
         ICurrentUserContext currentUserContext,
         IAttachmentStorageService storage,
-        IAttachmentDownloadService downloadService)
+        IAttachmentDownloadService downloadService,
+        IAttachmentThumbnailService thumbnailService)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
         _attachments = attachmentClientService;
         _storage = storage;
         _downloadService = downloadService;
+        _thumbnailService = thumbnailService;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -1884,6 +1891,72 @@ public class MessageViewModel : ViewModelBase, IDisposable
             Log.Warning(ex, "Failed to mark attachment as Failed ClientAttachmentId={ClientAttachmentId}", clientAttachmentId);
         }
     }
+    /// <summary>
+    /// 列表项可见时回调（MessageView.ContainerPrepared 挂钩）：为图片附件发起缩略图预取。
+    /// 仅对真实进入可视区域的条目触发，配合虚拟化避免整页图片突发下载。
+    /// </summary>
+    public void OnMessageContainerPrepared(Message? message)
+    {
+        if (message?.ImageThumbnails is not { Count: > 0 })
+            return;
+        foreach (var item in message.ImageThumbnails)
+            ScheduleThumbnailPrefetch(item);
+    }
+
+    private void ScheduleThumbnailPrefetch(ImageThumbnailItem item)
+    {
+        var attachmentId = item.Attachment.AttachmentId;
+        if (string.IsNullOrWhiteSpace(attachmentId))
+            return;
+        lock (_thumbnailsRequested)
+        {
+            if (!_thumbnailsRequested.Add(attachmentId))
+                return;
+        }
+        _ = PrefetchThumbnailAsync(item, attachmentId);
+    }
+
+    /// <summary>
+    /// 缩略图预取管道：原图下载（single-flight 缓存）→ 本地生成缩略图 → UI 线程回填。
+    /// 任一环节失败均保持缩略图缺省（气泡回退为附件链接），不影响消息渲染。
+    /// </summary>
+    private async Task PrefetchThumbnailAsync(ImageThumbnailItem item, string attachmentId)
+    {
+        try
+        {
+            await _thumbnailGate.WaitAsync().ConfigureAwait(true);
+            try
+            {
+                var attachment = item.Attachment;
+                var fileName = !string.IsNullOrWhiteSpace(attachment.FileName)
+                    ? attachment.FileName
+                    : $"{attachment.AttachmentId}.bin";
+                var fullPath = await _downloadService.GetOrDownloadAsync(
+                        attachment.AttachmentId, fileName, attachment.DownloadApiHint)
+                    .ConfigureAwait(true);
+                if (fullPath is null)
+                    return;
+
+                var owner = _currentUserContext.HasUserId ? _currentUserContext.UserId!.Value : 0;
+                var thumbnailPath = await _thumbnailService.EnsureThumbnailAsync(
+                        owner, attachment.AttachmentId, fileName, attachment.ContentType, fullPath)
+                    .ConfigureAwait(true);
+                if (thumbnailPath is null)
+                    return;
+
+                await Dispatcher.UIThread.InvokeAsync(() => item.ThumbnailPath = thumbnailPath);
+            }
+            finally
+            {
+                _thumbnailGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "生成图片缩略图失败 AttachmentId={AttachmentId}", attachmentId);
+        }
+    }
+
     private async Task DownloadAttachmentAsync(AttachmentRefDto? attachment, CancellationToken ct)
     {
         if (attachment is null || string.IsNullOrWhiteSpace(attachment.AttachmentId))
@@ -2065,6 +2138,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         foreach (var sub in _eventSubscriptions)
             sub.Dispose();
         _eventSubscriptions.Clear();
+        _thumbnailGate.Dispose();
         GC.SuppressFinalize(this);
     }
 
