@@ -25,4 +25,10 @@ public interface ISyncDiagnostics
 
     /// <summary>累计同步的消息数。</summary>
     long MessagesSynced { get; }
+
+    /// <summary>
+    /// 最近同步到的消息的服务端时间（ms，UTC）；尚未同步到消息时为 0。
+    /// 当前时间减去该值即设备相对服务端的数据陈旧度（设备端同步滞后）。
+    /// </summary>
+    long LastSyncedMessageAtMs { get; }
 }

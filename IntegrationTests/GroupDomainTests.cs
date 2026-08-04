@@ -203,6 +203,7 @@ public class GroupDomainTests : IDisposable
         eventBus.Subscribe<GroupRoleChangedEvent>(e => { lock (published) published.Add(e); });
         eventBus.Subscribe<GroupMembersAddedEvent>(e => { lock (published) published.Add(e); });
         eventBus.Subscribe<GroupConversationDissolvedEvent>(e => { lock (published) published.Add(e); });
+        eventBus.Subscribe<MessagePersistedEvent>(e => { lock (published) published.Add(e); });
         return (new MessageStore(db, eventBus, null!), published);
     }
 
@@ -424,6 +425,39 @@ public class GroupDomainTests : IDisposable
         Assert.NotNull(conv);
         Assert.Equal((byte)ConversationTypeDto.Unknown, conv!.Type); // 不默认 Direct
         Assert.Null(conv.PeerUserId); // 不伪造直聊对端
+
+        // 指标闭环：入站持久化成功计数 + 延迟样本
+        Assert.Equal(1, store.Counters["incoming_persisted"]);
+        Assert.Equal(0, store.Counters["incoming_deduped"]);
+        Assert.True(store.Histograms["incoming_persist_ms"].Count > 0);
+    }
+
+    /// <summary>
+    /// 服务端重发同一消息（MessageId 已存在）：幂等丢弃并计入去重指标，
+    /// 不重复入库、不重复发布 MessagePersistedEvent。
+    /// </summary>
+    [Fact]
+    public async Task Duplicate_Incoming_Message_Is_Deduped_And_Counted()
+    {
+        var (store, published) = CreateStore(_db);
+        var session = new SessionStamp(OwnerId, 1, Guid.NewGuid());
+
+        var dto = new ChatMessageDto
+        {
+            MessageId = "grp-dup-1",
+            ConversationId = GroupId,
+            SenderUserId = 9101,
+            TargetUserId = 0,
+            Content = "重发消息",
+            SentUtc = DateTime.UtcNow
+        };
+
+        Assert.True(await store.PersistIncomingAsync(session, dto));
+        Assert.False(await store.PersistIncomingAsync(session, dto));
+
+        Assert.Equal(1, store.Counters["incoming_persisted"]);
+        Assert.Equal(1, store.Counters["incoming_deduped"]);
+        Assert.Single(published.OfType<MessagePersistedEvent>());
     }
 }
 

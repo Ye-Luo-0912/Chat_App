@@ -45,6 +45,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
         ["sync_count"] = _diagnostics.SyncCount,
         ["conversations_synced"] = _diagnostics.ConversationsSynced,
         ["messages_synced"] = _diagnostics.MessagesSynced,
+        ["sync_lag_ms"] = SyncLagMs(_diagnostics),
         ["is_running"] = _diagnostics.IsRunning ? 1 : 0
     };
 
@@ -55,6 +56,12 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 ? HistogramSnapshot.Point(_diagnostics.LastDurationMs)
                 : HistogramSnapshot.Empty
         };
+
+    /// <summary>设备端同步滞后：当前时刻 − 最近同步到的消息时间（未同步到消息时为 0）。</summary>
+    private static long SyncLagMs(SyncDiagnostics diagnostics)
+        => diagnostics.LastSyncedMessageAtMs > 0
+            ? Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - diagnostics.LastSyncedMessageAtMs)
+            : 0;
 
     public SyncEngine(
         IChatSessionClient chatSession,
@@ -334,6 +341,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
 
         await _messageStore.ApplyHistoryBatchAsync(session, cu.ConversationId, cu.Items, target, ct).ConfigureAwait(false);
         _diagnostics.AddMessages(cu.Items.Count);
+        _diagnostics.RecordSyncedMessages(maxItem.ReceivedAtMs);
     }
 
     /// <summary>
@@ -350,6 +358,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             return;
         await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, cursor: null, ct).ConfigureAwait(false);
         _diagnostics.AddMessages(items.Count);
+        _diagnostics.RecordSyncedMessages(MaxItem(items).ReceivedAtMs);
     }
 
     private static MessageHistoryItemDto MaxItem(IReadOnlyList<MessageHistoryItemDto> items)
@@ -426,6 +435,7 @@ public sealed class SyncDiagnostics : ISyncDiagnostics
     private int _syncCount;
     private long _conversationsSynced;
     private long _messagesSynced;
+    private long _lastSyncedMessageAtMs;
     private readonly object _lock = new();
 
     public bool IsRunning => Volatile.Read(ref _isRunning) == 1;
@@ -441,6 +451,21 @@ public sealed class SyncDiagnostics : ISyncDiagnostics
     public long ConversationsSynced => Interlocked.Read(ref _conversationsSynced);
 
     public long MessagesSynced => Interlocked.Read(ref _messagesSynced);
+
+    public long LastSyncedMessageAtMs => Interlocked.Read(ref _lastSyncedMessageAtMs);
+
+    /// <summary>记录最近同步到的消息时间（仅推进，不回退）。</summary>
+    public void RecordSyncedMessages(long receivedAtMs)
+    {
+        if (receivedAtMs <= 0)
+            return;
+        long current;
+        while (receivedAtMs > (current = Interlocked.Read(ref _lastSyncedMessageAtMs)))
+        {
+            if (Interlocked.CompareExchange(ref _lastSyncedMessageAtMs, receivedAtMs, current) == current)
+                break;
+        }
+    }
 
     public void MarkSuccess(long durationMs)
     {

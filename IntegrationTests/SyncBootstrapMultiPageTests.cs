@@ -240,6 +240,10 @@ public class SyncBootstrapMultiPageTests : IDisposable
         var conversations = await _db.GetConversationsAsync(OwnerId);
         Assert.Contains(conversations, c => c.ConversationId == ConvA);
         Assert.Contains(conversations, c => c.ConversationId == ConvB);
+
+        // 指标闭环：最近同步到的消息时间 = 批次内最大 ReceivedAtMs（sync_lag 数据源）
+        Assert.Equal(t0 + 2000, engine.Diagnostics.LastSyncedMessageAtMs);
+        Assert.True(engine.Counters["sync_lag_ms"] >= 0);
     }
 
     /// <summary>

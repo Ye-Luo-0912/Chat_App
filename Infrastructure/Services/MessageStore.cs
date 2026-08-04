@@ -7,6 +7,7 @@ using Core.Models;
 using Core.Models.DTO;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Serialization;
+using System.Diagnostics;
 
 namespace Chat_App.Infrastructure.Services;
 
@@ -22,7 +23,10 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
     private readonly IEventBus _eventBus;
     private readonly IChatSessionClient _chatSession;
     private readonly LatencyHistogram _outboxAckLatency = new();
+    private readonly LatencyHistogram _incomingPersist = new();
     private long _acksHandled;
+    private long _incomingDeduped;
+    private long _incomingPersisted;
 
     public MessageStore(IDatabaseService db, IEventBus eventBus, IChatSessionClient chatSession)
     {
@@ -32,7 +36,26 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
     }
 
     /// <inheritdoc />
-    public async Task<bool> PersistIncomingAsync(SessionStamp session, ChatMessageDto dto, CancellationToken ct = default)
+    public Task<bool> PersistIncomingAsync(SessionStamp session, ChatMessageDto dto, CancellationToken ct = default)
+    {
+        var sw = Stopwatch.StartNew();
+        return PersistIncomingCoreAsync(session, dto, sw, ct);
+    }
+
+    private async Task<bool> PersistIncomingCoreAsync(
+        SessionStamp session, ChatMessageDto dto, Stopwatch sw, CancellationToken ct)
+    {
+        try
+        {
+            return await PersistIncomingInnerAsync(session, dto, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _incomingPersist.Add(sw.Elapsed);
+        }
+    }
+
+    private async Task<bool> PersistIncomingInnerAsync(SessionStamp session, ChatMessageDto dto, CancellationToken ct)
     {
         var owner = session.OwnerUserId;
         var conversationId = ResolveConversationId(dto.ConversationId, owner, dto.SenderUserId, dto.TargetUserId);
@@ -46,7 +69,11 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
             ? null
             : await _db.GetMessageByServerIdAsync(owner, dto.MessageId);
         if (existing is not null)
+        {
+            // 重复消息（服务端重发/重连风暴）：幂等丢弃，计数入指标。
+            Interlocked.Increment(ref _incomingDeduped);
             return false;
+        }
 
         var message = new LocalMessage
         {
@@ -129,6 +156,7 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
         // 单事务原子写入：消息 + 附件 + 会话摘要（持久化层事务边界）
         await _db.ApplyIncomingMessageAsync(message, attachments, conversationUpdate);
 
+        Interlocked.Increment(ref _incomingPersisted);
         _eventBus.Publish(new MessagePersistedEvent(message, isNewConversation));
         return true;
     }
@@ -582,13 +610,16 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
 
     public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
     {
-        ["acks_handled"] = Volatile.Read(ref _acksHandled)
+        ["acks_handled"] = Volatile.Read(ref _acksHandled),
+        ["incoming_persisted"] = Volatile.Read(ref _incomingPersisted),
+        ["incoming_deduped"] = Volatile.Read(ref _incomingDeduped)
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
         new Dictionary<string, HistogramSnapshot>
         {
-            ["outbox_ack_latency_ms"] = _outboxAckLatency.Snapshot()
+            ["outbox_ack_latency_ms"] = _outboxAckLatency.Snapshot(),
+            ["incoming_persist_ms"] = _incomingPersist.Snapshot()
         };
 }
 
