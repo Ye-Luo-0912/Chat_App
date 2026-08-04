@@ -196,42 +196,68 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// 高优先级发送：入队高优通道，由发送循环优先排空（心跳/超时敏感帧）。
+    /// 所有权语义与 <see cref="SendAsync(IMemoryOwner{byte}, CancellationToken)"/> 相同。
+    /// </summary>
+    public async Task SendPriorityAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        var (session, _) = GetActiveSession();
+        if (session is null)
+        {
+            owner.Dispose();
+            throw new InvalidOperationException("Not connected to server");
+        }
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var frame = new OutboundFrame(owner.Memory, owner, tcs);
+
+        try
+        {
+            await session.PriorityChannel.Writer.WriteAsync(frame, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            owner.Dispose();
+            throw;
+        }
+        catch (ChannelClosedException ex)
+        {
+            owner.Dispose();
+            throw new InvalidOperationException("连接已关闭，无法发送", ex);
+        }
+
+        await tcs.Task.ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// 独占发送循环：从本会话队列逐帧完整发送，保证帧边界原子性。
+    /// 高优通道优先排空——心跳等保活帧不被普通消息积压饿死。
     /// Channel 归属会话，旧会话循环不会取到新连接帧。
     /// </summary>
     private async Task SendLoopAsync(ConnectionSession session, CancellationToken token)
     {
         try
         {
-            await foreach (var frame in session.SendChannel.Reader.ReadAllAsync(token).ConfigureAwait(false))
+            while (true)
             {
-                try
+                // 高优优先：先排空高优通道，再取普通通道（阻塞等待新帧）。
+                while (session.PriorityChannel.Reader.TryRead(out var priorityFrame))
                 {
-                    var data = frame.Data;
-                    // SslStream 单次 Write 提交全部 TLS 帧；NetworkStream（阻塞 socket）也全量写出。
-                    // Stream 在 ConnectCoreAsync 中激活会话前已设置，循环仅在激活后启动。
-                    await session.Stream!.WriteAsync(data, token).ConfigureAwait(false);
-                    frame.Tcs.TrySetResult(true);
+                    if (!await SendFrameAsync(session, priorityFrame, token).ConfigureAwait(false))
+                        return;
                 }
-                catch (Exception ex)
+
+                if (session.SendChannel.Reader.TryRead(out var frame))
                 {
-                    // 断线取消时统一以"连接已断开"失败：避免调用方把 OperationCanceledException
-                    // 误判为自身取消（发送循环的 token 仅来自 SendCts，OCE 必然意味着断线）。
-                    var failure = ex is OperationCanceledException
-                        ? new InvalidOperationException("连接已断开")
-                        : ex;
-                    frame.Tcs.TrySetException(failure);
-                    frame.Owner?.Dispose();
-                    DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
-                    // 身份绑定断连：旧会话循环的异常不得关闭新会话。
-                    DisconnectSession(session, "Connection lost during send");
-                    return;
+                    if (!await SendFrameAsync(session, frame, token).ConfigureAwait(false))
+                        return;
+                    continue;
                 }
-                finally
-                {
-                    if (frame.Tcs.Task.IsCompletedSuccessfully)
-                        frame.Owner?.Dispose();
-                }
+
+                var ready = await session.SendChannel.Reader.WaitToReadAsync(token).ConfigureAwait(false);
+                if (!ready)
+                    break; // 通道已 Complete（断连），正常退出
             }
         }
         catch (OperationCanceledException)
@@ -239,11 +265,47 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
             // Disconnect 取消，正常退出：通道已被 TryComplete 拒绝新帧，
             // 此处排空可能在取消竞态中残留的帧，避免其 tcs 永远不完成。
             DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
+            DrainSendChannel(session.PriorityChannel, new InvalidOperationException("连接已断开"));
         }
         catch (Exception ex)
         {
             DrainSendChannel(session.SendChannel, ex);
+            DrainSendChannel(session.PriorityChannel, ex);
             DisconnectSession(session, $"Send loop error: {ex.Message}");
+        }
+    }
+
+    /// <summary>发送单帧：写流 + 完成/失败 tcs + 归还池化内存；失败时断连并返回 false。</summary>
+    private async Task<bool> SendFrameAsync(ConnectionSession session, OutboundFrame frame, CancellationToken token)
+    {
+        try
+        {
+            var data = frame.Data;
+            // SslStream 单次 Write 提交全部 TLS 帧；NetworkStream（阻塞 socket）也全量写出。
+            // Stream 在 ConnectCoreAsync 中激活会话前已设置，循环仅在激活后启动。
+            await session.Stream!.WriteAsync(data, token).ConfigureAwait(false);
+            frame.Tcs.TrySetResult(true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 断线取消时统一以"连接已断开"失败：避免调用方把 OperationCanceledException
+            // 误判为自身取消（发送循环的 token 仅来自 SendCts，OCE 必然意味着断线）。
+            var failure = ex is OperationCanceledException
+                ? new InvalidOperationException("连接已断开")
+                : ex;
+            frame.Tcs.TrySetException(failure);
+            frame.Owner?.Dispose();
+            DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
+            DrainSendChannel(session.PriorityChannel, new InvalidOperationException("连接已断开"));
+            // 身份绑定断连：旧会话循环的异常不得关闭新会话。
+            DisconnectSession(session, "Connection lost during send");
+            return false;
+        }
+        finally
+        {
+            if (frame.Tcs.Task.IsCompletedSuccessfully)
+                frame.Owner?.Dispose();
         }
     }
 
@@ -398,7 +460,9 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         //（"连接已关闭，无法发送"），且 TryComplete 之后不可能再有新帧进入通道；
         // 随后排空残余帧并置为失败，保证所有 pending 调用方都被结束，不会永远挂起。
         session.SendChannel.Writer.TryComplete();
+        session.PriorityChannel.Writer.TryComplete();
         DrainSendChannel(session.SendChannel, new InvalidOperationException("连接已断开"));
+        DrainSendChannel(session.PriorityChannel, new InvalidOperationException("连接已断开"));
     }
 
     private static async Task WaitForSessionLoopsAsync(ConnectionSession session, TimeSpan timeout, CancellationToken token)
@@ -473,6 +537,18 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
                 SingleReader = true,
                 SingleWriter = false
             });
+
+        /// <summary>
+        /// 高优通道：心跳等保活/超时敏感帧走此通道，发送循环优先排空。
+        /// 容量同普通通道；高优帧量级低（心跳周期级），不会挤压普通通道背压语义。
+        /// </summary>
+        public Channel<OutboundFrame> PriorityChannel { get; } =
+            Channel.CreateBounded<OutboundFrame>(new BoundedChannelOptions(256)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false
+            });
         public CancellationTokenSource SendCts { get; } = new();
         public CancellationTokenSource ReceiveCts { get; } = new();
         public Task? SendTask { get; set; }
@@ -509,7 +585,9 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
             SendCts.Dispose();
             ReceiveCts.Dispose();
             SendChannel.Writer.TryComplete();
+            PriorityChannel.Writer.TryComplete();
             DrainSendChannel(SendChannel, new InvalidOperationException("连接已断开"));
+            DrainSendChannel(PriorityChannel, new InvalidOperationException("连接已断开"));
         }
 
         public async ValueTask DisposeAsync()

@@ -1,5 +1,6 @@
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Events;
+using Core.Diagnostics;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
@@ -14,12 +15,14 @@ namespace Chat_App.Infrastructure.Services;
 /// 依赖 IDatabaseService（仓储）、IEventBus（事件总线）。
 /// 所有方法携带 SessionStamp，账户隔离由调用方传入的会话标识保证。
 /// </summary>
-public sealed class MessageStore : IMessageStore
+public sealed class MessageStore : IMessageStore, IMetricsSource
 {
 
     private readonly IDatabaseService _db;
     private readonly IEventBus _eventBus;
     private readonly IChatSessionClient _chatSession;
+    private readonly LatencyHistogram _outboxAckLatency = new();
+    private long _acksHandled;
 
     public MessageStore(IDatabaseService db, IEventBus eventBus, IChatSessionClient chatSession)
     {
@@ -192,6 +195,11 @@ public sealed class MessageStore : IMessageStore
 
         if (ack.Accepted)
         {
+            Interlocked.Increment(ref _acksHandled);
+            // ACK 端到端延迟：本地入队（QueuedAt）→ 服务端确认到达。仅成功路径统计。
+            if (result.QueuedAtUtc is { } queuedAt)
+                _outboxAckLatency.Add(DateTime.UtcNow - queuedAt);
+
             var serverMessageId = ack.CommandId;
             _eventBus.Publish(new OutboxStatusChangedEvent(clientMessageId, OutboxStatus.Sent, serverMessageId));
             if (result.ConversationId is not null)
@@ -568,5 +576,19 @@ public sealed class MessageStore : IMessageStore
         var kind = utc.Kind == DateTimeKind.Utc ? utc : DateTime.SpecifyKind(utc, DateTimeKind.Utc);
         return new DateTimeOffset(kind).ToUnixTimeMilliseconds();
     }
+
+    // ── IMetricsSource ──
+    public string Name => "message_store";
+
+    public IReadOnlyDictionary<string, long> Counters => new Dictionary<string, long>
+    {
+        ["acks_handled"] = Volatile.Read(ref _acksHandled)
+    };
+
+    public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
+        new Dictionary<string, HistogramSnapshot>
+        {
+            ["outbox_ack_latency_ms"] = _outboxAckLatency.Snapshot()
+        };
 }
 

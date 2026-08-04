@@ -204,6 +204,7 @@ public partial class App : Application
         diagnostics.AddSource(_services.GetRequiredService<ChatConnectionCoordinator>());
         diagnostics.AddSource(_services.GetRequiredService<SyncEngine>());
         diagnostics.AddSource(_services.GetRequiredService<ChatMessageCoordinator>());
+        diagnostics.AddSource(_services.GetRequiredService<MessageStore>());
         diagnostics.Start();
 
         // 实例化附件恢复服务以注册鉴权事件订阅：恢复任务在 Authenticated 事件触发，

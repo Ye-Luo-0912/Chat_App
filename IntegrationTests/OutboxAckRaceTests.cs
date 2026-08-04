@@ -132,6 +132,11 @@ public class OutboxAckRaceTests : IDisposable
             e => e.ClientMessageId == clientId && e.NewStatus == OutboxStatus.Sent);
         Assert.Contains(received.OfType<MessageStatusChangedEvent>(),
             e => e.ClientMessageId == clientId && e.NewStatus == MessageStatus.Sent);
+
+        // 指标闭环：ACK 端到端延迟（入队 → 确认）必须记录样本
+        Assert.Equal(1, store.Counters["acks_handled"]);
+        Assert.True(store.Histograms["outbox_ack_latency_ms"].Count > 0,
+            "outbox_ack_latency_ms 应至少有一个样本");
     }
 
     /// <summary>重复/乱序 ACK：已 Sent 后再来 ACK，状态机必须幂等拒绝，不反向覆盖、不重复发布。</summary>

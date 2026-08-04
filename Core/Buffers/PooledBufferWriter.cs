@@ -84,15 +84,27 @@ namespace Core.Buffers
             var newSize = Math.Max(_buffer.Length * 2, required);
             var newBuffer = ArrayPool<byte>.Shared.Rent(newSize);
             _buffer.AsSpan(0, _written).CopyTo(newBuffer);
-            ArrayPool<byte>.Shared.Return(_buffer);
+            ReturnSensitiveBuffer();
             _buffer = newBuffer;
+        }
+
+        /// <summary>
+        /// 归还前清零写入区：出站帧可能含敏感数据（登录/令牌帧），
+        /// ArrayPool 复用数组若不清理会在后续任一出站帧或内存转储中残留。
+        /// 仅清理已写入区域——与发送量同阶的 memzero，带宽级成本可忽略。
+        /// </summary>
+        private void ReturnSensitiveBuffer()
+        {
+            if (_buffer is null) return;
+            _buffer.AsSpan(0, _written).Clear();
+            ArrayPool<byte>.Shared.Return(_buffer);
         }
 
         public void Dispose()
         {
             if (_buffer is not null)
             {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                ReturnSensitiveBuffer();
                 _buffer = null;
                 _written = 0;
             }

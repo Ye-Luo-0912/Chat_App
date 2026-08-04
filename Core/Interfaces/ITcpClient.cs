@@ -36,13 +36,26 @@ public interface ITcpClient : IDisposable
     /// </summary>
     Task SendAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
     {
-        // 默认：复制到独立内存后走旧路径，并释放 owner。
-        // 旧 SendAsync(ReadOnlyMemory) 在返回 Task 前同步完成 ToArray 复制，
-        // 因此在 Dispose 前数据已被独立拷出，安全。
+        // Ĭ�ϣ����Ƶ������ڴ���߾�·�������ͷ� owner��
+        // �� SendAsync(ReadOnlyMemory) �ڷ��� Task ǰͬ����� ToArray ���ƣ�
+        // ����� Dispose ǰ�����ѱ�������������ȫ��
         using (owner)
         {
             return SendAsync(owner.Memory, token);
         }
+    }
+
+    /// <summary>
+    /// ���ȼ����ͣ��뿴 <see cref="SendAsync(IMemoryOwner{byte}, CancellationToken)"/>��
+    /// �߼�ͨ����֤�Ŀ���֡�����ģ������Ϣ/ACK �ȣ���Ѹ�ͨ��ǰ�浽��Ŀ�ĵء�
+    /// ���ƣ�ͬʱ�����쳣�߼���������һ���ķ���ӳ�ӻ�����
+    /// ʵ�ַ�ͨ��˫ͨ������ʵ�֣�Ĭ�� DIM �ص� <see cref="SendAsync(IMemoryOwner{byte}, CancellationToken)"/>��
+    /// </summary>
+    /// <param name="owner">���ڵ�����������ɺ�����<paramref name="owner"/>��Dispose �黹��</param>
+    /// <param name="token">ȡ�����ơ�</param>
+    Task SendPriorityAsync(IMemoryOwner<byte> owner, CancellationToken token = default)
+    {
+        return SendAsync(owner, token);
     }
 
     /// <summary>

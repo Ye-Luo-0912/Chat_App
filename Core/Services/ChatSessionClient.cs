@@ -44,6 +44,8 @@ namespace Core.Services
         private long _disconnects;
         private long _lastHeartbeatSentTicks;
         private readonly LatencyHistogram _heartbeatRtt = new();
+        private readonly LatencyHistogram _rpcLatency = new();
+        private long _rpcsSent;
 
         // 请求超时（秒）—— 按业务类型分级
         private const int AuthTimeoutSec = 5;
@@ -401,7 +403,8 @@ namespace Core.Services
 
             Interlocked.Exchange(ref _lastHeartbeatSentTicks, DateTime.UtcNow.Ticks);
             Interlocked.Increment(ref _heartbeatsSent);
-            await SendPacketAsync(PacketCommand.Heartbeat, (object?)null, ct);
+            // 高优通道发送：心跳不被普通消息积压饿死，保活/半开检测按时执行。
+            await SendPacketAsync(PacketCommand.Heartbeat, (object?)null, ct, priority: true);
         }
 
         public Task<ConversationListResponseDto> QueryConversationListAsync(
@@ -792,6 +795,9 @@ namespace Core.Services
             if (!pending.TryAdd(requestId, tcs))
                 throw new InvalidOperationException(conflictMessage);
 
+            Interlocked.Increment(ref _rpcsSent);
+            var sw = Stopwatch.StartNew();
+
             try
             {
                 await SendPacketAsync(command, request, ct).ConfigureAwait(false);
@@ -801,6 +807,8 @@ namespace Core.Services
             }
             finally
             {
+                // 所有完成路径（成功/超时/取消/断连失败）都记录：超时即延迟证据。
+                _rpcLatency.Add(sw.Elapsed);
                 pending.TryRemove(requestId, out _);
             }
         }
@@ -844,7 +852,7 @@ namespace Core.Services
         /// <param name="payload"></param>
         /// <param name="ct"></param>
         /// <returns></returns>
-        private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct)
+        private async Task SendPacketAsync<T>(PacketCommand command, T? payload, CancellationToken ct, bool priority = false)
         {
             Interlocked.Increment(ref _packetsSent);
             // 热路径：池化出站帧缓冲，JSON 直写同一缓冲，无中间 byte[] 分配，
@@ -876,7 +884,10 @@ namespace Core.Services
                 // SendAsync(IMemoryOwner) 契约：无论成功/失败/取消都会 Dispose owner。
                 var toSend = frameWriter;
                 frameWriter = null!;
-                await _tcpClient.SendAsync(toSend, ct).ConfigureAwait(false);
+                if (priority)
+                    await _tcpClient.SendPriorityAsync(toSend, ct).ConfigureAwait(false);
+                else
+                    await _tcpClient.SendAsync(toSend, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -1297,11 +1308,16 @@ namespace Core.Services
             ["packets_sent"] = Volatile.Read(ref _packetsSent),
             ["packets_received"] = Volatile.Read(ref _packetsReceived),
             ["heartbeats_sent"] = Volatile.Read(ref _heartbeatsSent),
+            ["rpc_requests"] = Volatile.Read(ref _rpcsSent),
             ["disconnects"] = Volatile.Read(ref _disconnects),
             ["pending_requests"] = PendingRequestCount
         };
 
         public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
-            new Dictionary<string, HistogramSnapshot> { ["heartbeat_rtt_ms"] = _heartbeatRtt.Snapshot() };
+            new Dictionary<string, HistogramSnapshot>
+            {
+                ["heartbeat_rtt_ms"] = _heartbeatRtt.Snapshot(),
+                ["rpc_latency_ms"] = _rpcLatency.Snapshot()
+            };
     }
 }

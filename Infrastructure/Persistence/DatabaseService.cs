@@ -1332,7 +1332,9 @@ public class DatabaseService(
         await transaction.CommitAsync(None);
 
         var serverId = accepted ? (serverMessageId ?? outbox.MessageId) : null;
-        return new OutboxAckResult(transitioned, outbox.ConversationId, serverId);
+        // QueuedAt 随结果带出：上层以此计算 ACK 端到端延迟（入队 → 服务端确认）。
+        return new OutboxAckResult(transitioned, outbox.ConversationId, serverId,
+            QueuedAtUtc: outbox.QueuedAt);
     }
 
     /// <inheritdoc />
