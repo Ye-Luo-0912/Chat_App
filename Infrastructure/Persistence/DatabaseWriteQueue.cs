@@ -26,6 +26,15 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
 {
     private const int QueueCapacity = 1024;
 
+    /// <summary>
+    /// 每轮消费者最大排空操作数（攒批上限）。
+    /// 批内操作仍各自独立执行（自包含 DbContext + 事务，保持读-改-写与幂等语义），
+    /// 攒批收益在于减少消费者唤醒/调度次数，并让 batch_size 指标真实反映调度粒度。
+    /// 领域级"单事务批量"（如历史消息批量落库）已在 DatabaseService 批量方法内实现，
+    /// 跨操作共享 DbContext 维持架构决策（读-改-写竞态 + 回滚污染）。
+    /// </summary>
+    private const int MaxDrainBatch = 64;
+
     private readonly Channel<WriteOperation> _channel;
     private readonly Task _consumerTask;
     private readonly CancellationTokenSource _cts = new();
@@ -34,6 +43,7 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
     private long _processedCount;
     private long _failedCount;
     private long _inFlightCount;
+    private long _batchSize;
     private readonly LatencyHistogram _queueWait = new();
     private readonly LatencyHistogram _execution = new();
     private readonly LatencyHistogram _endToEnd = new();
@@ -114,38 +124,47 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
     }
 
     /// <summary>
-    /// 消费者循环：单消费者逐个执行写入操作，保证串行化。
-    /// 已入队的操作必须完成（执行不随队列关闭/调用方取消而中断），
+    /// 消费者循环：攒批排空（每轮最多 <see cref="MaxDrainBatch"/> 个操作），
+    /// 批内逐个执行保证串行化。已入队的操作必须完成（执行不随队列关闭/调用方取消而中断），
     /// 单个操作失败不影响队列继续运行（按操作隔离）。
     /// </summary>
     private async Task ConsumeLoopAsync()
     {
-        await foreach (var op in _channel.Reader.ReadAllAsync(_cts.Token))
+        while (await _channel.Reader.WaitToReadAsync(_cts.Token).ConfigureAwait(false))
         {
-            // 排队等待 = 入队时刻 → 执行开始（背压下等待空位/前序操作的时间）
-            var waitElapsed = TimeSpan.FromTicks(Stopwatch.GetTimestamp() - op.EnqueuedAtTicks);
-            var sw = Stopwatch.StartNew();
-            Interlocked.Increment(ref _inFlightCount);
-            try
+            // 攒批：把当前已就绪的操作尽可能取入本批（不引入额外等待延迟）。
+            var batch = new List<WriteOperation>(MaxDrainBatch);
+            while (batch.Count < MaxDrainBatch && _channel.Reader.TryRead(out var op))
+                batch.Add(op);
+
+            Interlocked.Exchange(ref _batchSize, batch.Count);
+            foreach (var op in batch)
             {
-                await op.ExecuteAsync(CancellationToken.None).ConfigureAwait(false);
-                op.SetResult();
-                Interlocked.Increment(ref _processedCount);
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "写入队列操作失败 OperationId={OperationId}", op.Id);
-                op.SetException(ex);
-                Interlocked.Increment(ref _failedCount);
-            }
-            finally
-            {
-                Interlocked.Decrement(ref _inFlightCount);
-                sw.Stop();
-                // 语义拆分：queue_wait（背压排队） / execution（DB 操作） / end_to_end（全链路）
-                _queueWait.Add(waitElapsed);
-                _execution.Add(sw.Elapsed);
-                _endToEnd.Add(sw.Elapsed + waitElapsed);
+                // 排队等待 = 入队时刻 → 执行开始（背压下等待空位/前序操作的时间）
+                var waitElapsed = TimeSpan.FromTicks(Stopwatch.GetTimestamp() - op.EnqueuedAtTicks);
+                var sw = Stopwatch.StartNew();
+                Interlocked.Increment(ref _inFlightCount);
+                try
+                {
+                    await op.ExecuteAsync(CancellationToken.None).ConfigureAwait(false);
+                    op.SetResult();
+                    Interlocked.Increment(ref _processedCount);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "写入队列操作失败 OperationId={OperationId}", op.Id);
+                    op.SetException(ex);
+                    Interlocked.Increment(ref _failedCount);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _inFlightCount);
+                    sw.Stop();
+                    // 语义拆分：queue_wait（背压排队） / execution（DB 操作） / end_to_end（全链路）
+                    _queueWait.Add(waitElapsed);
+                    _execution.Add(sw.Elapsed);
+                    _endToEnd.Add(sw.Elapsed + waitElapsed);
+                }
             }
         }
     }
@@ -159,8 +178,8 @@ public sealed class DatabaseWriteQueue : IDatabaseWriteQueue, IAsyncDisposable, 
         ["processed"] = Volatile.Read(ref _processedCount),
         ["failed"] = Volatile.Read(ref _failedCount),
         ["capacity"] = QueueCapacity,
-        // 单消费者串行执行器：领域批处理落地前 batch_size 恒为 1（标记未来批处理粒度）
-        ["batch_size"] = 1
+        // 每轮实际排空操作数（攒批调度粒度）；操作级事务批量由 DatabaseService 批量方法承担
+        ["batch_size"] = Volatile.Read(ref _batchSize)
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>

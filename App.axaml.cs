@@ -80,6 +80,7 @@ public partial class App : Application
         services.AddSingleton<MainWindowViewModel>();
         services.AddSingleton<HomeViewModel>();
         services.AddSingleton<SettingsViewModel>();
+        services.AddSingleton<DiagnosticsViewModel>();
         services.AddSingleton<FriendsViewModel>();
 
         // 加载应用配置

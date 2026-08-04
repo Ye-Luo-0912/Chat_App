@@ -1,0 +1,58 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Shell"
+             mc:Ignorable="d"
+             x:Class="Chat_App.Presentation.Views.Shell.DiagnosticsView"
+             x:DataType="vm:DiagnosticsViewModel"
+             Background="#F8FAFC">
+
+    <DockPanel Margin="24">
+
+        <DockPanel DockPanel.Dock="Top" Margin="0 0 0 16">
+            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" Spacing="8">
+                <Button Content="刷新"
+                        Command="{Binding RefreshCommand}"
+                        Padding="14 8"
+                        CornerRadius="8"/>
+            </StackPanel>
+            <StackPanel Spacing="8">
+                <TextBlock Text="本地诊断"
+                           FontSize="22"
+                           FontWeight="Bold"
+                           Foreground="#0F172A"/>
+                <TextBlock Text="{Binding LastUpdatedText, StringFormat='最近刷新：{0}'}"
+                           FontSize="12"
+                           Foreground="#64748B"/>
+            </StackPanel>
+        </DockPanel>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <ItemsControl ItemsSource="{Binding Rows}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="vm:DiagnosticsRowViewModel">
+                        <Border Background="White"
+                                CornerRadius="12"
+                                Padding="12"
+                                Margin="0 0 0 10"
+                                BorderBrush="#E2E8F0"
+                                BorderThickness="1">
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="{Binding Name}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="#1E293B"/>
+                                <TextBlock Text="{Binding DetailText}"
+                                           FontSize="12"
+                                           Foreground="#475569"
+                                           TextWrapping="Wrap"
+                                           FontFamily="Consolas, Courier New, monospace"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </DockPanel>
+</UserControl>

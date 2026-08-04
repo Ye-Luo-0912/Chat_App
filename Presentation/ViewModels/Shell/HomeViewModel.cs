@@ -20,7 +20,8 @@ public enum SelectedItem
     Contacts,
     Friends,
     Profile,
-    Settings
+    Settings,
+    Diagnostics
 }
 
 /// <summary>
@@ -50,6 +51,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
     private readonly ChatViewModel _chatViewModel;
     private readonly FriendsViewModel _friendsViewModel;
     private readonly SettingsViewModel _settingsViewModel;
+    private readonly DiagnosticsViewModel _diagnosticsViewModel;
     private readonly IAuthClientService _authClient;
     private readonly TokenInfo _tokenInfo;
     private readonly IChatConnectionCoordinator _connectionCoordinator;
@@ -84,6 +86,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand NavigateToFriendsCommand { get; }
     public RelayCommand NavigateToProfileCommand { get; }
     public AsyncRelayCommand NavigateToSettingsCommand { get; }
+    public RelayCommand NavigateToDiagnosticsCommand { get; }
     public RelayCommand ShowAboutCommand { get; }
     public AsyncRelayCommand LogoutCommand { get; }
 
@@ -94,6 +97,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
     private bool _isContactsSelected;
     private bool _isFriendsSelected;
     private bool _isProfileSelected;
+    private bool _isDiagnosticsSelected;
     private SelectedItem _selectedIndex = SelectedItem.None;
 
     public bool IsContactsSelected
@@ -114,6 +118,12 @@ public class HomeViewModel : ViewModelBase, IDisposable
         set => SetProperty(ref _isProfileSelected, value);
     }
 
+    public bool IsDiagnosticsSelected
+    {
+        get => _isDiagnosticsSelected;
+        set => SetProperty(ref _isDiagnosticsSelected, value);
+    }
+
     #endregion
 
     #region 构造函数
@@ -122,6 +132,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         ChatViewModel chatViewModel,
         FriendsViewModel friendsViewModel,
         SettingsViewModel settingsViewModel,
+        DiagnosticsViewModel diagnosticsViewModel,
         IAuthClientService authClient,
         TokenInfo tokenInfo,
         IChatConnectionCoordinator connectionCoordinator,
@@ -131,6 +142,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         _chatViewModel = chatViewModel;
         _friendsViewModel = friendsViewModel;
         _settingsViewModel = settingsViewModel;
+        _diagnosticsViewModel = diagnosticsViewModel;
         _authClient = authClient;
         _tokenInfo = tokenInfo;
         _connectionCoordinator = connectionCoordinator;
@@ -141,6 +153,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         NavigateToFriendsCommand = new AsyncRelayCommand(() => NavigateToFriends(CancellationToken.None));
         NavigateToProfileCommand = new RelayCommand(NavigateToProfile);
         NavigateToSettingsCommand = new AsyncRelayCommand(NavigateToSettingsAsync);
+        NavigateToDiagnosticsCommand = new RelayCommand(NavigateToDiagnostics);
         ShowAboutCommand = new RelayCommand(() =>
         {
             Log.Information("点击了关于");
@@ -218,6 +231,14 @@ public class HomeViewModel : ViewModelBase, IDisposable
         UpdateSelectionStates(SelectedItem.Profile);
     }
 
+    private void NavigateToDiagnostics()
+    {
+        if (IsCurrentPage(SelectedItem.Diagnostics))
+            return;
+        CurrentPage = _diagnosticsViewModel;
+        UpdateSelectionStates(SelectedItem.Diagnostics);
+    }
+
     private async Task NavigateToSettingsAsync(CancellationToken ct)
     {
         Log.Debug("导航到设置页面");
@@ -283,6 +304,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
         IsContactsSelected = selectedIndex == SelectedItem.Contacts;
         IsFriendsSelected = selectedIndex == SelectedItem.Friends;
         IsProfileSelected = selectedIndex == SelectedItem.Profile;
+        IsDiagnosticsSelected = selectedIndex == SelectedItem.Diagnostics;
     }
 
     private bool IsCurrentPage(SelectedItem item) => _selectedIndex == item;

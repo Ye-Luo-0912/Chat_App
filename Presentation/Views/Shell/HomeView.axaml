@@ -39,6 +39,18 @@
                                   Foreground="#94A3B8"/>
                     </RadioButton>
 
+                    <!-- 本地诊断 -->
+                    <RadioButton GroupName="NavGroup"
+                                 Command="{Binding NavigateToDiagnosticsCommand}"
+                                 IsChecked="{Binding IsDiagnosticsSelected}"
+                                 Classes="navBtn"
+                                 ToolTip.Tip="本地诊断"
+                                 ToolTip.Placement="Right">
+                        <PathIcon Width="24" Height="24"
+                                  Data="{StaticResource DiagnosticsIcon}"
+                                  Foreground="#94A3B8"/>
+                    </RadioButton>
+
                 </StackPanel>
 
                 <!-- 底部设置按钮 -->

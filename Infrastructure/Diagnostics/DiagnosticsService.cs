@@ -9,6 +9,12 @@ using Serilog;
 
 namespace Chat_App.Infrastructure.Diagnostics;
 
+/// <summary>单个指标源的结构化快照（UI 诊断页绑定用）。</summary>
+public sealed record MetricsSourceSnapshot(
+    string Name,
+    IReadOnlyDictionary<string, long> Counters,
+    IReadOnlyDictionary<string, HistogramSnapshot> Histograms);
+
 /// <summary>
 /// 诊断指标聚合与导出服务：注册各 IMetricsSource，按固定周期
 /// （默认 60s）将计数与延迟分位汇总输出到日志，便于定位积压来源与 p95/p99。
@@ -59,15 +65,9 @@ public sealed class DiagnosticsService : IDisposable
     {
         try
         {
-            IMetricsSource[] sources;
-            lock (_gate)
-            {
-                sources = _sources.ToArray();
-            }
-
             var sb = new StringBuilder();
             sb.AppendLine("诊断指标快照：");
-            foreach (var source in sources)
+            foreach (var source in GetSnapshot())
             {
                 sb.Append("  [").Append(source.Name).Append(']');
                 if (source.Counters.Count > 0)
@@ -91,6 +91,26 @@ public sealed class DiagnosticsService : IDisposable
         {
             Log.Warning(ex, "导出诊断指标失败");
         }
+    }
+
+    /// <summary>
+    /// 结构化快照（UI 本地诊断页使用）：按注册顺序返回各源当前计数与延迟分位。
+    /// 快照方法均为内存读，可在任意线程（含 UI 线程）安全调用。
+    /// </summary>
+    public IReadOnlyList<MetricsSourceSnapshot> GetSnapshot()
+    {
+        IMetricsSource[] sources;
+        lock (_gate)
+        {
+            sources = _sources.ToArray();
+        }
+
+        var result = new List<MetricsSourceSnapshot>(sources.Length);
+        foreach (var source in sources)
+        {
+            result.Add(new MetricsSourceSnapshot(source.Name, source.Counters, source.Histograms));
+        }
+        return result;
     }
 
     public void Dispose()
