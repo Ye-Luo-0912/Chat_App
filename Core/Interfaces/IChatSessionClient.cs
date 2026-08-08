@@ -164,6 +164,11 @@ public interface IChatSessionClient : IDisposable
         string conversationId,
         CancellationToken ct = default);
 
+    /// <summary>解散群聊（仅群主）。解散后服务端广播 ConversationDissolvedUpdate。</summary>
+    Task<DissolveGroupResponseDto> DissolveGroupAsync(
+        string conversationId,
+        CancellationToken ct = default);
+
     /// <summary>变更成员角色（Owner/Admin/Member）。</summary>
     Task<ChangeMemberRoleResponseDto> ChangeMemberRoleAsync(
         string conversationId,

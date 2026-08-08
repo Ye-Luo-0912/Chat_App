@@ -83,6 +83,19 @@ public class GroupChatE2ETests
     }
 
     [Fact]
+    public async Task DissolveGroup_Request_Pairs_By_RequestId()
+    {
+        await RunAsync(async (client, server, serializer) =>
+        {
+            var resp = await client.DissolveGroupAsync(GroupId);
+            Assert.True(resp.Succeeded);
+            Assert.Equal(GroupId, resp.ConversationId);
+            var seen = server.Frames.Single(f => f.Command == PacketCommand.DissolveGroupRequest);
+            Assert.Equal(seen.RequestId, resp.RequestId);
+        });
+    }
+
+    [Fact]
     public async Task ChangeMemberRole_Request_Pairs_By_RequestId()
     {
         await RunAsync(async (client, server, serializer) =>
@@ -131,6 +144,7 @@ public class GroupChatE2ETests
             await Assert.ThrowsAnyAsync<ArgumentException>(() => client.AddGroupMembersAsync(GroupId, []));
             await Assert.ThrowsAnyAsync<ArgumentException>(() => client.RemoveGroupMemberAsync(GroupId, 0));
             await Assert.ThrowsAnyAsync<ArgumentException>(() => client.LeaveGroupAsync(""));
+            await Assert.ThrowsAnyAsync<ArgumentException>(() => client.DissolveGroupAsync(""));
             await Assert.ThrowsAnyAsync<ArgumentException>(
                 () => client.ChangeMemberRoleAsync(GroupId, MemberId, (ConversationMemberRole)99));
             await Assert.ThrowsAnyAsync<ArgumentException>(() => client.ListGroupMembersAsync(""));
@@ -402,6 +416,19 @@ public class GroupChatE2ETests
                                 if (req is null) return;
                                 Frames.Add((cmd, req.RequestId!));
                                 Inject(PacketCommand.LeaveGroupResponse, new LeaveGroupResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId
+                                });
+                                break;
+                            }
+                        case PacketCommand.DissolveGroupRequest:
+                            {
+                                var req = serializer.Deserialize<DissolveGroupRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.DissolveGroupResponse, new DissolveGroupResponseDto
                                 {
                                     RequestId = req.RequestId,
                                     Succeeded = true,

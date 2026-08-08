@@ -82,6 +82,21 @@ public sealed class LeaveGroupResponseDto : IRequestDto
     public string? ConversationId { get; set; }
 }
 
+public sealed class DissolveGroupRequestDto : IRequestDto
+{
+    public string? RequestId { get; set; }
+    public string ConversationId { get; set; } = string.Empty;
+}
+
+public sealed class DissolveGroupResponseDto : IRequestDto
+{
+    public string? RequestId { get; set; }
+    public bool Succeeded { get; set; }
+    public string? ErrorCode { get; set; }
+    public string? ErrorMessage { get; set; }
+    public string? ConversationId { get; set; }
+}
+
 public sealed class ChangeMemberRoleRequestDto : IRequestDto
 {
     public string? RequestId { get; set; }

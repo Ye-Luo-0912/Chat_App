@@ -68,6 +68,8 @@ namespace Chat_App.Infrastructure.Serialization;
 [JsonSerializable(typeof(RemoveGroupMemberResponseDto))]
 [JsonSerializable(typeof(LeaveGroupRequestDto))]
 [JsonSerializable(typeof(LeaveGroupResponseDto))]
+[JsonSerializable(typeof(DissolveGroupRequestDto))]
+[JsonSerializable(typeof(DissolveGroupResponseDto))]
 [JsonSerializable(typeof(ChangeMemberRoleRequestDto))]
 [JsonSerializable(typeof(ChangeMemberRoleResponseDto))]
 [JsonSerializable(typeof(ListGroupMembersRequestDto))]

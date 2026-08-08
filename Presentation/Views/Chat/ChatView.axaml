@@ -404,6 +404,15 @@
                                         CornerRadius="6"/>
                             </StackPanel>
                         </Border>
+                        <Button Content="解散群聊"
+                                Command="{Binding DissolveGroupCommand}"
+                                CommandParameter="{Binding SelectedConversation}"
+                                IsVisible="{Binding IsGroupOwner}"
+                                FontSize="13"
+                                Padding="10 6"
+                                Background="#DC2626"
+                                Foreground="White"
+                                CornerRadius="6"/>
                     </StackPanel>
                 </DockPanel>
             </Border>

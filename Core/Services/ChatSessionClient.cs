@@ -50,6 +50,7 @@ namespace Core.Services
         private readonly ConcurrentDictionary<string, TaskCompletionSource<AddGroupMembersResponseDto>> _addGroupMembersPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<RemoveGroupMemberResponseDto>> _removeGroupMemberPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<LeaveGroupResponseDto>> _leaveGroupPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<DissolveGroupResponseDto>> _dissolveGroupPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ChangeMemberRoleResponseDto>> _changeRolePending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ListGroupMembersResponseDto>> _listGroupMembersPending = new(StringComparer.Ordinal);
 
@@ -109,7 +110,8 @@ namespace Core.Services
             _listPending.Count + _prefsPending.Count + _recallPending.Count + _editPending.Count
             + _presencePending.Count + _syncPending.Count + _historyPending.Count + _receiptPending.Count
             + _markReadPending.Count + _createGroupPending.Count + _addGroupMembersPending.Count
-            + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _changeRolePending.Count
+            + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _dissolveGroupPending.Count
+            + _changeRolePending.Count
             + _listGroupMembersPending.Count;
 
         /// <summary>
@@ -749,6 +751,20 @@ namespace Core.Services
                 "退出群聊请求 Id 冲突", ct);
         }
 
+        public Task<DissolveGroupResponseDto> DissolveGroupAsync(
+            string conversationId,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(conversationId))
+                throw new ArgumentException("conversationId 不能为空");
+
+            return SendRequestAsync(_dissolveGroupPending, PacketCommand.DissolveGroupRequest,
+                new DissolveGroupRequestDto { ConversationId = conversationId.Trim() },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "解散群聊请求 Id 冲突", ct);
+        }
+
         public Task<ChangeMemberRoleResponseDto> ChangeMemberRoleAsync(
             string conversationId,
             long targetUserId,
@@ -1017,6 +1033,7 @@ namespace Core.Services
             FailAll(_addGroupMembersPending, ex);
             FailAll(_removeGroupMemberPending, ex);
             FailAll(_leaveGroupPending, ex);
+            FailAll(_dissolveGroupPending, ex);
             FailAll(_changeRolePending, ex);
             FailAll(_listGroupMembersPending, ex);
         }
@@ -1274,6 +1291,15 @@ namespace Core.Services
                         && _leaveGroupPending.TryRemove(leaveGroup.RequestId, out var leaveGroupTcs))
                     {
                         leaveGroupTcs.TrySetResult(leaveGroup);
+                    }
+                    return;
+                case PacketCommand.DissolveGroupResponse:
+                    var dissolveGroup = _bodySerializer.Deserialize<DissolveGroupResponseDto>(packet.Body);
+                    if (dissolveGroup is not null
+                        && !string.IsNullOrWhiteSpace(dissolveGroup.RequestId)
+                        && _dissolveGroupPending.TryRemove(dissolveGroup.RequestId, out var dissolveGroupTcs))
+                    {
+                        dissolveGroupTcs.TrySetResult(dissolveGroup);
                     }
                     return;
                 case PacketCommand.ChangeMemberRoleResponse:

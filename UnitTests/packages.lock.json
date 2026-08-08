@@ -571,7 +571,7 @@
         "type": "CentralTransitive",
         "requested": "[0.3.0, )",
         "resolved": "0.3.0",
-        "contentHash": "WHfkaUpwQ/0PQ4odejumq+ckCB+Si30Qt2iroUaLI5CnYv6V/NO7WnOYIJ+69HKgjm3SufON2+9mxuOqPHZhKA=="
+        "contentHash": "6WOuS+tfGT2JGcV78FtYUWhF7L9uDCn4wwNdB5M54WYBHB7fykOnzdbAiEZ1+xrLsia/qiRmneYGKRh2Mmo6qQ=="
       },
       "Material.Icons.Avalonia": {
         "type": "CentralTransitive",

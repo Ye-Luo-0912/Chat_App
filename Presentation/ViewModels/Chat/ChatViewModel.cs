@@ -185,6 +185,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
     // ── 群聊 UI 状态与命令 ──
 
     private bool _isCreatingGroup;
+    private bool _isGroupOwner;
     public bool IsCreatingGroup
     {
         get => _isCreatingGroup;
@@ -260,6 +261,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand CancelCreateGroupCommand { get; }
     public AsyncRelayCommand<LocalConversation> ShowGroupMembersCommand { get; }
     public AsyncRelayCommand<LocalConversation> LeaveGroupCommand { get; }
+    public AsyncRelayCommand<LocalConversation> DissolveGroupCommand { get; }
     public AsyncRelayCommand CloseGroupMembersCommand { get; }
     public AsyncRelayCommand<GroupMemberUiItem> RemoveGroupMemberCommand { get; }
     public AsyncRelayCommand<GroupMemberUiItem> ToggleGroupMemberRoleCommand { get; }
@@ -314,6 +316,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
             CancelCreateGroupCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
             ShowGroupMembersCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
             LeaveGroupCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            DissolveGroupCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
             CloseGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
             RemoveGroupMemberCommand = new AsyncRelayCommand<GroupMemberUiItem>(_ => Task.CompletedTask);
             ToggleGroupMemberRoleCommand = new AsyncRelayCommand<GroupMemberUiItem>(_ => Task.CompletedTask);
@@ -452,6 +455,11 @@ public class ChatViewModel : ViewModelBase, IDisposable
             LeaveGroupAsync,
             conversation => conversation is not null && conversation.IsGroup,
             ex => _notificationService.ShowError($"退出群聊失败: {ex.Message}"));
+
+        DissolveGroupCommand = new AsyncRelayCommand<LocalConversation>(
+            DissolveGroupAsync,
+            conversation => conversation is not null && conversation.IsGroup,
+            ex => _notificationService.ShowError($"解散群聊失败: {ex.Message}"));
 
         CloseGroupMembersCommand = new AsyncRelayCommand(
             _ =>
@@ -1038,10 +1046,24 @@ public class ChatViewModel : ViewModelBase, IDisposable
                 });
             }
             OnPropertyChanged(nameof(GroupMembersTitle));
+            IsGroupOwner = GroupMembers.Any(m => m.IsSelf && m.Role == ConversationMemberRole.Owner);
         });
     }
 
     public string GroupMembersTitle => $"群成员 ({GroupMembers.Count})";
+
+    /// <summary>当前用户是否为所选群聊的群主（决定解散按钮可见性，由成员加载结果推断）。</summary>
+    public bool IsGroupOwner
+    {
+        get => _isGroupOwner;
+        private set
+        {
+            if (_isGroupOwner == value)
+                return;
+            _isGroupOwner = value;
+            OnPropertyChanged();
+        }
+    }
 
     /// <summary>退出群聊：调用服务端后本地移除会话（解散通知会由服务端另行广播）。</summary>
     private async Task LeaveGroupAsync(LocalConversation? conversation)
@@ -1068,6 +1090,33 @@ public class ChatViewModel : ViewModelBase, IDisposable
             _chatSession.CurrentUserId, conversation.ConversationId, deleted: true).ConfigureAwait(true);
         RaisePrefsCommands();
         _notificationService.ShowSuccess("已退出群聊");
+    }
+
+    /// <summary>解散群聊（仅群主）：调用服务端后本地移除会话（成员端由解散推送清理）。</summary>
+    private async Task DissolveGroupAsync(LocalConversation? conversation)
+    {
+        if (conversation is null || !conversation.IsGroup)
+            return;
+        if (!_chatSession.IsAuthenticated)
+        {
+            _notificationService.ShowError("未连接服务器，无法解散群聊。");
+            return;
+        }
+
+        var response = await _chatSession.DissolveGroupAsync(conversation.ConversationId).ConfigureAwait(true);
+        if (!response.Succeeded)
+        {
+            _notificationService.ShowError(response.ErrorMessage ?? response.ErrorCode ?? "解散群聊失败");
+            return;
+        }
+
+        if (SelectedConversation?.ConversationId == conversation.ConversationId)
+            SelectedConversation = null;
+        _friendListState.RemoveConversation(conversation.ConversationId);
+        await _dbService.SetConversationLocalStateAsync(
+            _chatSession.CurrentUserId, conversation.ConversationId, deleted: true).ConfigureAwait(true);
+        RaisePrefsCommands();
+        _notificationService.ShowSuccess("群聊已解散");
     }
 
     private async Task<List<ConversationListItemDto>> RefreshConversationPrefsAsync(CancellationToken ct)
