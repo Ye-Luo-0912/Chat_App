@@ -6,4 +6,9 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <ItemGroup>
+        <PackageReference Include="ChatApp.Contracts.Http" />
+        <PackageReference Include="ChatApp.Protocol.Tcp" />
+    </ItemGroup>
+
 </Project>

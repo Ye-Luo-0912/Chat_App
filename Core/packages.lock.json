@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "ChatApp.Contracts.Http": {
+        "type": "Direct",
+        "requested": "[0.2.0, )",
+        "resolved": "0.2.0",
+        "contentHash": "+tzqvpdKKnuDK/TNfHUfgheQ9zpetLaJGxKhrF8MGRy1zaQz/5QhBQigfHuwD69+T7HxZ8pKpHSQpFfnerTB8Q=="
+      },
+      "ChatApp.Protocol.Tcp": {
+        "type": "Direct",
+        "requested": "[0.2.0, )",
+        "resolved": "0.2.0",
+        "contentHash": "sjcDbKTM6gKq5hiHMDA4NxkqA3zp0xa42tObIkJOzp7GKCWDq42AU7BI4AQM0q4p4jbuxNzOelinjq7o+d+/kg=="
+      }
+    }
+  }
+}

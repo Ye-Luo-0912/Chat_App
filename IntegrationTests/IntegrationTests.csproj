@@ -6,6 +6,8 @@
         <Nullable>enable</Nullable>
         <IsPackable>false</IsPackable>
         <IsTestProject>true</IsTestProject>
+        <!-- Test doubles intentionally expose interface events that individual scenarios do not raise. -->
+        <NoWarn>$(NoWarn);CS0067</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>
