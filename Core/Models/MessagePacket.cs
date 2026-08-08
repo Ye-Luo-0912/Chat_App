@@ -49,7 +49,7 @@ namespace Core.Models
         public ReadOnlySequence<byte> Body { get; }
         #endregion
 
-       
+
         /// <summary>
         /// 构造函数，初始化数据包
         /// </summary>

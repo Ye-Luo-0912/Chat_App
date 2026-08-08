@@ -419,113 +419,113 @@ public class RequestMatrixTests
                             return;
 
                         case PacketCommand.ConversationListRequest:
-                        {
-                            var listRequestId = Record<ConversationListRequestDto>(cmd, body, out var listReq);
-                            Respond(PacketCommand.ConversationListPage, listRequestId, new ConversationListResponseDto
                             {
-                                RequestId = listRequestId,
-                                Succeeded = true,
-                                Items = []
-                            });
-                            return;
-                        }
+                                var listRequestId = Record<ConversationListRequestDto>(cmd, body, out var listReq);
+                                Respond(PacketCommand.ConversationListPage, listRequestId, new ConversationListResponseDto
+                                {
+                                    RequestId = listRequestId,
+                                    Succeeded = true,
+                                    Items = []
+                                });
+                                return;
+                            }
                         case PacketCommand.ConversationSetPrefsRequest:
-                        {
-                            var prefsRequestId = Record<ConversationSetPrefsRequestDto>(cmd, body, out var prefsReq);
-                            Respond(PacketCommand.ConversationSetPrefsResponse, prefsRequestId, new ConversationSetPrefsResponseDto
                             {
-                                RequestId = prefsRequestId,
-                                Succeeded = true,
-                                ConversationId = prefsReq.ConversationId,
-                                IsPinned = prefsReq.Pinned ?? false,
-                                IsMuted = false
-                            });
-                            return;
-                        }
+                                var prefsRequestId = Record<ConversationSetPrefsRequestDto>(cmd, body, out var prefsReq);
+                                Respond(PacketCommand.ConversationSetPrefsResponse, prefsRequestId, new ConversationSetPrefsResponseDto
+                                {
+                                    RequestId = prefsRequestId,
+                                    Succeeded = true,
+                                    ConversationId = prefsReq.ConversationId,
+                                    IsPinned = prefsReq.Pinned ?? false,
+                                    IsMuted = false
+                                });
+                                return;
+                            }
                         case PacketCommand.MessageRecallRequest:
-                        {
-                            var recallRequestId = Record<MessageRecallRequestDto>(cmd, body, out var recallReq);
-                            Respond(PacketCommand.MessageRecallAck, recallRequestId, new MessageRecallAcknowledgementDto
                             {
-                                RequestId = recallRequestId,
-                                Succeeded = true,
-                                MessageId = recallReq.MessageId,
-                                ConversationId = ConvId,
-                                RecalledAtMs = 1234567890
-                            });
-                            return;
-                        }
+                                var recallRequestId = Record<MessageRecallRequestDto>(cmd, body, out var recallReq);
+                                Respond(PacketCommand.MessageRecallAck, recallRequestId, new MessageRecallAcknowledgementDto
+                                {
+                                    RequestId = recallRequestId,
+                                    Succeeded = true,
+                                    MessageId = recallReq.MessageId,
+                                    ConversationId = ConvId,
+                                    RecalledAtMs = 1234567890
+                                });
+                                return;
+                            }
                         case PacketCommand.MessageEditRequest:
-                        {
-                            var editRequestId = Record<MessageEditRequestDto>(cmd, body, out var editReq);
-                            Respond(PacketCommand.MessageEditAck, editRequestId, new MessageEditAcknowledgementDto
                             {
-                                RequestId = editRequestId,
-                                Succeeded = true,
-                                MessageId = editReq.MessageId,
-                                ConversationId = ConvId,
-                                Content = editReq.Content,
-                                EditVersion = 2,
-                                EditedAtMs = 1234567890
-                            });
-                            return;
-                        }
+                                var editRequestId = Record<MessageEditRequestDto>(cmd, body, out var editReq);
+                                Respond(PacketCommand.MessageEditAck, editRequestId, new MessageEditAcknowledgementDto
+                                {
+                                    RequestId = editRequestId,
+                                    Succeeded = true,
+                                    MessageId = editReq.MessageId,
+                                    ConversationId = ConvId,
+                                    Content = editReq.Content,
+                                    EditVersion = 2,
+                                    EditedAtMs = 1234567890
+                                });
+                                return;
+                            }
                         case PacketCommand.PresenceQuery:
-                        {
-                            var presenceRequestId = Record<PresenceQueryRequestDto>(cmd, body, out var presenceReq);
-                            Respond(PacketCommand.PresenceSnapshot, presenceRequestId, new PresenceSnapshotResponseDto
                             {
-                                RequestId = presenceRequestId,
-                                Items = [new PresenceSnapshotItemDto { UserId = PeerId, IsOnline = true }]
-                            });
-                            return;
-                        }
+                                var presenceRequestId = Record<PresenceQueryRequestDto>(cmd, body, out var presenceReq);
+                                Respond(PacketCommand.PresenceSnapshot, presenceRequestId, new PresenceSnapshotResponseDto
+                                {
+                                    RequestId = presenceRequestId,
+                                    Items = [new PresenceSnapshotItemDto { UserId = PeerId, IsOnline = true }]
+                                });
+                                return;
+                            }
                         case PacketCommand.SyncBootstrapRequest:
-                        {
-                            var syncRequestId = Record<SyncBootstrapRequestDto>(cmd, body, out var syncReq);
-                            Respond(PacketCommand.SyncBootstrapResponse, syncRequestId, new SyncBootstrapResponseDto
                             {
-                                RequestId = syncRequestId,
-                                Succeeded = true,
-                                Conversations = []
-                            });
-                            return;
-                        }
+                                var syncRequestId = Record<SyncBootstrapRequestDto>(cmd, body, out var syncReq);
+                                Respond(PacketCommand.SyncBootstrapResponse, syncRequestId, new SyncBootstrapResponseDto
+                                {
+                                    RequestId = syncRequestId,
+                                    Succeeded = true,
+                                    Conversations = []
+                                });
+                                return;
+                            }
                         case PacketCommand.MessageHistoryRequest:
-                        {
-                            var historyRequestId = Record<MessageHistoryRequestDto>(cmd, body, out var historyReq);
-                            Respond(PacketCommand.MessageHistoryPage, historyRequestId, new MessageHistoryPageDto
                             {
-                                RequestId = historyRequestId,
-                                Succeeded = true,
-                                ConversationId = historyReq.ConversationId,
-                                Items = [],
-                                HasMore = false
-                            });
-                            return;
-                        }
+                                var historyRequestId = Record<MessageHistoryRequestDto>(cmd, body, out var historyReq);
+                                Respond(PacketCommand.MessageHistoryPage, historyRequestId, new MessageHistoryPageDto
+                                {
+                                    RequestId = historyRequestId,
+                                    Succeeded = true,
+                                    ConversationId = historyReq.ConversationId,
+                                    Items = [],
+                                    HasMore = false
+                                });
+                                return;
+                            }
                         case PacketCommand.MessageReceipt:
-                        {
-                            var receiptRequestId = Record<MessageReceiptDto>(cmd, body, out var receiptReq);
-                            Respond(PacketCommand.MessageReceiptAcknowledgement, receiptRequestId, new MessageReceiptAckDto
                             {
-                                RequestId = receiptRequestId,
-                                Accepted = true
-                            });
-                            return;
-                        }
+                                var receiptRequestId = Record<MessageReceiptDto>(cmd, body, out var receiptReq);
+                                Respond(PacketCommand.MessageReceiptAcknowledgement, receiptRequestId, new MessageReceiptAckDto
+                                {
+                                    RequestId = receiptRequestId,
+                                    Accepted = true
+                                });
+                                return;
+                            }
                         case PacketCommand.ConversationMarkReadRequest:
-                        {
-                            var markReadRequestId = Record<ConversationMarkReadRequestDto>(cmd, body, out var markReadReq);
-                            Respond(PacketCommand.ConversationMarkReadResponse, markReadRequestId, new ConversationMarkReadResponseDto
                             {
-                                RequestId = markReadRequestId,
-                                Succeeded = true,
-                                ConversationId = markReadReq.ConversationId,
-                                UnreadCount = 0
-                            });
-                            return;
-                        }
+                                var markReadRequestId = Record<ConversationMarkReadRequestDto>(cmd, body, out var markReadReq);
+                                Respond(PacketCommand.ConversationMarkReadResponse, markReadRequestId, new ConversationMarkReadResponseDto
+                                {
+                                    RequestId = markReadRequestId,
+                                    Succeeded = true,
+                                    ConversationId = markReadReq.ConversationId,
+                                    UnreadCount = 0
+                                });
+                                return;
+                            }
                     }
                 }
                 catch

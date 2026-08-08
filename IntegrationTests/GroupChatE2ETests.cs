@@ -341,107 +341,107 @@ public class GroupChatE2ETests
                     switch (cmd)
                     {
                         case PacketCommand.CreateGroupRequest:
-                        {
-                            var req = serializer.Deserialize<CreateGroupRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.CreateGroupResponse, new CreateGroupResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = GroupId,
-                                Title = req.Title,
-                                Members =
-                                [
-                                    new ConversationMemberItemDto { UserId = OwnerId, Role = ConversationMemberRole.Owner, JoinedAtMs = 1234567890 },
+                                var req = serializer.Deserialize<CreateGroupRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.CreateGroupResponse, new CreateGroupResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = GroupId,
+                                    Title = req.Title,
+                                    Members =
+                                    [
+                                        new ConversationMemberItemDto { UserId = OwnerId, Role = ConversationMemberRole.Owner, JoinedAtMs = 1234567890 },
                                     .. (req.MemberUserIds ?? []).Select(u => new ConversationMemberItemDto
                                     {
                                         UserId = u,
                                         Role = ConversationMemberRole.Member,
                                         JoinedAtMs = 1234567890
                                     })
-                                ]
-                            });
-                            break;
-                        }
+                                    ]
+                                });
+                                break;
+                            }
                         case PacketCommand.AddGroupMembersRequest:
-                        {
-                            var req = serializer.Deserialize<AddGroupMembersRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.AddGroupMembersResponse, new AddGroupMembersResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId,
-                                Members = req.MemberUserIds.Select(u => new ConversationMemberItemDto
+                                var req = serializer.Deserialize<AddGroupMembersRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.AddGroupMembersResponse, new AddGroupMembersResponseDto
                                 {
-                                    UserId = u,
-                                    Role = ConversationMemberRole.Member,
-                                    JoinedAtMs = 1234567890
-                                }).ToList()
-                            });
-                            break;
-                        }
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId,
+                                    Members = req.MemberUserIds.Select(u => new ConversationMemberItemDto
+                                    {
+                                        UserId = u,
+                                        Role = ConversationMemberRole.Member,
+                                        JoinedAtMs = 1234567890
+                                    }).ToList()
+                                });
+                                break;
+                            }
                         case PacketCommand.RemoveGroupMemberRequest:
-                        {
-                            var req = serializer.Deserialize<RemoveGroupMemberRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.RemoveGroupMemberResponse, new RemoveGroupMemberResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId
-                            });
-                            break;
-                        }
+                                var req = serializer.Deserialize<RemoveGroupMemberRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.RemoveGroupMemberResponse, new RemoveGroupMemberResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId
+                                });
+                                break;
+                            }
                         case PacketCommand.LeaveGroupRequest:
-                        {
-                            var req = serializer.Deserialize<LeaveGroupRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.LeaveGroupResponse, new LeaveGroupResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId
-                            });
-                            break;
-                        }
+                                var req = serializer.Deserialize<LeaveGroupRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.LeaveGroupResponse, new LeaveGroupResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId
+                                });
+                                break;
+                            }
                         case PacketCommand.ChangeMemberRoleRequest:
-                        {
-                            var req = serializer.Deserialize<ChangeMemberRoleRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.ChangeMemberRoleResponse, new ChangeMemberRoleResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId
-                            });
-                            break;
-                        }
+                                var req = serializer.Deserialize<ChangeMemberRoleRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.ChangeMemberRoleResponse, new ChangeMemberRoleResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId
+                                });
+                                break;
+                            }
                         case PacketCommand.ListGroupMembersRequest:
-                        {
-                            var req = serializer.Deserialize<ListGroupMembersRequestDto>(new ReadOnlySequence<byte>(body));
-                            if (req is null) return;
-                            Frames.Add((cmd, req.RequestId!));
-                            Inject(PacketCommand.ListGroupMembersResponse, new ListGroupMembersResponseDto
                             {
-                                RequestId = req.RequestId,
-                                Succeeded = true,
-                                ConversationId = req.ConversationId,
-                                Members =
-                                [
-                                    new ConversationMemberItemDto { UserId = OwnerId, Role = ConversationMemberRole.Owner, JoinedAtMs = 1234567890 },
+                                var req = serializer.Deserialize<ListGroupMembersRequestDto>(new ReadOnlySequence<byte>(body));
+                                if (req is null) return;
+                                Frames.Add((cmd, req.RequestId!));
+                                Inject(PacketCommand.ListGroupMembersResponse, new ListGroupMembersResponseDto
+                                {
+                                    RequestId = req.RequestId,
+                                    Succeeded = true,
+                                    ConversationId = req.ConversationId,
+                                    Members =
+                                    [
+                                        new ConversationMemberItemDto { UserId = OwnerId, Role = ConversationMemberRole.Owner, JoinedAtMs = 1234567890 },
                                     new ConversationMemberItemDto { UserId = MemberId, Role = ConversationMemberRole.Member, JoinedAtMs = 1234567890 },
                                     new ConversationMemberItemDto { UserId = MemberId2, Role = ConversationMemberRole.Member, JoinedAtMs = 1234567890 }
-                                ],
-                                HasMore = false
-                            });
-                            break;
-                        }
+                                    ],
+                                    HasMore = false
+                                });
+                                break;
+                            }
                     }
                 }
                 catch
