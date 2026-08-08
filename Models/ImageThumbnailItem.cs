@@ -12,6 +12,7 @@ namespace Chat_App.Models;
 public sealed class ImageThumbnailItem : INotifyPropertyChanged
 {
     private string? _thumbnailPath;
+    private string? _fullPath;
 
     public AttachmentRefDto Attachment { get; }
 
@@ -35,6 +36,19 @@ public sealed class ImageThumbnailItem : INotifyPropertyChanged
     }
 
     public bool HasThumbnail => !string.IsNullOrWhiteSpace(_thumbnailPath);
+
+    /// <summary>本地原图完整路径（下载缓存），点击缩略图大图预览时使用；未就绪为 null。</summary>
+    public string? FullPath
+    {
+        get => _fullPath;
+        set
+        {
+            if (_fullPath == value)
+                return;
+            _fullPath = value;
+            OnPropertyChanged();
+        }
+    }
 
     public string DisplayName => Attachment.DisplayName;
 

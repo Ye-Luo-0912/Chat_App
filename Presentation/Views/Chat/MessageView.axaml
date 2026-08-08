@@ -23,6 +23,7 @@
         <conv:LongToBoolConverter x:Key="LongToBool"/>
         <conv:MessageStatusMatchConverter x:Key="StatusMatch"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmap"/>
+        <conv:PathToBitmapConverter x:Key="PathToBitmapPreview" MaxCacheEntries="4"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -180,8 +181,8 @@
                                                             BorderThickness="0"
                                                             Cursor="Hand"
                                                             IsVisible="{Binding HasThumbnail}"
-                                                            Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
-                                                            CommandParameter="{Binding Attachment}">
+                                                            Command="{Binding #Root.((vm:MessageViewModel)DataContext).PreviewImageCommand}"
+                                                            CommandParameter="{Binding}">
                                                         <Border CornerRadius="8"
                                                                 ClipToBounds="True"
                                                                 BorderBrush="#E2E8F0"
@@ -382,5 +383,60 @@
                 </Grid>
             </StackPanel>
         </Border>
+
+        <!-- 大图预览弹层：居中浮层，点击外部/关闭按钮收起，保存复用下载→另存为链路 -->
+        <Popup IsOpen="{Binding IsPreviewOpen, Mode=TwoWay}"
+               IsLightDismissEnabled="True"
+               Placement="Center">
+            <Border Background="#F0000000"
+                    CornerRadius="12"
+                    BorderBrush="#334155"
+                    BorderThickness="1"
+                    Padding="16"
+                    MaxWidth="960"
+                    MaxHeight="720">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Top"
+                                Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                Spacing="8"
+                                Margin="0 0 0 10">
+                        <TextBlock Text="{Binding PreviewImageName}"
+                                   FontSize="12"
+                                   Foreground="#94A3B8"
+                                   VerticalAlignment="Center"
+                                   Margin="0 0 12 0"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxWidth="320"/>
+                        <Button Content="保存"
+                                Command="{Binding SavePreviewedImageCommand}"
+                                Padding="16 8"
+                                CornerRadius="8"
+                                Background="#3B82F6"
+                                Foreground="White"
+                                FontWeight="SemiBold"/>
+                        <Button Content="关闭"
+                                Command="{Binding ClosePreviewCommand}"
+                                Padding="16 8"
+                                CornerRadius="8"
+                                Background="#F3F4F6"
+                                Foreground="#111827"/>
+                    </StackPanel>
+                    <Grid DockPanel.Dock="Bottom">
+                        <Image Source="{Binding PreviewImagePath, Converter={StaticResource PathToBitmapPreview}}"
+                               Stretch="Uniform"
+                               MaxWidth="920"
+                               MaxHeight="620"
+                               IsVisible="{Binding HasPreviewImage}"/>
+                        <TextBlock Text="图片加载中…"
+                                   FontSize="13"
+                                   Foreground="#94A3B8"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   IsVisible="{Binding !HasPreviewImage}"/>
+                    </Grid>
+                </DockPanel>
+            </Border>
+        </Popup>
     </Grid>
 </UserControl>

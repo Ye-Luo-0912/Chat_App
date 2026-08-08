@@ -17,4 +17,19 @@ public static class PreviewText
         var s = content?.Trim() ?? string.Empty;
         return s.Length <= maxLen ? s : string.Concat(s.AsSpan(0, maxLen), Ellipsis);
     }
+
+    /// <summary>
+    /// 构建会话列表摘要：文本消息优先截断正文；空正文且有图片附件回退
+    /// <c>[图片]</c>，仅有其他附件回退 <c>[附件]</c>，否则空字符串。
+    /// </summary>
+    public static string ForMessage(string? content, bool hasImageAttachment, bool hasAttachment)
+    {
+        if (!string.IsNullOrWhiteSpace(content))
+            return Truncate(content, 100);
+        if (hasImageAttachment)
+            return "[图片]";
+        if (hasAttachment)
+            return "[附件]";
+        return string.Empty;
+    }
 }

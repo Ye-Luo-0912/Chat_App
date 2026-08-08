@@ -145,7 +145,10 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
                 ?? ResolveIncomingConversationType(conversationId),
             PeerUserId = ConversationId.TryGetPeerUserId(conversationId, owner),
             LastMessageId = message.MessageId,
-            LastMessagePreview = PreviewText.Truncate(content, 100),
+            LastMessagePreview = PreviewText.ForMessage(
+                content,
+                attachments.Any(a => AttachmentType.IsImage(a.ContentType)),
+                attachments.Count > 0),
             LastMessageAtMs = receivedAtMs,
             LastSenderUserId = dto.SenderUserId,
             // 发送方为自己时不递增未读；非自己时为增量 1（仅对未读消息生效，由事务内逻辑判定）。

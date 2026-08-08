@@ -207,6 +207,39 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly HashSet<string> _thumbnailsRequested = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _thumbnailGate = new(2, 2);
 
+    // 大图预览弹层状态：记录被预览的附件项，保存时直接复用下载/保存链路。
+    private ImageThumbnailItem? _previewedImage;
+    private string? _previewImagePath;
+    private bool _isPreviewOpen;
+
+    public bool IsPreviewOpen
+    {
+        get => _isPreviewOpen;
+        private set
+        {
+            if (SetProperty(ref _isPreviewOpen, value) && !value)
+            {
+                _previewedImage = null;
+                SavePreviewedImageCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    /// <summary>大图预览源：原图路径优先，未就绪回退缩略图；均为 null 时显示占位。</summary>
+    public string? PreviewImagePath
+    {
+        get => _previewImagePath;
+        private set
+        {
+            if (SetProperty(ref _previewImagePath, value))
+                OnPropertyChanged(nameof(HasPreviewImage));
+        }
+    }
+
+    public bool HasPreviewImage => !string.IsNullOrWhiteSpace(_previewImagePath);
+
+    public string? PreviewImageName => _previewedImage?.DisplayName;
+
     public AsyncRelayCommand SendMessageCommand { get; }
     public AsyncRelayCommand AttachFileCommand { get; }
     public AsyncRelayCommand CancelUploadCommand { get; }
@@ -222,6 +255,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public RelayCommand ShowFailureReasonCommand { get; }
     public AsyncRelayCommand<Message> DeleteFailedMessageCommand { get; }
     public AsyncRelayCommand<AttachmentRefDto> DownloadAttachmentCommand { get; }
+    public RelayCommand PreviewImageCommand { get; }
+    public RelayCommand ClosePreviewCommand { get; }
+    public AsyncRelayCommand SavePreviewedImageCommand { get; }
 
     /// <summary>由 ChatViewModel 注入：进入转发选好友模式。</summary>
     public Action<Message>? ForwardRequested { get; set; }
@@ -464,6 +500,36 @@ public class MessageViewModel : ViewModelBase, IDisposable
             {
                 Log.Error(ex, "附件下载失败");
                 _notificationService.ShowError($"附件下载失败: {ex.Message}");
+            });
+
+        // 大图预览：点击缩略图 → 弹层显示原图（未就绪回退缩略图/占位）。
+        PreviewImageCommand = new RelayCommand(param =>
+        {
+            if (param is not ImageThumbnailItem item)
+                return;
+            _previewedImage = item;
+            PreviewImagePath = item.FullPath ?? item.ThumbnailPath;
+            OnPropertyChanged(nameof(PreviewImageName));
+            IsPreviewOpen = true;
+        });
+
+        ClosePreviewCommand = new RelayCommand(_ => IsPreviewOpen = false);
+
+        // 弹层内保存原图：关闭弹层后复用下载→另存为链路。
+        SavePreviewedImageCommand = new AsyncRelayCommand(
+            async ct =>
+            {
+                var item = _previewedImage;
+                if (item is null)
+                    return;
+                IsPreviewOpen = false;
+                await DownloadAttachmentAsync(item.Attachment, ct).ConfigureAwait(true);
+            },
+            () => _previewedImage is not null,
+            ex =>
+            {
+                Log.Error(ex, "保存预览图片失败");
+                _notificationService.ShowError($"保存失败: {ex.Message}");
             });
 
         _chatSession.MessageRecalled += OnMessageRecalled;
@@ -1944,7 +2010,11 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 if (thumbnailPath is null)
                     return;
 
-                await Dispatcher.UIThread.InvokeAsync(() => item.ThumbnailPath = thumbnailPath);
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    item.FullPath = fullPath;
+                    item.ThumbnailPath = thumbnailPath;
+                });
             }
             finally
             {
@@ -2099,6 +2169,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = UnwatchPeerPresenceAsync(peerId);
 
         CancelConversationOperations();
+        IsPreviewOpen = false;
         CurrPeerId = 0;
         CurrConversationId = null;
         PeerTitle = string.Empty;
