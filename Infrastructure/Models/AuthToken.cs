@@ -9,6 +9,9 @@ namespace Chat_App.Infrastructure.Models
         public string RefreshToken { get; set; } = string.Empty;
         public DateTime RefreshTokenExpires { get; set; }
 
+        /// <summary>DPAPI-protected high-entropy credential bound to the refresh-token device.</summary>
+        public string? DeviceCredential { get; set; }
+
         /// <summary>登录会话唯一标识，对应服务端 Redis SessionRecord。</summary>
         public string? SessionId { get; set; }
 

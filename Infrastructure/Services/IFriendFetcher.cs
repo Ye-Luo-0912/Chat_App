@@ -1,4 +1,5 @@
 using Core.Contracts.Friends;
+using ChatApp.Contracts.Http.Friends;
 using System.Collections.Generic;
 using System.Threading;
 

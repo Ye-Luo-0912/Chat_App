@@ -1,4 +1,4 @@
-using Core.Contracts.Sessions;
+using ChatApp.Contracts.Http.Sessions;
 
 namespace Core.Interfaces;
 
@@ -9,7 +9,7 @@ namespace Core.Interfaces;
 public interface ISessionApiService
 {
     /// <summary>列出当前用户所有活跃会话（含设备名称、最后活跃时间等）。</summary>
-    Task<IReadOnlyList<SessionDeviceDto>> ListSessionsAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<SessionDevice>> ListSessionsAsync(CancellationToken ct = default);
 
     /// <summary>撤销指定设备对应的会话，使其令牌失效。</summary>
     /// <param name="deviceId">目标设备指纹（<see cref="ILocalDeviceIdentity.DeviceId"/>）。</param>

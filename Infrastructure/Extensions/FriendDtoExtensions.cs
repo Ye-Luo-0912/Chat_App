@@ -1,4 +1,5 @@
 using Core.Contracts.Friends;
+using ChatApp.Contracts.Http.Friends;
 using Chat_App.Infrastructure.Models;
 using System;
 using System.Collections.Generic;

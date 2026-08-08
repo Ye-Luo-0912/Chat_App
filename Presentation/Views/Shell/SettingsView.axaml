@@ -3,7 +3,6 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Shell"
-             xmlns:sessions="clr-namespace:Core.Contracts.Sessions;assembly=Core"
              mc:Ignorable="d"
              x:Class="Chat_App.Presentation.Views.Shell.SettingsView"
              x:DataType="vm:SettingsViewModel"
@@ -56,7 +55,7 @@
                          BorderThickness="0"
                          Background="Transparent">
                     <ListBox.ItemTemplate>
-                        <DataTemplate DataType="sessions:SessionDeviceDto">
+                        <DataTemplate DataType="vm:SessionDeviceListItem">
                             <Grid ColumnDefinitions="*,Auto" Margin="4 8">
                                 <StackPanel Spacing="2">
                                     <TextBlock Text="{Binding Title}"

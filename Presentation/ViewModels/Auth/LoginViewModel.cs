@@ -5,6 +5,7 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Contracts.Auth;
+using ChatApp.Contracts.Http.Auth;
 using Core.Interfaces;
 using Core.Models;
 using Chat_App.Infrastructure.Identity;
@@ -249,7 +250,7 @@ public class LoginViewModel : ViewModelBase
     }
 
     /// <summary>登录成功后的处理逻辑：全量保存服务端返回数据，并导航到主页。</summary>
-    private async Task CompleteLoginAsync(LoginResult loginResult)
+    private async Task CompleteLoginAsync(LoginResponse loginResult)
     {
         if (string.IsNullOrWhiteSpace(loginResult.AccessToken) || string.IsNullOrWhiteSpace(loginResult.RefreshToken))
             throw new InvalidOperationException("登录响应缺少令牌信息");
@@ -275,6 +276,7 @@ public class LoginViewModel : ViewModelBase
             RefreshTokenExpires = loginResult.RefreshTokenExpiresAtUtc,
             SessionId = loginResult.SessionId,
             DeviceIdHash = deviceIdHashDb,
+            DeviceCredential = loginResult.DeviceCredential,
         };
 
         var user = new LocalUser
@@ -286,7 +288,7 @@ public class LoginViewModel : ViewModelBase
             Signature = loginResult.Signature,
             Gender = loginResult.Gender,
             Region = loginResult.Region,
-            Status = loginResult.Status,
+            Status = (UserStatus)(byte)loginResult.Status,
             PreviousLoginDate = loginResult.PreviousLoginDate,
             LastLoginTime = loginResult.LoginAt.UtcDateTime,
         };
@@ -313,7 +315,7 @@ public class LoginViewModel : ViewModelBase
         {
             TokenValue = loginResult.AccessToken,
             TokenExpires = loginResult.AccessTokenExpiresAtUtc,
-        });
+        }, loginResult.DeviceCredential);
         _currentUserContext.SetCurrentUser(userId, loginResult.UserName);
 
         Password = string.Empty;

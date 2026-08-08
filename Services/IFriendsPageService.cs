@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Core.Contracts.Friends;
+using ChatApp.Contracts.Http.Friends;
 using Chat_App.Infrastructure.Models;
 
 namespace Chat_App.Services;

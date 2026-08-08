@@ -7,8 +7,18 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Text;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using TcpClientHello = ChatApp.Shared.Protocol.Tcp.ClientHello;
+using TcpGatewayFeature = ChatApp.Shared.Protocol.Tcp.GatewayFeature;
+using TcpGoAway = ChatApp.Shared.Protocol.Tcp.GoAway;
+using TcpProtocolErrorCode = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCode;
+using TcpProtocolErrorCodeExtensions = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCodeExtensions;
+using TcpProtocolErrorFrame = ChatApp.Shared.Protocol.Tcp.ProtocolErrorFrame;
+using TcpResumeResponse = ChatApp.Shared.Protocol.Tcp.ResumeResponse;
+using TcpServerHello = ChatApp.Shared.Protocol.Tcp.ServerHello;
+using TcpFrameConstants = ChatApp.Shared.Protocol.Tcp.TcpFrameConstants;
 
 namespace Core.Services
 {
@@ -18,6 +28,15 @@ namespace Core.Services
         private readonly IMessagePacketCodec _codec;
         private AuthRequestState? _authState;
         private readonly IPacketBodySerializer _bodySerializer;
+        private readonly string _installationId;
+        private readonly SemaphoreSlim _connectGate = new(1, 1);
+        private HandshakeState? _handshakeState;
+        private long _helloSentGeneration;
+        private long _handshakeGeneration;
+        private int _negotiatedProtocolVersion;
+        private uint _negotiatedFeatureBits;
+        private int _serverHeartbeatIntervalMs;
+        private int _serverMaxPayloadBytes;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationSetPrefsResponseDto>> _prefsPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageRecallAcknowledgementDto>> _recallPending = new(StringComparer.Ordinal);
@@ -49,10 +68,21 @@ namespace Core.Services
 
         // 请求超时（秒）—— 按业务类型分级
         private const int AuthTimeoutSec = 5;
+        private const int HandshakeTimeoutSec = 5;
         private const int DefaultRequestTimeoutSec = 8;
         private const int SyncBootstrapTimeoutSec = 12;
         private const int HistoryFetchTimeoutSec = 15;
         private const int ReceiptTimeoutSec = 10;
+
+        // 仅声明客户端已经实现并在本类公开 API 中使用的能力。暂不声明 SessionResume：
+        // 当前连接协调器仍固定执行完整鉴权，启用 Resume 前需先让它消费 ResumeResponse。
+        private const TcpGatewayFeature AdvertisedFeatures =
+            TcpGatewayFeature.CommandCapabilities |
+            TcpGatewayFeature.ConversationSync |
+            TcpGatewayFeature.ConversationPreferences |
+            TcpGatewayFeature.MessageMutation |
+            TcpGatewayFeature.PresenceAndTyping |
+            TcpGatewayFeature.GroupManagement;
 
         // 协议上限
         private const int MaxAttachmentsPerMessage = 32;
@@ -102,6 +132,20 @@ namespace Core.Services
 
         public Guid ConnectionId => _connectionId;
 
+        /// <summary>当前连接是否已收到并验证 ServerHello。</summary>
+        public bool HasCompletedHandshake =>
+            ConnectionGeneration != 0 &&
+            Volatile.Read(ref _handshakeGeneration) == ConnectionGeneration;
+
+        public ushort NegotiatedProtocolVersion =>
+            (ushort)Volatile.Read(ref _negotiatedProtocolVersion);
+
+        public uint NegotiatedFeatureBits => Volatile.Read(ref _negotiatedFeatureBits);
+
+        public int ServerHeartbeatIntervalMs => Volatile.Read(ref _serverHeartbeatIntervalMs);
+
+        public int ServerMaxPayloadBytes => Volatile.Read(ref _serverMaxPayloadBytes);
+
         /// <summary>
         /// 当前会话戳：未鉴权或已断开时为 SessionStamp.None。
         /// </summary>
@@ -137,13 +181,46 @@ namespace Core.Services
         public event EventHandler<ConversationDissolvedUpdateDto>? GroupConversationDissolved;
 
         public ChatSessionClient(ITcpClient tcpClient, IMessagePacketCodec codec, IPacketBodySerializer bodySerializer)
+            : this(tcpClient, codec, bodySerializer, Guid.NewGuid().ToString("N"))
+        {
+        }
+
+        /// <summary>
+        /// 使用本机持久化设备标识派生稳定的协议 InstallationId。
+        /// 保留三参数构造函数供现有测试与手工调用使用；依赖注入会优先选择此重载。
+        /// </summary>
+        public ChatSessionClient(
+            ITcpClient tcpClient,
+            IMessagePacketCodec codec,
+            IPacketBodySerializer bodySerializer,
+            ILocalDeviceIdentity deviceIdentity)
+            : this(tcpClient, codec, bodySerializer, DeriveInstallationId(deviceIdentity))
+        {
+        }
+
+        private ChatSessionClient(
+            ITcpClient tcpClient,
+            IMessagePacketCodec codec,
+            IPacketBodySerializer bodySerializer,
+            string installationId)
         {
             _tcpClient = tcpClient;
             _codec = codec;
             _bodySerializer = bodySerializer;
+            _installationId = installationId;
 
             _tcpClient.ConnectionStatusChanged += OnConnectionStatusChanged;
             _tcpClient.OnDataChunkReceived += OnDataChunkReceived;
+        }
+
+        private static string DeriveInstallationId(ILocalDeviceIdentity deviceIdentity)
+        {
+            ArgumentNullException.ThrowIfNull(deviceIdentity);
+            if (string.IsNullOrWhiteSpace(deviceIdentity.DeviceId))
+                throw new ArgumentException("本机设备标识不能为空", nameof(deviceIdentity));
+
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(deviceIdentity.DeviceId));
+            return Convert.ToHexString(hash.AsSpan(0, 16)).ToLowerInvariant();
         }
 
         /// <summary>
@@ -184,12 +261,18 @@ namespace Core.Services
             {
                 Interlocked.Increment(ref _disconnects);
                 IsAuthenticated = false;
+                Volatile.Write(ref _helloSentGeneration, 0);
+                Volatile.Write(ref _handshakeGeneration, 0);
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
+                var generation = Volatile.Read(ref _connectionGeneration);
+                var handshakeState = Volatile.Read(ref _handshakeState);
+                if (handshakeState is not null && handshakeState.Generation == generation)
+                    handshakeState.Tcs.TrySetException(new IOException(e.Reason ?? "连接已断开"));
                 // 鉴权中的请求必须显式结束，否则等待方只能靠超时兜底。
                 // 仅当前代际的鉴权请求会被失败：旧连接的断线事件不得误杀新连接的鉴权。
                 var authState = Volatile.Read(ref _authState);
                 if (authState is not null
-                    && authState.Generation == Volatile.Read(ref _connectionGeneration))
+                    && authState.Generation == generation)
                 {
                     authState.Tcs.TrySetException(new IOException(e.Reason ?? "连接已断开"));
                 }
@@ -202,6 +285,14 @@ namespace Core.Services
         {
             if (!IsConnected)
                 throw new InvalidOperationException("TCP 尚未连接！");
+
+            var currentGeneration = Volatile.Read(ref _connectionGeneration);
+            if (Volatile.Read(ref _handshakeGeneration) != currentGeneration)
+                throw new InvalidOperationException("TCP 协议握手尚未完成，不能发送鉴权请求");
+
+            // 为未来 Resume 路径保留幂等语义：若握手已恢复同一用户，不再重复鉴权。
+            if (IsAuthenticated && CurrentUserId == userId)
+                return;
 
             // 鉴权请求状态对象：记录代际，供响应/断线按代际关联，杜绝跨连接误配。
             var state = new AuthRequestState
@@ -223,7 +314,7 @@ namespace Core.Services
 
             try
             {
-                await SendPacketAsync(PacketCommand.AuthRequest, authRequest, ct).ConfigureAwait(false);
+                await SendPacketAsync(PacketCommand.AuthenticationRequest, authRequest, ct).ConfigureAwait(false);
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(ScaleTimeout(TimeSpan.FromSeconds(AuthTimeoutSec)));
@@ -253,13 +344,87 @@ namespace Core.Services
 
         public async Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default)
         {
-            // 在连接到服务器之前，重置消息包解码器的状态，以确保之前的任何未完成的消息包都被清除掉，避免对新的连接造成干扰。
-            _codec.Reset();
-            // 连接到服务器后，ChatSessionClient 将等待服务器发送认证结果消息，以确定认证是否成功，并根据认证结果更新状态和触发相应的事件通知外部订阅者。
-            await _tcpClient.ConnectAsync(endpoint, ct);
-            // 新连接代际：后续事件以此代际校验 SessionStamp。
-            Interlocked.Increment(ref _connectionGeneration);
-            _connectionId = Guid.NewGuid();
+            await _connectGate.WaitAsync(ct).ConfigureAwait(false);
+            HandshakeState? state = null;
+            try
+            {
+                // 整个 TCP 建连 + 协议握手串行化，避免并发重连覆盖代次或让旧握手完成新连接。
+                _codec.Reset();
+                await _tcpClient.ConnectAsync(endpoint, ct).ConfigureAwait(false);
+
+                var generation = Interlocked.Increment(ref _connectionGeneration);
+                _connectionId = Guid.NewGuid();
+                state = new HandshakeState
+                {
+                    Generation = generation,
+                    Tcs = new TaskCompletionSource<TcpServerHello>(TaskCreationOptions.RunContinuationsAsynchronously)
+                };
+                var previousState = Interlocked.Exchange(ref _handshakeState, state);
+                previousState?.Tcs.TrySetException(new IOException("连接已被新的握手替换"));
+
+                Volatile.Write(ref _helloSentGeneration, 0);
+                Volatile.Write(ref _handshakeGeneration, 0);
+                Volatile.Write(ref _negotiatedProtocolVersion, 0);
+                Volatile.Write(ref _negotiatedFeatureBits, 0);
+                Volatile.Write(ref _serverHeartbeatIntervalMs, 0);
+                Volatile.Write(ref _serverMaxPayloadBytes, 0);
+
+                var hello = new TcpClientHello
+                {
+                    ProtocolVersion = TcpFrameConstants.CurrentProtocolVersion,
+                    FeatureBits = (uint)AdvertisedFeatures,
+                    InstallationId = _installationId,
+                    ClientTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ResumeToken = null,
+                    MaxPayloadBytes = MessagePacket.MaxBodySize
+                };
+
+                // 先发布本代次握手已发起状态，兼容测试/回环服务端在 SendAsync 内同步回包。
+                Volatile.Write(ref _helloSentGeneration, generation);
+                await SendPacketAsync(PacketCommand.ClientHello, hello, ct, priority: true)
+                    .ConfigureAwait(false);
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(ScaleTimeout(TimeSpan.FromSeconds(HandshakeTimeoutSec)));
+                try
+                {
+                    await state.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    await DisconnectAfterFailedHandshakeAsync("TCP 协议握手已取消").ConfigureAwait(false);
+                    throw;
+                }
+                catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+                {
+                    await DisconnectAfterFailedHandshakeAsync("等待 ServerHello 超时").ConfigureAwait(false);
+                    throw new TimeoutException("TCP 协议握手超时，服务器未返回 ServerHello");
+                }
+            }
+            catch
+            {
+                if (_tcpClient.IsConnected)
+                    await DisconnectAfterFailedHandshakeAsync("TCP 协议握手失败").ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                if (state is not null)
+                    Interlocked.CompareExchange(ref _handshakeState, null, state);
+                _connectGate.Release();
+            }
+        }
+
+        private async Task DisconnectAfterFailedHandshakeAsync(string reason)
+        {
+            try
+            {
+                await _tcpClient.DisconnectAsync(reason, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"握手失败后断开连接失败: {ex.Message}");
+            }
         }
 
 
@@ -273,13 +438,19 @@ namespace Core.Services
         {
             IsAuthenticated = false;
             CurrentUserId = 0;
+            Volatile.Write(ref _helloSentGeneration, 0);
+            Volatile.Write(ref _handshakeGeneration, 0);
             Interlocked.Exchange(ref _lastHeartbeatAckTicks, 0);
+            var handshakeState = Volatile.Read(ref _handshakeState);
+            handshakeState?.Tcs.TrySetException(new IOException(reason ?? "连接已断开"));
             // 真正等待收发循环退出后再返回。
             await _tcpClient.DisconnectAsync(reason, ct).ConfigureAwait(false);
         }
 
         public void Dispose()
         {
+            Volatile.Read(ref _handshakeState)?.Tcs.TrySetException(
+                new ObjectDisposedException(nameof(ChatSessionClient)));
             _tcpClient.OnDataChunkReceived -= OnDataChunkReceived;
             _tcpClient.ConnectionStatusChanged -= OnConnectionStatusChanged;
             _tcpClient.Dispose();
@@ -818,11 +989,17 @@ namespace Core.Services
             => userIds.Where(static id => id > 0).Distinct().Take(MaxPresenceIdsPerRequest).ToArray();
 
         /// <summary>将所有 pending 请求以异常失败并清空字典（连接断开时批量回收）。</summary>
-        private static void FailAll<T>(ConcurrentDictionary<string, TaskCompletionSource<T>> dict, Exception ex)
+        private static bool FailAll<T>(ConcurrentDictionary<string, TaskCompletionSource<T>> dict, Exception ex)
         {
+            var failedAny = false;
             foreach (var pair in dict)
-                pair.Value.TrySetException(ex);
-            dict.Clear();
+            {
+                if (!dict.TryRemove(pair.Key, out var tcs))
+                    continue;
+                tcs.TrySetException(ex);
+                failedAny = true;
+            }
+            return failedAny;
         }
 
         private void FailPendingRequests(Exception ex)
@@ -907,7 +1084,16 @@ namespace Core.Services
             Interlocked.Increment(ref _packetsReceived);
             switch (packet.Command)
             {
-                case PacketCommand.AuthResponse:
+                case PacketCommand.ServerHello:
+                    HandleServerHello(_bodySerializer.Deserialize<TcpServerHello>(packet.Body));
+                    return;
+                case PacketCommand.GoAway:
+                    HandleGoAway(_bodySerializer.Deserialize<TcpGoAway>(packet.Body));
+                    return;
+                case PacketCommand.ResumeResponse:
+                    HandleResumeResponse(_bodySerializer.Deserialize<TcpResumeResponse>(packet.Body));
+                    return;
+                case PacketCommand.AuthenticationResponse:
                     var response = _bodySerializer.Deserialize<AuthResponseDto>(packet.Body);
                     HandleAuthResponse(response);
                     return;
@@ -997,13 +1183,13 @@ namespace Core.Services
                     return;
                 case PacketCommand.Heartbeat:
                     return;
-                case PacketCommand.HeartbeatAck:
+                case PacketCommand.HeartbeatAcknowledgement:
                     Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
                     var sentTicks = Interlocked.Exchange(ref _lastHeartbeatSentTicks, 0);
                     if (sentTicks > 0)
                         _heartbeatRtt.Add(TimeSpan.FromTicks(DateTime.UtcNow.Ticks - sentTicks));
                     return;
-                case PacketCommand.MessageAck:
+                case PacketCommand.MessageAcknowledgement:
                     var ack = _bodySerializer.Deserialize<MessageAcknowledgementDto>(packet.Body);
                     if (ack is not null)
                         MessageAcknowledged?.Invoke(this, ack);
@@ -1013,7 +1199,7 @@ namespace Core.Services
                     if (receipt is not null)
                         MessageReceiptReceived?.Invoke(this, receipt);
                     return;
-                case PacketCommand.MessageReceiptAck:
+                case PacketCommand.MessageReceiptAcknowledgement:
                     var receiptAck = _bodySerializer.Deserialize<MessageReceiptAckDto>(packet.Body);
                     if (receiptAck is not null
                         && !string.IsNullOrWhiteSpace(receiptAck.RequestId)
@@ -1144,16 +1330,128 @@ namespace Core.Services
             }
         }
 
+        private void HandleServerHello(TcpServerHello? hello)
+        {
+            var generation = Volatile.Read(ref _connectionGeneration);
+            var state = Volatile.Read(ref _handshakeState);
+            // 只接受当前 ConnectAsync 发起且尚未完成的握手响应；迟到或重复响应不得污染新连接。
+            if (state is null ||
+                state.Generation != generation ||
+                Volatile.Read(ref _helloSentGeneration) != generation)
+            {
+                return;
+            }
+
+            if (hello is null ||
+                hello.ProtocolVersion != TcpFrameConstants.CurrentProtocolVersion ||
+                !string.Equals(hello.PayloadFormat, "json", StringComparison.Ordinal) ||
+                hello.MaxPayloadBytes <= 0 ||
+                (hello.FeatureBits & ~(uint)AdvertisedFeatures) != 0)
+            {
+                var error = new ProtocolErrorDto
+                {
+                    Command = PacketCommand.ServerHello,
+                    ErrorCode = TcpProtocolErrorCode.UnsupportedVersion.ToString(),
+                    ErrorMessage = "服务器返回了不受支持的 TCP 握手参数",
+                    IsFatal = true
+                };
+                ProtocolError?.Invoke(this, error);
+                state.Tcs.TrySetException(new ProtocolRequestException(error));
+                _ = DisconnectAsync(error.ErrorMessage, CancellationToken.None);
+                return;
+            }
+
+            Volatile.Write(ref _negotiatedProtocolVersion, hello.ProtocolVersion);
+            Volatile.Write(ref _negotiatedFeatureBits, hello.FeatureBits);
+            Volatile.Write(ref _serverHeartbeatIntervalMs, hello.HeartbeatIntervalMs);
+            Volatile.Write(ref _serverMaxPayloadBytes, hello.MaxPayloadBytes);
+            Volatile.Write(ref _handshakeGeneration, generation);
+            state.Tcs.TrySetResult(hello);
+        }
+
+        private void HandleGoAway(TcpGoAway? goAway)
+        {
+            var reason = string.IsNullOrWhiteSpace(goAway?.Reason)
+                ? "服务器正在排空连接"
+                : $"服务器正在排空连接: {goAway.Reason}";
+            var error = new ProtocolErrorDto
+            {
+                Command = PacketCommand.GoAway,
+                ErrorCode = TcpProtocolErrorCode.Shutdown.ToString(),
+                ErrorMessage = reason,
+                IsFatal = false,
+                RetryAfterMs = goAway?.RetryAfterMs
+            };
+            ProtocolError?.Invoke(this, error);
+
+            var authState = Volatile.Read(ref _authState);
+            authState?.Tcs.TrySetException(new IOException(reason));
+            _ = DisconnectAsync(reason, CancellationToken.None);
+        }
+
+        private void HandleResumeResponse(TcpResumeResponse? response)
+        {
+            // 本客户端尚未声明 SessionResume，也从未发送 ResumeRequest。
+            // 任何 ResumeResponse 都是未请求的状态推进尝试，必须按协议违规关闭连接。
+            var error = new ProtocolErrorDto
+            {
+                Command = PacketCommand.ResumeResponse,
+                ErrorCode = TcpProtocolErrorCode.ProtocolViolation.ToString(),
+                ErrorMessage = "收到未请求的 ResumeResponse",
+                IsFatal = true,
+                RetryAfterMs = response?.RetryAfterMs
+            };
+            ProtocolError?.Invoke(this, error);
+
+            var exception = new ProtocolRequestException(error);
+            Volatile.Read(ref _handshakeState)?.Tcs.TrySetException(exception);
+            Volatile.Read(ref _authState)?.Tcs.TrySetException(exception);
+            _ = DisconnectAsync(error.ErrorMessage, CancellationToken.None);
+        }
+
         /// <summary>
-        /// 处理服务器 Error 命令：优先按 ProtocolErrorDto 反序列化，
+        /// 处理服务器 Error 命令：优先按共享 ProtocolErrorFrame 反序列化，
         /// 兼容旧格式（ErrorResponseDto / 裸 UTF-8 文本）。
-        /// 有 RequestId 时完成对应在途请求；鉴权阶段直接结束鉴权；
+        /// 有 RequestId 时精确完成对应请求；canonical 错误按 OriginCommand 结束同类在途请求；
         /// IsFatal 才触发 AuthenticationFailed，普通业务错误仅发布 ProtocolError 事件。
         /// </summary>
         private void HandleErrorCommand(ReadOnlySequence<byte> body)
         {
             ProtocolErrorDto? error = null;
-            try { error = _bodySerializer.Deserialize<ProtocolErrorDto>(body); } catch { /* 非结构化错误体 */ }
+
+            // Gateway 当前格式。旧错误 DTO 即使字段完全不匹配也可能被 STJ 构造为空对象，
+            // 因此必须先识别 canonical frame，再进入兼容路径。
+            TcpProtocolErrorFrame? frame = null;
+            try { frame = _bodySerializer.Deserialize<TcpProtocolErrorFrame>(body); } catch { /* 非结构化错误体 */ }
+            if (frame is not null && frame.Code != TcpProtocolErrorCode.None)
+            {
+                error = new ProtocolErrorDto
+                {
+                    RequestId = null,
+                    Command = frame.OriginCommand is { } origin
+                        ? (PacketCommand)origin
+                        : null,
+                    ErrorCode = frame.Code.ToString(),
+                    ErrorMessage = frame.Message,
+                    IsFatal = frame.Fatal || TcpProtocolErrorCodeExtensions.IsFatal(frame.Code),
+                    RetryAfterMs = frame.RetryAfterMs
+                };
+            }
+
+            if (error is null)
+            {
+                try { error = _bodySerializer.Deserialize<ProtocolErrorDto>(body); } catch { /* 非结构化错误体 */ }
+                if (error is not null &&
+                    string.IsNullOrWhiteSpace(error.RequestId) &&
+                    error.Command is null &&
+                    string.IsNullOrWhiteSpace(error.ErrorCode) &&
+                    string.IsNullOrWhiteSpace(error.ErrorMessage) &&
+                    !error.IsFatal &&
+                    !error.RetryAfterMs.HasValue)
+                {
+                    error = null;
+                }
+            }
 
             if (error is null)
             {
@@ -1173,7 +1471,7 @@ namespace Core.Services
             }
 
             // 关联在途请求：完成对应 TCS，调用方自行处理，不弹全局错误。
-            if (FailByRequestId(error))
+            if (FailByRequestId(error) || FailByOriginCommand(error))
                 return;
 
             // 鉴权阶段：仅连接级/致命错误显式结束鉴权。
@@ -1249,6 +1547,37 @@ namespace Core.Services
         }
 
         /// <summary>
+        /// canonical Error 不携带 RequestId。按 OriginCommand 失败该命令的全部在途请求，
+        /// 避免能力拒绝、限流等明确错误退化为客户端超时。
+        /// </summary>
+        private bool FailByOriginCommand(ProtocolErrorDto error)
+        {
+            if (error.Command is not { } command)
+                return false;
+
+            var exception = new ProtocolRequestException(error);
+            return command switch
+            {
+                PacketCommand.ConversationListRequest => FailAll(_listPending, exception),
+                PacketCommand.ConversationSetPrefsRequest => FailAll(_prefsPending, exception),
+                PacketCommand.MessageRecallRequest => FailAll(_recallPending, exception),
+                PacketCommand.MessageEditRequest => FailAll(_editPending, exception),
+                PacketCommand.SyncBootstrapRequest => FailAll(_syncPending, exception),
+                PacketCommand.PresenceQuery => FailAll(_presencePending, exception),
+                PacketCommand.MessageHistoryRequest => FailAll(_historyPending, exception),
+                PacketCommand.MessageReceipt => FailAll(_receiptPending, exception),
+                PacketCommand.ConversationMarkReadRequest => FailAll(_markReadPending, exception),
+                PacketCommand.CreateGroupRequest => FailAll(_createGroupPending, exception),
+                PacketCommand.AddGroupMembersRequest => FailAll(_addGroupMembersPending, exception),
+                PacketCommand.RemoveGroupMemberRequest => FailAll(_removeGroupMemberPending, exception),
+                PacketCommand.LeaveGroupRequest => FailAll(_leaveGroupPending, exception),
+                PacketCommand.ChangeMemberRoleRequest => FailAll(_changeRolePending, exception),
+                PacketCommand.ListGroupMembersRequest => FailAll(_listGroupMembersPending, exception),
+                _ => false
+            };
+        }
+
+        /// <summary>
         /// HandleAuthResponse 方法负责处理服务器返回的认证响应消息。
         /// 按代际关联在途鉴权请求：迟到/串线的响应不得更新状态或触发事件。
         /// </summary>
@@ -1299,6 +1628,13 @@ namespace Core.Services
         {
             public required long Generation { get; init; }
             public required TaskCompletionSource<AuthResponseDto> Tcs { get; init; }
+        }
+
+        /// <summary>一次 ConnectAsync 对应的 ServerHello 等待状态。</summary>
+        private sealed class HandshakeState
+        {
+            public required long Generation { get; init; }
+            public required TaskCompletionSource<TcpServerHello> Tcs { get; init; }
         }
 
         public string Name => "network";

@@ -6,6 +6,7 @@ using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Services;
 using Core.Contracts.Attachments;
+using ChatApp.Contracts.Http.Attachments;
 using Core.Interfaces;
 using Core.Models;
 using Core.Services;
@@ -282,13 +283,13 @@ public class AttachmentResumeDownloadTests : IDisposable
             IsPartialContent = false
         };
 
-        public Task<AttachmentPresignResponseDto> PresignAsync(AttachmentPresignRequestDto request, CancellationToken ct = default)
+        public Task<AttachmentPresignResponse> PresignAsync(AttachmentPresignRequest request, CancellationToken ct = default)
             => throw new NotImplementedException();
 
-        public Task UploadAsync(AttachmentPresignResponseDto ticket, Stream content, string contentType, long contentLength, IProgress<AttachmentUploadProgress>? progress = null, CancellationToken ct = default)
+        public Task UploadAsync(AttachmentPresignResponse ticket, Stream content, string contentType, long contentLength, IProgress<AttachmentUploadProgress>? progress = null, CancellationToken ct = default)
             => throw new NotImplementedException();
 
-        public Task<ConfirmAttachmentResponseDto> ConfirmAsync(ConfirmAttachmentRequestDto request, CancellationToken ct = default)
+        public Task<ConfirmAttachmentResponse> ConfirmAsync(ConfirmAttachmentRequest request, CancellationToken ct = default)
             => throw new NotImplementedException();
 
         public Task<AttachmentUploadResult> UploadAndConfirmAsync(Stream content, string contentType, long contentLength, string? originalName = null, string? clientAttachmentId = null, IProgress<AttachmentUploadProgress>? progress = null, int maxAttempts = 3, string? sha256 = null, CancellationToken ct = default)

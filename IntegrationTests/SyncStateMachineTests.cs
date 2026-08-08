@@ -674,9 +674,9 @@ public class SyncStateMachineTests : IDisposable
     {
         tcp.OnFrameSent += (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = success, UserId = userId });
             }
         };
@@ -723,6 +723,8 @@ public class SyncStateMachineTests : IDisposable
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
 

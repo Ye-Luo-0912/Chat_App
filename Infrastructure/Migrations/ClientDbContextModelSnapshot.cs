@@ -33,6 +33,9 @@ namespace Chat_App.Infrastructure.Migrations
                     b.Property<long?>("DeviceIdHash")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("DeviceCredential")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("RefreshToken")
                         .IsRequired()
                         .HasColumnType("TEXT");

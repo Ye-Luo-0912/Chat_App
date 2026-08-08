@@ -13,5 +13,13 @@ namespace Core.Models.DTO
         public long? UserId { get; set; }
 
         public string? ErrorMessage { get; set; }
+
+        public string? SessionId { get; set; }
+
+        public ulong? DeviceIdHash { get; set; }
+
+        public string? DeviceId { get; set; }
+
+        public string? ResumeToken { get; set; }
     }
 }

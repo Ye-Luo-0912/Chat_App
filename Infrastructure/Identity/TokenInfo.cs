@@ -16,6 +16,7 @@ namespace Chat_App.Infrastructure.Identity;
 public class TokenInfo
 {
     private Token? _token;
+    private string? _deviceCredential;
 
     private readonly IDatabaseService _databaseService;
     private readonly IAuthClientService _loginService;
@@ -61,6 +62,7 @@ public class TokenInfo
             TokenValue = authToken.AccessToken,
             TokenExpires = authToken.AccessTokenExpires
         };
+        _deviceCredential = authToken.DeviceCredential;
 
         // 从本地用户表还原用户状态，无需 JWT 解析
         var localUser = await _databaseService.GetUserAsync(authToken.UserId).ConfigureAwait(false);
@@ -79,9 +81,10 @@ public class TokenInfo
     /// 登录成功后由外部直接设置内存中的 Token（LoginResult 中的数据已经完整）。
     /// 同时开启新的会话生命周期令牌（旧令牌已被 ClearLocalSessionAsync 取消）。
     /// </summary>
-    public void SetToken(Token token)
+    public void SetToken(Token token, string? deviceCredential = null)
     {
         _token = token;
+        _deviceCredential = deviceCredential;
         lock (_refreshGate)
         {
             _sessionLifetimeCts = new CancellationTokenSource();
@@ -89,6 +92,7 @@ public class TokenInfo
     }
 
     public Token? Token => _token;
+    public string? DeviceCredential => _deviceCredential;
 
     /// <summary>
     /// 严格 single-flight 刷新：并发调用共享同一轮刷新任务。
@@ -136,12 +140,19 @@ public class TokenInfo
                 return false;
             }
 
-            var result = await _loginService.RefreshTokenAsync(stored.RefreshToken, stored.UserId, ct)
+            var result = await _loginService.RefreshTokenAsync(
+                    stored.RefreshToken,
+                    stored.UserId,
+                    stored.DeviceCredential,
+                    ct)
                 .ConfigureAwait(false);
 
             if (!result.IsSuccess
                 || string.IsNullOrWhiteSpace(result.AccessToken)
-                || string.IsNullOrWhiteSpace(result.RefreshToken))
+                || string.IsNullOrWhiteSpace(result.RefreshToken)
+                || string.IsNullOrWhiteSpace(result.DeviceCredential)
+                || result.AccessTokenExpiresAtUtc <= DateTime.UtcNow
+                || result.RefreshTokenExpiresAtUtc <= DateTime.UtcNow)
             {
                 Log.Warning("刷新令牌响应无效，会话失效");
                 await ClearTokensAsync();
@@ -158,6 +169,7 @@ public class TokenInfo
                 // SessionId / DeviceIdHash 不随刷新改变，保留原值
                 SessionId = stored.SessionId,
                 DeviceIdHash = stored.DeviceIdHash,
+                DeviceCredential = result.DeviceCredential,
             };
 
             await _databaseService.UpdateTokenAsync(newToken).ConfigureAwait(false);
@@ -167,6 +179,7 @@ public class TokenInfo
                 TokenValue = newToken.AccessToken,
                 TokenExpires = newToken.AccessTokenExpires
             };
+            _deviceCredential = newToken.DeviceCredential;
 
             // 用户信息不随 token 刷新变化，无需重新加载
             if (!_currentUserState.IsAuthenticated && stored.UserId > 0)
@@ -205,6 +218,7 @@ public class TokenInfo
             _sessionLifetimeCts = new CancellationTokenSource();
         }
         _token = null;
+        _deviceCredential = null;
         _currentUserState.Clear();
         await _databaseService.DeleteTokenAsync().ConfigureAwait(false);
     }

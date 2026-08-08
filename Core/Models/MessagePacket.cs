@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using ChatApp.Shared.Protocol.Tcp;
 
 namespace Core.Models
 {
@@ -14,13 +15,13 @@ namespace Core.Models
     public readonly struct MessagePacket
     {
         #region 字段定义
-        public const int CommandOffset = sizeof(uint);
-        public const int LengthOffset = sizeof(uint) + sizeof(ushort);
+        public const int CommandOffset = TcpFrameConstants.CommandOffset;
+        public const int LengthOffset = TcpFrameConstants.LengthOffset;
 
         /// <summary>
         /// 数据包魔数 (0x1A2B3C4D)
         /// </summary>
-        public const uint MagicNumber = 0x1A2B3C4D;
+        public const uint MagicNumber = TcpFrameConstants.MagicNumber;
 
         /// <summary>
         /// 帧头魔数字节序列（MagicNumber 的小端字节序表示），用于坏包重新同步时按字节搜索。
@@ -35,7 +36,7 @@ namespace Core.Models
         /// <summary>
         /// 包头总长度 (4字节魔数 + 2字节指令 + 4字节长度 = 10 字节)
         /// </summary>
-        public const int HeaderSize = sizeof(uint) + sizeof(ushort) + sizeof(int);
+        public const int HeaderSize = TcpFrameConstants.HeaderSize;
 
         /// <summary>
         /// 业务指令类型
@@ -162,7 +163,7 @@ namespace Core.Models
                 return false;
 
             // 读出实际应该有的包体长度
-            var bodyLength = BinaryPrimitives.ReadInt32LittleEndian(headerSpan[6..]);
+            var bodyLength = BinaryPrimitives.ReadInt32LittleEndian(headerSpan[LengthOffset..]);
 
             // 包体长度异常，可能是恶意攻击或者数据损坏
             if (bodyLength < 0 || bodyLength > MaxBodySize)

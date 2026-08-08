@@ -130,7 +130,7 @@ public class GroupMessagePipelineTests : IDisposable
                 return;
             lock (sentLock)
                 sent = dto;
-            InjectPacket(tcp, serializer, PacketCommand.MessageAck, new MessageAcknowledgementDto
+            InjectPacket(tcp, serializer, PacketCommand.MessageAcknowledgement, new MessageAcknowledgementDto
             {
                 ClientMessageId = dto.MessageId,
                 CommandId = $"svr-{clientId}",
@@ -210,7 +210,7 @@ public class GroupMessagePipelineTests : IDisposable
                 return;
             lock (sentLock)
                 sent = dto;
-            InjectPacket(tcp, serializer, PacketCommand.MessageAck, new MessageAcknowledgementDto
+            InjectPacket(tcp, serializer, PacketCommand.MessageAcknowledgement, new MessageAcknowledgementDto
             {
                 ClientMessageId = dto.MessageId,
                 CommandId = $"svr-{clientId}",
@@ -385,9 +385,9 @@ public class GroupMessagePipelineTests : IDisposable
     {
         tcp.OnFrameSent += (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = true, UserId = userId });
             }
         };
@@ -417,6 +417,8 @@ public class GroupMessagePipelineTests : IDisposable
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
             return Task.CompletedTask;

@@ -31,6 +31,7 @@ public class ReconnectionStressTests
 
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
         public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
+        public bool AutoReplyServerHello { get; set; } = true;
 
         /// <summary>每次发送一帧后触发（command, bodyBytes）。</summary>
         public event Action<PacketCommand, ReadOnlyMemory<byte>>? OnFrameSent;
@@ -50,6 +51,8 @@ public class ReconnectionStressTests
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello && AutoReplyServerHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
             return Task.CompletedTask;
@@ -104,14 +107,36 @@ public class ReconnectionStressTests
     {
         Action<PacketCommand, ReadOnlyMemory<byte>> handler = (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = success, UserId = userId });
             }
         };
         tcp.OnFrameSent += handler;
         return handler;
+    }
+
+    [Fact]
+    public async Task Handshake_Timeout_Disconnects_AndDoesNotPublishCompletedState()
+    {
+        using var tcp = new ScriptedTcpClient { AutoReplyServerHello = false };
+        using var session = new ChatSessionClient(
+            tcp, new MessagePacketCodec(), new JsonPacketBodySerializer())
+        {
+            RequestTimeoutScale = 0.01 // 5s -> 50ms
+        };
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+            session.ConnectAsync(new ServerEndpoint
+            {
+                ServerIpAddress = "127.0.0.1",
+                ServerPort = 7000
+            }));
+
+        Assert.Contains("ServerHello", exception.Message, StringComparison.Ordinal);
+        Assert.False(tcp.IsConnected);
+        Assert.False(session.HasCompletedHandshake);
     }
 
     /// <summary>
@@ -180,7 +205,7 @@ public class ReconnectionStressTests
         tcp.InjectData(new byte[] { 0xFF, 0xEE, 0xDD, 0xCC, 0x01, 0x02, 0x03, 0x04 });
 
         // 注入合法的 HeartbeatAck
-        InjectPacket<object?>(tcp, serializer, PacketCommand.HeartbeatAck, null);
+        InjectPacket<object?>(tcp, serializer, PacketCommand.HeartbeatAcknowledgement, null);
 
         // 注入合法的 ChatMessage
         ChatMessageDto? received = null;

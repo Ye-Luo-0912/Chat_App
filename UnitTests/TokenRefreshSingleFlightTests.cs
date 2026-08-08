@@ -3,6 +3,7 @@ using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Services;
+using ChatApp.Contracts.Http.Auth;
 using Core.Contracts.Auth;
 using Core.Models;
 using Microsoft.Data.Sqlite;
@@ -23,21 +24,29 @@ public class TokenRefreshSingleFlightTests
     private sealed class CountingAuthClient : IAuthClientService
     {
         public int RefreshCalls;
-        public Task<LoginResult> RefreshTokenAsync(string refreshToken, long userId, CancellationToken ct = default)
+        public string? ReceivedDeviceCredential { get; private set; }
+
+        public Task<RefreshTokenResponse> RefreshTokenAsync(
+            string refreshToken,
+            long userId,
+            string? deviceCredential,
+            CancellationToken ct = default)
         {
             Interlocked.Increment(ref RefreshCalls);
+            ReceivedDeviceCredential = deviceCredential;
             // 模拟网络延迟，放大并发窗口
-            return Task.Delay(50, ct).ContinueWith(_ => new LoginResult
+            return Task.Delay(50, ct).ContinueWith(_ => new RefreshTokenResponse
             {
                 IsSuccess = true,
                 AccessToken = $"access-{RefreshCalls}",
                 AccessTokenExpiresAtUtc = DateTime.UtcNow.AddHours(1),
                 RefreshToken = "refresh-new",
-                RefreshTokenExpiresAtUtc = DateTime.UtcNow.AddDays(7)
+                RefreshTokenExpiresAtUtc = DateTime.UtcNow.AddDays(7),
+                DeviceCredential = "device-new"
             }, ct);
         }
 
-        public Task<LoginResult> LoginAsync(string username, string password, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<LoginResponse> LoginAsync(string username, string password, CancellationToken ct = default) => throw new NotImplementedException();
         public Task LogoutAsync(CancellationToken ct = default) => throw new NotImplementedException();
         public Task<bool> SendRegisterCodeAsync(string email, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RegisterResponse> RegisterAsync(string email, string code, string password, CancellationToken ct = default) => throw new NotImplementedException();
@@ -77,6 +86,20 @@ public class TokenRefreshSingleFlightTests
     }
 
     [Fact]
+    public void DeviceCredential_IsMapped_AndMigrationIsDiscoverable()
+    {
+        using var fx = new Fixture();
+        using ClientDbContext db = fx.Factory.CreateDbContext();
+
+        Assert.NotNull(db.Model
+            .FindEntityType(typeof(AuthToken))
+            ?.FindProperty(nameof(AuthToken.DeviceCredential)));
+        Assert.Contains(
+            "20260805120000_AddDeviceCredential",
+            db.Database.GetMigrations());
+    }
+
+    [Fact]
     public async Task Concurrent_100_Refresh_401s_Issue_Single_Http_Request()
     {
         using var fx = new Fixture();
@@ -86,7 +109,8 @@ public class TokenRefreshSingleFlightTests
             AccessToken = "access-old",
             AccessTokenExpires = DateTime.UtcNow.AddMinutes(-1),
             RefreshToken = "refresh-old",
-            RefreshTokenExpires = DateTime.UtcNow.AddDays(7)
+            RefreshTokenExpires = DateTime.UtcNow.AddDays(7),
+            DeviceCredential = "device-old"
         });
 
         var auth = new CountingAuthClient();
@@ -100,6 +124,7 @@ public class TokenRefreshSingleFlightTests
         Assert.All(results, r => Assert.True(r));
         // 100 个并发 401 只产生一次 refresh HTTP 请求
         Assert.Equal(1, auth.RefreshCalls);
+        Assert.Equal(OperatingSystem.IsWindows() ? "device-old" : null, auth.ReceivedDeviceCredential);
 
         // 刷新后的 token 已更新（内存 + DB）
         Assert.NotNull(tokenInfo.Token);
@@ -109,11 +134,13 @@ public class TokenRefreshSingleFlightTests
         {
             // Windows：DPAPI 加密落库，解密后为刷新值
             Assert.StartsWith("access-", stored!.AccessToken);
+            Assert.Equal("device-new", stored.DeviceCredential);
         }
         else
         {
             // 非 Windows：SecretProtector 拒绝持久化明文令牌（P1-7），DB 为空串，自动登录禁用
             Assert.Equal(string.Empty, stored!.AccessToken);
+            Assert.Null(stored.DeviceCredential);
         }
     }
 
@@ -127,7 +154,8 @@ public class TokenRefreshSingleFlightTests
             AccessToken = "access-old",
             AccessTokenExpires = DateTime.UtcNow.AddMinutes(-1),
             RefreshToken = "refresh-old",
-            RefreshTokenExpires = DateTime.UtcNow.AddDays(7)
+            RefreshTokenExpires = DateTime.UtcNow.AddDays(7),
+            DeviceCredential = "device-old"
         });
 
         var auth = new CountingAuthClient();

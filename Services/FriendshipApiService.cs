@@ -1,329 +1,290 @@
-using Chat_App.Services;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Net.Http.Json;
+using ChatApp.Contracts.Http.Common;
+using ChatApp.Contracts.Http.Friends;
 using Core.Contracts.Friends;
 using Core.Contracts.Friends.Enums;
 using Core.Interfaces;
-using Chat_App.Infrastructure.Models;
 using Serilog;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Http;
-using System.Net.Http.Json;
-using System.Runtime.CompilerServices;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace Chat_App.Services;
 
-public class FriendshipApiService : IFriendshipService
+/// <summary>
+/// Adapts the Server's current cursor and mutation-envelope wire shapes to the
+/// client's local operation model.
+/// </summary>
+public sealed class FriendshipApiService(
+    HttpClient httpClient,
+    ICurrentUserContext currentUserContext) : IFriendshipService
 {
-    private readonly HttpClient _httpClient;
-    private readonly ICurrentUserContext _currentUserContext;
-
-    public FriendshipApiService(HttpClient httpClient, ICurrentUserContext currentUserContext)
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        _currentUserContext = currentUserContext;
-        _httpClient = httpClient;
-    }
+        PropertyNameCaseInsensitive = true
+    };
 
-    private static string API(string t) => $"/api/Friendship/{t}";
+    private readonly HttpClient _httpClient = httpClient;
+    private readonly ICurrentUserContext _currentUserContext = currentUserContext;
 
-    // ── 好友列表 ─────────────────────────────────────────
+    private static string Api(string path) => $"/api/Friendship/{path}";
 
-    public IAsyncEnumerable<FriendDto> GetAllFriendsAsync(CancellationToken ct = default)
+    public async IAsyncEnumerable<FriendDto> GetAllFriendsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var userId = _currentUserContext.UserId;
-        if (!userId.HasValue)
+        if (!_currentUserContext.UserId.HasValue)
         {
             Log.Warning("当前用户未登录，无法获取好友列表");
-            return AsyncEnumerable.Empty<FriendDto>();
+            yield break;
         }
 
-        return  StreamJsonAsync<FriendDto> (API("all"), "获取好友列表", ct);
-    }
-
-    public async Task<OperationResult> DeleteFriendAsync(long friendId, CancellationToken ct = default)
-    {
-        return await ExecuteOperationAsync<OperationResult>(async (ct) =>
-        {
-            var response = await _httpClient
-                .DeleteAsync(API($"{friendId}"), ct)
-                .ConfigureAwait(false);
-
-            Log.Information("删除好友成功 -> {FriendId}", friendId);
-
-            return response;
-
-        }, "删除好友", ct).ConfigureAwait(false);
-    }
-
-    // ── 好友申请 ─────────────────────────────────────────
-
-    public async Task<OperationResult<FriendDto>> AcceptRequestAsync(
-        long requesterId, CancellationToken ct = default)
-    {
-        var userId = _currentUserContext.UserId;
-        if (!userId.HasValue)
-        {
-            Log.Warning("当前用户未登录，无法接受好友申请");
-            return OperationResult<FriendDto>.LocalFail(
-				LocalOperationErrorCode.Unauthorized, "未登录");
-        }
-
-
-		return await ExecuteOperationAsync<OperationResult<FriendDto>>(async (ct) =>
-		{
-			var response = await _httpClient
-			   .PutAsync(API($"requests/{requesterId}/accept"), null, ct)
-			   .ConfigureAwait(false);
-
-			Log.Information("接受好友申请 {RequesterId}", requesterId);
-
-			return response;
-
-		}, "接受好友申请", ct).ConfigureAwait(false);
-
-    }
-
-    public async Task<OperationResult> DeclineRequestAsync(
-        long requesterId, CancellationToken ct = default)
-    {
-        return await ExecuteOperationAsync<OperationResult>(async (ct) =>
-        {
-            var response = await _httpClient
-                .PutAsync(API($"requests/{requesterId}/decline"), null, ct)
-                .ConfigureAwait(false);
-
-            Log.Information("拒绝好友申请 {RequesterId}", requesterId);
-
-            return response;
-
-        }, "拒绝好友申请", ct).ConfigureAwait(false);
-    }
-
-    public async Task<SendFriendRequestResult> SendFriendRequestAsync(
-        long targetUserId, string? message, CancellationToken ct = default)
-    {
-        return await ExecuteOperationAsync<SendFriendRequestResult>(async (ct) =>
-        {
-            var payload = new { TargetUserId = targetUserId, Message = message };
-            var response = await _httpClient
-                .PostAsJsonAsync(API("requests"), payload, ct)
-                .ConfigureAwait(false);
-
-            Log.Information("发送好友申请 -> {TargetUserId}", targetUserId);
-
-            return response;
-
-        }, "发送好友申请", ct).ConfigureAwait(false);
-    }
-
-	public Task<OperationResult<List<FriendRequestDto>>> GetIncomingRequestsAsync(CancellationToken ct = default)
-	{
-		return ExecuteJsonAsync<List<FriendRequestDto>>(
-			c => _httpClient.GetAsync(API("requests/incoming"), c),
-			"获取收到的申请",
-			ct);
-	}
-
-	public Task<OperationResult<List<FriendRequestDto>>> GetOutgoingRequestsAsync(CancellationToken ct = default)
-	{
-		return ExecuteJsonAsync<List<FriendRequestDto>>(
-			c => _httpClient.GetAsync(API("requests/outgoing"), c),
-			"获取发出的申请",
-			ct);
-	}
-
-	// ── 黑名单 ───────────────────────────────────────────
-
-	public Task<OperationResult<List<BlockedUserDto>>> GetBlockedUsersAsync(CancellationToken ct = default)
-	{
-		return ExecuteJsonAsync<List<BlockedUserDto>>(
-			c => _httpClient.GetAsync(API("blocked"), c),
-			"获取黑名单",
-			ct);
-	}
-
-	public async Task<OperationResult> UnblockUserAsync(
-        long blockedUserId, CancellationToken ct = default)
-    {
-        return await ExecuteOperationAsync<OperationResult>(async (ct) =>
-        {
-            var response = await _httpClient
-                .DeleteAsync(API($"block/{blockedUserId}"), ct)
-                .ConfigureAwait(false);
-
-            Log.Information("解除拉黑 -> {UserId}", blockedUserId);
-
-            return response;
-        }, "解除拉黑", ct).ConfigureAwait(false);
-    }
-
-	private async IAsyncEnumerable<T> StreamJsonAsync<T>(
-	string url,
-	string operationName,
-	[EnumeratorCancellation] CancellationToken ct = default)
-	{
-		using var request = new HttpRequestMessage(HttpMethod.Get, url);
-		using var response = await _httpClient
-			.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
-			.ConfigureAwait(false);
-
-		if (!response.IsSuccessStatusCode)
-		{
-			Log.Warning("{Operation} 失败，状态码：{StatusCode}", operationName, response.StatusCode);
-			yield break;
-		}
-
-		await using var stream = await response.Content
-			.ReadAsStreamAsync(ct)
-			.ConfigureAwait(false);
-
-		await foreach (var item in JsonSerializer.DeserializeAsyncEnumerable<T>(
-						   stream,
-						   cancellationToken: ct).ConfigureAwait(false))
-		{
-			if (item is not null)
-				yield return item;
-		}
-	}
-
-
-	/// <summary>
-	/// 统一执行无返回值的操作，返回 OperationResult。
-	/// </summary>
-	private static async Task<TResult> ExecuteOperationAsync<TResult>(
-		Func<CancellationToken, Task<HttpResponseMessage>> requestFunc,
-		string operationName,
-        CancellationToken ct = default) where TResult : OperationResult, new()
-	{
+        IReadOnlyList<FriendDto> items;
         try
         {
-            using var response = await requestFunc(ct).ConfigureAwait(false);
+            items = await ReadAllPagesAsync<FriendDto>(Api("all"), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException)
+        {
+            Log.Warning(ex, "获取好友列表失败");
+            yield break;
+        }
 
-            // 直接反序列化为 OperationResult
-            var result = await response.Content
-                .ReadFromJsonAsync<TResult>(cancellationToken: ct)
+        foreach (FriendDto item in items)
+            yield return item;
+    }
+
+    public Task<OperationResult> DeleteFriendAsync(long friendId, CancellationToken ct = default) =>
+        ExecuteOperationAsync(
+            token => _httpClient.DeleteAsync(Api(friendId.ToString()), token),
+            "删除好友",
+            ct);
+
+    public async Task<SendFriendRequestResult> SendFriendRequestAsync(
+        long targetUserId,
+        string? message,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            using HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
+                    Api("requests"),
+                    new SendFriendRequestRequest { TargetUserId = targetUserId, Message = message },
+                    JsonOptions,
+                    ct)
                 .ConfigureAwait(false);
 
-			return result ?? new TResult
-			{
-				IsSuccess = false,
-				ErrorCode = 0,
-				Message = "响应体为空",
-				IsLocal = true,
-				LocalErrorCode = LocalOperationErrorCode.EmptyResponse
-			};
-		}
+            JsonElement payload = await ReadPayloadAsync(response, ct).ConfigureAwait(false);
+            SendFriendRequestResponse? wire = payload.Deserialize<SendFriendRequestResponse>(JsonOptions);
+            if (wire is null)
+                return SendFriendRequestResult.LocalFail(LocalOperationErrorCode.EmptyResponse, "响应体为空");
+
+            return new SendFriendRequestResult
+            {
+                IsSuccess = wire.IsSuccess,
+                ErrorCode = (int)wire.ErrorCode,
+                Message = wire.Message,
+                Outcome = wire.Outcome,
+                Friend = wire.Friend
+            };
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return SendFriendRequestResult.LocalFail(LocalOperationErrorCode.Cancelled, "操作已取消");
+        }
         catch (OperationCanceledException)
         {
-            Log.Warning("{Operation} 操作被取消", operationName);
-			return new TResult
-			{
-				IsSuccess = false,
-				ErrorCode = 0,
-				Message = "操作已取消",
-				IsLocal = true,
-				LocalErrorCode = LocalOperationErrorCode.Cancelled
-			};
-		}
-		catch (HttpRequestException ex)
-		{
-			Log.Error(ex, "{Operation} 网络请求失败", operationName);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "发送好友申请失败");
+            return SendFriendRequestResult.LocalFail(MapLocalError(ex), MapLocalMessage(ex));
+        }
+    }
 
-			return new TResult
-			{
-				IsSuccess = false,
-				ErrorCode = 0,
-				Message = "网络请求失败",
-				IsLocal = true,
-				LocalErrorCode = LocalOperationErrorCode.NetworkError
-			};
-		}
-		catch (System.Text.Json.JsonException ex)
-		{
-			Log.Error(ex, "{Operation} 响应反序列化失败", operationName);
+    public Task<OperationResult<List<FriendRequestDto>>> GetIncomingRequestsAsync(
+        CancellationToken ct = default) =>
+        ReadPageResultAsync<FriendRequestDto>(Api("requests/incoming"), "获取收到的申请", ct);
 
-			return new TResult
-			{
-				IsSuccess = false,
-				ErrorCode = 0,
-				Message = "响应解析失败",
-				IsLocal = true,
-				LocalErrorCode = LocalOperationErrorCode.SerializationError
-			};
-		}
-		catch (Exception ex)
-		{
-			Log.Error(ex, "{Operation} 发生未知错误", operationName);
+    public Task<OperationResult<List<FriendRequestDto>>> GetOutgoingRequestsAsync(
+        CancellationToken ct = default) =>
+        ReadPageResultAsync<FriendRequestDto>(Api("requests/outgoing"), "获取发出的申请", ct);
 
-			return new TResult
-			{
-				IsSuccess = false,
-				ErrorCode = 0,
-				Message = "操作失败，请稍后重试",
-				IsLocal = true,
-				LocalErrorCode = LocalOperationErrorCode.Unknown
-			};
-		}
-	}
+    public async Task<OperationResult<FriendDto>> AcceptRequestAsync(
+        long requesterId,
+        CancellationToken ct = default)
+    {
+        if (!_currentUserContext.UserId.HasValue)
+            return OperationResult<FriendDto>.LocalFail(LocalOperationErrorCode.Unauthorized, "未登录");
 
-	private async Task<OperationResult<T>> ExecuteJsonAsync<T>(
-	Func<CancellationToken, Task<HttpResponseMessage>> requestFunc,
-	string operationName,
-	CancellationToken ct = default)
-	{
-		try
-		{
-			using var response = await requestFunc(ct).ConfigureAwait(false);
+        try
+        {
+            using HttpResponseMessage response = await _httpClient.PutAsync(
+                    Api($"requests/{requesterId}/accept"),
+                    content: null,
+                    ct)
+                .ConfigureAwait(false);
+            string json = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
 
-			if (!response.IsSuccessStatusCode)
-			{
-				Log.Warning("{Operation} 失败，状态码：{StatusCode}", operationName, response.StatusCode);
-				return OperationResult<T>.LocalFail(
-					LocalOperationErrorCode.ServerError,
-					$"服务器返回 {(int)response.StatusCode}");
-			}
+            if (response.IsSuccessStatusCode
+                && root.TryGetProperty("data", out JsonElement data)
+                && data.ValueKind == JsonValueKind.Object)
+            {
+                FriendDto? friend = data.Deserialize<FriendDto>(JsonOptions);
+                return friend is null
+                    ? OperationResult<FriendDto>.LocalFail(LocalOperationErrorCode.EmptyResponse, "响应体为空")
+                    : OperationResult<FriendDto>.Ok(friend);
+            }
 
-			var data = await response.Content
-				.ReadFromJsonAsync<T>(cancellationToken: ct)
-				.ConfigureAwait(false);
+            FriendshipGenericOperationResponse<FriendDto>? failure =
+                root.Deserialize<FriendshipGenericOperationResponse<FriendDto>>(JsonOptions);
+            return failure is null
+                ? OperationResult<FriendDto>.LocalFail(LocalOperationErrorCode.SerializationError, "响应解析失败")
+                : new OperationResult<FriendDto>
+                {
+                    IsSuccess = failure.Succeeded,
+                    ErrorCode = (int)failure.ErrorCode,
+                    Message = failure.Message,
+                    Data = failure.Data
+                };
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return OperationResult<FriendDto>.LocalFail(LocalOperationErrorCode.Cancelled, "操作已取消");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "接受好友申请失败");
+            return OperationResult<FriendDto>.LocalFail(MapLocalError(ex), MapLocalMessage(ex));
+        }
+    }
 
-			if (data is null)
-			{
-				return OperationResult<T>.LocalFail(
-					LocalOperationErrorCode.EmptyResponse,
-					"响应体为空");
-			}
+    public Task<OperationResult> DeclineRequestAsync(long requesterId, CancellationToken ct = default) =>
+        ExecuteOperationAsync(
+            token => _httpClient.PutAsync(Api($"requests/{requesterId}/decline"), content: null, token),
+            "拒绝好友申请",
+            ct);
 
-			return OperationResult<T>.Ok(data);
-		}
-		catch (OperationCanceledException)
-		{
-			Log.Warning("{Operation} 操作被取消", operationName);
-			throw;
-		}
-		catch (HttpRequestException ex)
-		{
-			Log.Error(ex, "{Operation} 网络请求失败", operationName);
-			return OperationResult<T>.LocalFail(
-				LocalOperationErrorCode.NetworkError,
-				"网络请求失败");
-		}
-		catch (JsonException ex)
-		{
-			Log.Error(ex, "{Operation} 响应解析失败", operationName);
-			return OperationResult<T>.LocalFail(
-				LocalOperationErrorCode.SerializationError,
-				"响应解析失败");
-		}
-		catch (Exception ex)
-		{
-			Log.Error(ex, "{Operation} 发生未知错误", operationName);
-			return OperationResult<T>.LocalFail(
-				LocalOperationErrorCode.Unknown,
-				"操作失败，请稍后重试");
-		}
-	}
+    public Task<OperationResult<List<BlockedUserDto>>> GetBlockedUsersAsync(CancellationToken ct = default) =>
+        ReadPageResultAsync<BlockedUserDto>(Api("blocked"), "获取黑名单", ct);
+
+    public Task<OperationResult> UnblockUserAsync(long blockedUserId, CancellationToken ct = default) =>
+        ExecuteOperationAsync(
+            token => _httpClient.DeleteAsync(Api($"block/{blockedUserId}"), token),
+            "解除拉黑",
+            ct);
+
+    private async Task<OperationResult> ExecuteOperationAsync(
+        Func<CancellationToken, Task<HttpResponseMessage>> send,
+        string operation,
+        CancellationToken ct)
+    {
+        try
+        {
+            using HttpResponseMessage response = await send(ct).ConfigureAwait(false);
+            JsonElement payload = await ReadPayloadAsync(response, ct).ConfigureAwait(false);
+            FriendshipOperationResponse? wire = payload.Deserialize<FriendshipOperationResponse>(JsonOptions);
+            return wire is null
+                ? OperationResult.LocalFail(LocalOperationErrorCode.EmptyResponse, "响应体为空")
+                : new OperationResult
+                {
+                    IsSuccess = wire.IsSuccess,
+                    ErrorCode = (int)wire.ErrorCode,
+                    Message = wire.Message
+                };
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return OperationResult.LocalFail(LocalOperationErrorCode.Cancelled, "操作已取消");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "{Operation}失败", operation);
+            return OperationResult.LocalFail(MapLocalError(ex), MapLocalMessage(ex));
+        }
+    }
+
+    private async Task<OperationResult<List<T>>> ReadPageResultAsync<T>(
+        string path,
+        string operation,
+        CancellationToken ct)
+    {
+        try
+        {
+            List<T> items = await ReadAllPagesAsync<T>(path, ct).ConfigureAwait(false);
+            return OperationResult<List<T>>.Ok(items);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "{Operation}失败", operation);
+            return OperationResult<List<T>>.LocalFail(MapLocalError(ex), MapLocalMessage(ex));
+        }
+    }
+
+    private async Task<List<T>> ReadAllPagesAsync<T>(string basePath, CancellationToken ct)
+    {
+        var items = new List<T>();
+        string? cursor = null;
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+
+        do
+        {
+            string path = cursor is null
+                ? $"{basePath}?limit=100"
+                : $"{basePath}?cursor={Uri.EscapeDataString(cursor)}&limit=100";
+            using HttpResponseMessage response = await _httpClient.GetAsync(path, ct).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            CursorPage<T>? page = await response.Content.ReadFromJsonAsync<CursorPage<T>>(JsonOptions, ct)
+                .ConfigureAwait(false);
+            if (page is null)
+                throw new JsonException("Cursor page response is empty.");
+
+            items.AddRange(page.Items);
+            if (!page.HasMore || string.IsNullOrWhiteSpace(page.NextCursor))
+                break;
+            if (!seenCursors.Add(page.NextCursor))
+                throw new JsonException("Server repeated a friendship cursor.");
+            cursor = page.NextCursor;
+        } while (true);
+
+        return items;
+    }
+
+    private static async Task<JsonElement> ReadPayloadAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        string json = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement root = document.RootElement;
+        return root.TryGetProperty("data", out JsonElement data) ? data.Clone() : root.Clone();
+    }
+
+    private static LocalOperationErrorCode MapLocalError(Exception ex) => ex switch
+    {
+        HttpRequestException => LocalOperationErrorCode.NetworkError,
+        JsonException => LocalOperationErrorCode.SerializationError,
+        _ => LocalOperationErrorCode.Unknown
+    };
+
+    private static string MapLocalMessage(Exception ex) => ex switch
+    {
+        HttpRequestException => "网络请求失败",
+        JsonException => "响应解析失败",
+        _ => "操作失败，请稍后重试"
+    };
 }

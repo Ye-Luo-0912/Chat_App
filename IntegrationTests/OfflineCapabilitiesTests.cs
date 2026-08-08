@@ -261,7 +261,7 @@ public class OfflineCapabilitiesTests : IDisposable
                 var sent = serializer.Deserialize<ChatMessageDto>(new ReadOnlySequence<byte>(body));
                 if (sent is null)
                     return;
-                InjectPacket(tcp, serializer, PacketCommand.MessageAck, new MessageAcknowledgementDto
+                InjectPacket(tcp, serializer, PacketCommand.MessageAcknowledgement, new MessageAcknowledgementDto
                 {
                     ClientMessageId = sent.MessageId,
                     CommandId = sent.MessageId,
@@ -393,6 +393,8 @@ public class OfflineCapabilitiesTests : IDisposable
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
 
@@ -445,9 +447,9 @@ public class OfflineCapabilitiesTests : IDisposable
     {
         tcp.OnFrameSent += (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = success, UserId = userId });
             }
         };

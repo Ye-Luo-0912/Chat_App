@@ -83,6 +83,12 @@ public class AuthInterceptor(TokenInfo tokenInfo, ILocalDeviceIdentity deviceIde
 
         if (!request.Headers.Contains("User-Agent"))
             request.Headers.TryAddWithoutValidation("User-Agent", _deviceIdentity.UserAgent);
+
+        if (!request.Headers.Contains("X-Device-Credential")
+            && !string.IsNullOrWhiteSpace(_tokenInfo.DeviceCredential))
+        {
+            request.Headers.TryAddWithoutValidation("X-Device-Credential", _tokenInfo.DeviceCredential);
+        }
     }
 
     private static async Task<HttpRequestMessage> CloneRequestAsync(HttpRequestMessage req, CancellationToken cancellation)

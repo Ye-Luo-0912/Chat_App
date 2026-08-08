@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Core.Contracts.Friends.Enums;
+using ChatApp.Contracts.Http.Friends;
 
 namespace Core.Contracts.Friends;
 
@@ -42,7 +43,7 @@ public class SendFriendRequestResult : OperationResult
     public static SendFriendRequestResult Ok(SendFriendRequestOutcome outcome, string? msg = null, FriendDto? friend = null) => new()
     {
         IsSuccess = true,
-        ErrorCode = (int)FriendshipOperationResultErrorCode.None,
+        ErrorCode = (int)FriendshipOperationErrorCode.None,
         Message = msg,
         Outcome = outcome,
         Friend = friend

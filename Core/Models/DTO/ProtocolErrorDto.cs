@@ -21,5 +21,8 @@ namespace Core.Models.DTO
 
         /// <summary>是否连接级致命错误（鉴权失效等）。</summary>
         public bool IsFatal { get; set; }
+
+        /// <summary>服务端建议的重试等待时间（毫秒）；未提供时为空。</summary>
+        public int? RetryAfterMs { get; set; }
     }
 }

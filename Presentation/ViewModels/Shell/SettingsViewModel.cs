@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
-using Core.Contracts.Sessions;
 using Core.Interfaces;
 using Serilog;
 
@@ -17,7 +16,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private readonly INotificationService _notifications;
     private readonly ICurrentUserContext _currentUser;
 
-    public ObservableCollection<SessionDeviceDto> Devices { get; } = [];
+    public ObservableCollection<SessionDeviceListItem> Devices { get; } = [];
 
     private bool _isLoading;
     public bool IsLoading
@@ -40,7 +39,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand RevokeOthersCommand { get; }
-    public AsyncRelayCommand<SessionDeviceDto> RevokeDeviceCommand { get; }
+    public AsyncRelayCommand<SessionDeviceListItem> RevokeDeviceCommand { get; }
 
     public SettingsViewModel(
         ISessionApiService sessions,
@@ -56,7 +55,7 @@ public sealed class SettingsViewModel : ViewModelBase
             RevokeOthersAsync,
             () => !IsLoading,
             ex => _notifications.ShowError($"撤销其他设备失败: {ex.Message}"));
-        RevokeDeviceCommand = new AsyncRelayCommand<SessionDeviceDto>(
+        RevokeDeviceCommand = new AsyncRelayCommand<SessionDeviceListItem>(
             RevokeDeviceAsync,
             d => d is not null && !d.IsCurrent && !IsLoading,
             ex => _notifications.ShowError($"撤销设备失败: {ex.Message}"));
@@ -76,7 +75,7 @@ public sealed class SettingsViewModel : ViewModelBase
             var items = await _sessions.ListSessionsAsync(ct).ConfigureAwait(true);
             Devices.Clear();
             foreach (var item in items)
-                Devices.Add(item);
+                Devices.Add(new SessionDeviceListItem(item));
             StatusText = Devices.Count == 0 ? "暂无登录设备" : $"共 {Devices.Count} 台设备";
             OnPropertyChanged(nameof(CurrentUserDisplay));
         }
@@ -102,7 +101,7 @@ public sealed class SettingsViewModel : ViewModelBase
         await LoadAsync(ct).ConfigureAwait(true);
     }
 
-    private async Task RevokeDeviceAsync(SessionDeviceDto? device, CancellationToken ct)
+    private async Task RevokeDeviceAsync(SessionDeviceListItem? device, CancellationToken ct)
     {
         if (device is null || device.IsCurrent)
             return;

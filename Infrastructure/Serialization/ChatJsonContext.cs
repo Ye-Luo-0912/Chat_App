@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ChatApp.Shared.Protocol.Tcp;
 using Core.Models.DTO;
 
 namespace Chat_App.Infrastructure.Serialization;
@@ -11,6 +12,7 @@ namespace Chat_App.Infrastructure.Serialization;
 /// </summary>
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = false,
     WriteIndented = false,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(ChatMessageDto))]
@@ -52,6 +54,11 @@ namespace Chat_App.Infrastructure.Serialization;
 [JsonSerializable(typeof(AuthResponseDto))]
 [JsonSerializable(typeof(ErrorResponseDto))]
 [JsonSerializable(typeof(ProtocolErrorDto))]
+[JsonSerializable(typeof(ClientHello))]
+[JsonSerializable(typeof(ServerHello))]
+[JsonSerializable(typeof(GoAway))]
+[JsonSerializable(typeof(ResumeResponse))]
+[JsonSerializable(typeof(ProtocolErrorFrame))]
 [JsonSerializable(typeof(ConversationMemberItemDto))]
 [JsonSerializable(typeof(CreateGroupRequestDto))]
 [JsonSerializable(typeof(CreateGroupResponseDto))]

@@ -316,7 +316,7 @@ public class RequestMatrixTests
 
     private static async Task WaitForFrameAsync(MatrixServer server, string kind)
     {
-        var command = kind == "auth" ? PacketCommand.AuthRequest : RequestCommandOf(kind);
+        var command = kind == "auth" ? PacketCommand.AuthenticationRequest : RequestCommandOf(kind);
         await WaitForFrameCountAsync(server, command, 1);
     }
 
@@ -352,9 +352,9 @@ public class RequestMatrixTests
     {
         tcp.OnFrameSent += (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = true, UserId = userId });
             }
         };
@@ -397,11 +397,11 @@ public class RequestMatrixTests
                 {
                     switch (cmd)
                     {
-                        case PacketCommand.AuthRequest:
+                        case PacketCommand.AuthenticationRequest:
                             Frames.Add((cmd, string.Empty));
                             if (Behavior == Behavior.AuthReject)
                             {
-                                Inject(PacketCommand.AuthResponse, new AuthResponseDto
+                                Inject(PacketCommand.AuthenticationResponse, new AuthResponseDto
                                 {
                                     Success = false,
                                     UserId = OwnerId,
@@ -507,7 +507,7 @@ public class RequestMatrixTests
                         case PacketCommand.MessageReceipt:
                         {
                             var receiptRequestId = Record<MessageReceiptDto>(cmd, body, out var receiptReq);
-                            Respond(PacketCommand.MessageReceiptAck, receiptRequestId, new MessageReceiptAckDto
+                            Respond(PacketCommand.MessageReceiptAcknowledgement, receiptRequestId, new MessageReceiptAckDto
                             {
                                 RequestId = receiptRequestId,
                                 Accepted = true
@@ -636,6 +636,8 @@ public class RequestMatrixTests
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
 

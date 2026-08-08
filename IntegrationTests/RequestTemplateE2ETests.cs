@@ -348,7 +348,7 @@ public class RequestTemplateE2ETests
                                 var req = serializer.Deserialize<MessageReceiptDto>(new ReadOnlySequence<byte>(body));
                                 if (req is null) return;
                                 Frames.Add((cmd, req.RequestId!));
-                                InjectPacket(tcp, serializer, PacketCommand.MessageReceiptAck,
+                                InjectPacket(tcp, serializer, PacketCommand.MessageReceiptAcknowledgement,
                                     new MessageReceiptAckDto { RequestId = req.RequestId ?? string.Empty, Accepted = true });
                                 break;
                             }
@@ -398,9 +398,9 @@ public class RequestTemplateE2ETests
     {
         tcp.OnFrameSent += (cmd, _) =>
         {
-            if (cmd == PacketCommand.AuthRequest)
+            if (cmd == PacketCommand.AuthenticationRequest)
             {
-                InjectPacket(tcp, serializer, PacketCommand.AuthResponse,
+                InjectPacket(tcp, serializer, PacketCommand.AuthenticationResponse,
                     new AuthResponseDto { Success = true, UserId = userId });
             }
         };
@@ -433,6 +433,8 @@ public class RequestTemplateE2ETests
             {
                 if (!MessagePacket.TryDeserialize(ref seq, out var pkt, out _))
                     break;
+                if (pkt.Command == PacketCommand.ClientHello)
+                    OnDataChunkReceived?.Invoke(this, TcpHandshakeTestServer.ServerHelloFrame);
                 OnFrameSent?.Invoke(pkt.Command, pkt.Body.ToArray());
             }
 

@@ -1,4 +1,5 @@
 using Core.Contracts.Attachments;
+using ChatApp.Contracts.Http.Attachments;
 
 namespace Core.Interfaces;
 
@@ -6,15 +7,15 @@ namespace Core.Interfaces;
 public interface IAttachmentClientService
 {
     /// <summary>请求上传预签名票据（含 UploadUrl、AttachmentId 等）。</summary>
-    Task<AttachmentPresignResponseDto> PresignAsync(
-        AttachmentPresignRequestDto request,
+    Task<AttachmentPresignResponse> PresignAsync(
+        AttachmentPresignRequest request,
         CancellationToken ct = default);
 
     /// <summary>
     /// 上传文件内容。相对 UploadUrl 走鉴权 API；绝对 URL（S3 预签名）不带 Bearer。
     /// </summary>
     Task UploadAsync(
-        AttachmentPresignResponseDto ticket,
+        AttachmentPresignResponse ticket,
         Stream content,
         string contentType,
         long contentLength,
@@ -22,8 +23,8 @@ public interface IAttachmentClientService
         CancellationToken ct = default);
 
     /// <summary>确认上传完成，服务端校验文件完整性并标记为可用。</summary>
-    Task<ConfirmAttachmentResponseDto> ConfirmAsync(
-        ConfirmAttachmentRequestDto request,
+    Task<ConfirmAttachmentResponse> ConfirmAsync(
+        ConfirmAttachmentRequest request,
         CancellationToken ct = default);
 
     /// <summary>

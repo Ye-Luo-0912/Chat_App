@@ -223,7 +223,8 @@ public class DatabaseService(
             AccessTokenExpires = token.AccessTokenExpires,
             RefreshTokenExpires = token.RefreshTokenExpires,
             SessionId = token.SessionId,
-            DeviceIdHash = token.DeviceIdHash
+            DeviceIdHash = token.DeviceIdHash,
+            DeviceCredential = SecretProtector.Protect(token.DeviceCredential)
         };
 
         await using var db = await contextFactory.CreateDbContextAsync(None);
@@ -235,6 +236,9 @@ public class DatabaseService(
             oldToken.RefreshToken = secret.RefreshToken ?? string.Empty;
             oldToken.AccessTokenExpires = secret.AccessTokenExpires;
             oldToken.RefreshTokenExpires = secret.RefreshTokenExpires;
+            oldToken.SessionId = secret.SessionId;
+            oldToken.DeviceIdHash = secret.DeviceIdHash;
+            oldToken.DeviceCredential = secret.DeviceCredential;
         }
         else
         {
@@ -267,7 +271,8 @@ public class DatabaseService(
             AccessTokenExpires = token.AccessTokenExpires,
             RefreshTokenExpires = token.RefreshTokenExpires,
             SessionId = token.SessionId,
-            DeviceIdHash = token.DeviceIdHash
+            DeviceIdHash = token.DeviceIdHash,
+            DeviceCredential = SecretProtector.Protect(token.DeviceCredential)
         };
 
         await using var db = await contextFactory.CreateDbContextAsync(None);
@@ -277,7 +282,8 @@ public class DatabaseService(
                 => t.SetProperty(authToken => authToken.AccessToken, secret.AccessToken)
                     .SetProperty(authToken => authToken.RefreshToken, secret.RefreshToken)
                     .SetProperty(authToken => authToken.AccessTokenExpires, secret.AccessTokenExpires)
-                    .SetProperty(authToken => authToken.RefreshTokenExpires, secret.RefreshTokenExpires), None);
+                    .SetProperty(authToken => authToken.RefreshTokenExpires, secret.RefreshTokenExpires)
+                    .SetProperty(authToken => authToken.DeviceCredential, secret.DeviceCredential), None);
     }
 
     public async Task<AuthToken?> GetTokenAsync()
@@ -295,7 +301,8 @@ public class DatabaseService(
             AccessTokenExpires = stored.AccessTokenExpires,
             RefreshTokenExpires = stored.RefreshTokenExpires,
             SessionId = stored.SessionId,
-            DeviceIdHash = stored.DeviceIdHash
+            DeviceIdHash = stored.DeviceIdHash,
+            DeviceCredential = SecretProtector.Unprotect(stored.DeviceCredential)
         };
     }
 
@@ -357,7 +364,8 @@ public class DatabaseService(
             AccessTokenExpires = token.AccessTokenExpires,
             RefreshTokenExpires = token.RefreshTokenExpires,
             SessionId = token.SessionId,
-            DeviceIdHash = token.DeviceIdHash
+            DeviceIdHash = token.DeviceIdHash,
+            DeviceCredential = SecretProtector.Protect(token.DeviceCredential)
         };
 
         await using var db = await contextFactory.CreateDbContextAsync(None);
@@ -374,6 +382,7 @@ public class DatabaseService(
             oldToken.RefreshTokenExpires = secret.RefreshTokenExpires;
             oldToken.SessionId = secret.SessionId;
             oldToken.DeviceIdHash = secret.DeviceIdHash;
+            oldToken.DeviceCredential = secret.DeviceCredential;
         }
         else
         {

@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Core.Contracts.Sessions;
+using ChatApp.Contracts.Http;
+using ChatApp.Contracts.Http.Sessions;
 using Core.Interfaces;
 using Serilog;
 
@@ -13,12 +13,6 @@ namespace Chat_App.Services;
 
 public sealed class SessionApiService : ISessionApiService
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
-
     private readonly HttpClient _httpClient;
 
     public SessionApiService(HttpClient httpClient)
@@ -26,7 +20,7 @@ public sealed class SessionApiService : ISessionApiService
         _httpClient = httpClient;
     }
 
-    public async Task<IReadOnlyList<SessionDeviceDto>> ListSessionsAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<SessionDevice>> ListSessionsAsync(CancellationToken ct = default)
     {
         using var response = await _httpClient
             .GetAsync("/api/users/me/sessions", ct)
@@ -38,7 +32,7 @@ public sealed class SessionApiService : ISessionApiService
         }
 
         var items = await response.Content
-            .ReadFromJsonAsync<List<SessionDeviceDto>>(JsonOptions, ct)
+            .ReadFromJsonAsync(HttpContractsJsonSerializerContext.Default.ListSessionDevice, ct)
             .ConfigureAwait(false);
         return items ?? [];
     }
@@ -69,23 +63,9 @@ public sealed class SessionApiService : ISessionApiService
             throw new HttpRequestException($"撤销其他设备失败 ({(int)response.StatusCode}): {body}");
         }
 
-        try
-        {
-            using var doc = await JsonDocument.ParseAsync(
-                    await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
-                    cancellationToken: ct)
-                .ConfigureAwait(false);
-            if (doc.RootElement.TryGetProperty("revoked", out var revoked)
-                || doc.RootElement.TryGetProperty("Revoked", out revoked))
-            {
-                return revoked.GetInt32();
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Debug(ex, "解析 revoke-others 响应失败");
-        }
-
-        return 0;
+        RevokeSessionsResponse? result = await response.Content
+            .ReadFromJsonAsync(HttpContractsJsonSerializerContext.Default.RevokeSessionsResponse, ct)
+            .ConfigureAwait(false);
+        return result?.Revoked ?? 0;
     }
 }

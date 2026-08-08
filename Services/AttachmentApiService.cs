@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Core.Contracts.Attachments;
+using ChatApp.Contracts.Http.Attachments;
 using Core.Interfaces;
 using Chat_App.Infrastructure.Networking;
 using Serilog;
@@ -33,8 +34,8 @@ public sealed class AttachmentApiService : IAttachmentClientService
         _httpClient = httpClient;
     }
 
-    public async Task<AttachmentPresignResponseDto> PresignAsync(
-        AttachmentPresignRequestDto request,
+    public async Task<AttachmentPresignResponse> PresignAsync(
+        AttachmentPresignRequest request,
         CancellationToken ct = default)
     {
         using var response = await _httpClient
@@ -42,13 +43,13 @@ public sealed class AttachmentApiService : IAttachmentClientService
             .ConfigureAwait(false);
         await EnsureSuccessAsync(response, "预签名", ct).ConfigureAwait(false);
         var body = await response.Content
-            .ReadFromJsonAsync<AttachmentPresignResponseDto>(JsonOptions, ct)
+            .ReadFromJsonAsync<AttachmentPresignResponse>(JsonOptions, ct)
             .ConfigureAwait(false);
         return body ?? throw new InvalidOperationException("预签名响应为空");
     }
 
     public async Task UploadAsync(
-        AttachmentPresignResponseDto ticket,
+        AttachmentPresignResponse ticket,
         Stream content,
         string contentType,
         long contentLength,
@@ -101,9 +102,12 @@ public sealed class AttachmentApiService : IAttachmentClientService
             && !IsSameAuthority(absolute, _httpClient.BaseAddress))
         {
             // S3 预签名：不带 Bearer，直接 PUT 到绝对 URL。
-            response = await S3UploadClient
-                .PutAsync(absolute, streamContent, ct)
-                .ConfigureAwait(false);
+            using var uploadRequest = new HttpRequestMessage(HttpMethod.Put, absolute)
+            {
+                Content = streamContent
+            };
+            ApplyUploadHeaders(uploadRequest, ticket.UploadHeaders);
+            response = await S3UploadClient.SendAsync(uploadRequest, ct).ConfigureAwait(false);
         }
         else
         {
@@ -113,6 +117,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
 
             using var putRequest = new HttpRequestMessage(HttpMethod.Put, relative);
             putRequest.Content = streamContent;
+            ApplyUploadHeaders(putRequest, ticket.UploadHeaders);
             // 提供请求体重建工厂，流式上传遇 401 时由拦截器重建流而非发送空 body。
             putRequest.Options.Set(RequestOptionKeys.ReplayFactory, replayFactory);
 
@@ -127,8 +132,8 @@ public sealed class AttachmentApiService : IAttachmentClientService
         }
     }
 
-    public async Task<ConfirmAttachmentResponseDto> ConfirmAsync(
-        ConfirmAttachmentRequestDto request,
+    public async Task<ConfirmAttachmentResponse> ConfirmAsync(
+        ConfirmAttachmentRequest request,
         CancellationToken ct = default)
     {
         using var response = await _httpClient
@@ -136,7 +141,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
             .ConfigureAwait(false);
         await EnsureSuccessAsync(response, "确认附件", ct).ConfigureAwait(false);
         var body = await response.Content
-            .ReadFromJsonAsync<ConfirmAttachmentResponseDto>(JsonOptions, ct)
+            .ReadFromJsonAsync<ConfirmAttachmentResponse>(JsonOptions, ct)
             .ConfigureAwait(false);
         return body ?? throw new InvalidOperationException("确认响应为空");
     }
@@ -159,7 +164,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
         if (maxAttempts > 1 && !content.CanSeek)
             throw new ArgumentException("非 seekable 流不支持重试，请设置 maxAttempts=1 或传入可 seek 的流", nameof(content));
 
-        AttachmentPresignResponseDto? ticket = null;
+        AttachmentPresignResponse? ticket = null;
         Exception? lastError = null;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
@@ -171,36 +176,21 @@ public sealed class AttachmentApiService : IAttachmentClientService
                     content.Position = 0;
 
                 ticket = await PresignAsync(
-                        new AttachmentPresignRequestDto
+                        new AttachmentPresignRequest
                         {
                             ContentType = contentType,
                             ContentLength = contentLength,
                             OriginalName = originalName,
-                            ClientAttachmentId = clientAttachmentId,
-                            Sha256 = sha256
+                            ClientAttachmentId = clientAttachmentId
                         },
                         ct)
                     .ConfigureAwait(false);
-
-                // 秒传命中：服务端已有同 hash 文件，跳过上传直接返回
-                if (ticket.Deduplicated)
-                {
-                    return new AttachmentUploadResult
-                    {
-                        AttachmentId = ticket.AttachmentId,
-                        DownloadPath = ticket.DownloadPath,
-                        ObjectKey = ticket.ObjectKey,
-                        ContentType = contentType,
-                        SizeBytes = contentLength,
-                        OriginalName = originalName
-                    };
-                }
 
                 await UploadAsync(ticket, content, contentType, contentLength, progress, ct)
                     .ConfigureAwait(false);
 
                 var confirmed = await ConfirmAsync(
-                        new ConfirmAttachmentRequestDto
+                        new ConfirmAttachmentRequest
                         {
                             ObjectKey = ticket.ObjectKey,
                             Ticket = ticket.Ticket,
@@ -387,6 +377,28 @@ public sealed class AttachmentApiService : IAttachmentClientService
         if (baseAddress is null) return false;
         return string.Equals(absolute.Host, baseAddress.Host, StringComparison.OrdinalIgnoreCase)
                && absolute.Port == baseAddress.Port;
+    }
+
+    private static void ApplyUploadHeaders(
+        HttpRequestMessage request,
+        IReadOnlyDictionary<string, string>? headers)
+    {
+        if (headers is null || request.Content is null)
+            return;
+
+        foreach (var (name, value) in headers)
+        {
+            if (name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
+            {
+                request.Content.Headers.Remove(name);
+                request.Content.Headers.TryAddWithoutValidation(name, value);
+            }
+            else
+            {
+                request.Headers.Remove(name);
+                request.Headers.TryAddWithoutValidation(name, value);
+            }
+        }
     }
 
     private static async Task EnsureSuccessAsync(
