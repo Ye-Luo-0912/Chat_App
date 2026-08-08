@@ -1,8 +1,8 @@
 bin/
 obj/
 /packages/*
-!/packages/ChatApp.Protocol.Tcp.0.2.0.nupkg
-!/packages/ChatApp.Contracts.Http.0.2.0.nupkg
+!/packages/ChatApp.Protocol.Tcp.0.3.0.nupkg
+!/packages/ChatApp.Contracts.Http.0.3.0.nupkg
 /.nuget/
 riderModule.iml
 /_ReSharper.Caches/

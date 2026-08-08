@@ -162,6 +162,111 @@ public sealed class HttpContractClientTests
         Assert.Equal("chatapp-scan-state=unconfirmed", tagging);
     }
 
+    [Fact]
+    public async Task AttachmentUploadAndConfirm_DeduplicatedTicket_SkipsPutAndConfirms()
+    {
+        string? presignBody = null;
+        var putCount = 0;
+        using var client = CreateClient(request =>
+        {
+            if (request.Method == HttpMethod.Put)
+            {
+                putCount++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
+            }
+            string path = request.RequestUri!.AbsolutePath;
+            if (path == "/api/attachments/presign")
+            {
+                presignBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return Task.FromResult(Json(HttpStatusCode.OK, """
+                    {
+                      "attachmentId": "att-dedup",
+                      "uploadUrl": "",
+                      "downloadPath": "/api/attachments/att-dedup/download",
+                      "objectKey": "content/att-dedup",
+                      "ticket": "ticket-1",
+                      "expiresAt": "2099-08-05T03:00:00Z",
+                      "deduplicated": true
+                    }
+                    """));
+            }
+            if (path == "/api/attachments/confirm")
+                return Task.FromResult(Json(HttpStatusCode.OK, """
+                    {
+                      "sagaId": 1,
+                      "attachmentId": "att-dedup",
+                      "downloadPath": "/api/attachments/att-dedup/download",
+                      "objectKey": "content/att-dedup",
+                      "status": "Available",
+                      "sagaStatus": "Completed"
+                    }
+                    """));
+            return Task.FromResult(Json(HttpStatusCode.NotFound, "{}"));
+        });
+        var service = new AttachmentApiService(client);
+        var sha256 = new string('a', 64);
+
+        var result = await service.UploadAndConfirmAsync(
+            new MemoryStream([1, 2, 3]), "application/octet-stream", 3,
+            originalName: "photo.png", clientAttachmentId: "ca-1", sha256: sha256);
+
+        Assert.Equal(0, putCount);
+        Assert.Equal("att-dedup", result.AttachmentId);
+        Assert.Equal("/api/attachments/att-dedup/download", result.DownloadPath);
+        Assert.Equal("content/att-dedup", result.ObjectKey);
+        Assert.NotNull(presignBody);
+        Assert.Contains($"\"sha256\":\"{sha256}\"", presignBody);
+    }
+
+    [Fact]
+    public async Task AttachmentUploadAndConfirm_NonDeduplicated_UploadsThenConfirms()
+    {
+        var putCount = 0;
+        string? uploadUrl = null;
+        using var client = CreateClient(request =>
+        {
+            if (request.Method == HttpMethod.Put)
+            {
+                putCount++;
+                uploadUrl = request.RequestUri!.PathAndQuery;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+            }
+            string path = request.RequestUri!.AbsolutePath;
+            if (path == "/api/attachments/presign")
+                return Task.FromResult(Json(HttpStatusCode.OK, """
+                    {
+                      "attachmentId": "att-up",
+                      "uploadUrl": "/api/attachments/att-up/upload",
+                      "downloadPath": "/api/attachments/att-up/download",
+                      "objectKey": "content/att-up",
+                      "ticket": "ticket-2",
+                      "expiresAt": "2099-08-05T03:00:00Z",
+                      "deduplicated": false
+                    }
+                    """));
+            if (path == "/api/attachments/confirm")
+                return Task.FromResult(Json(HttpStatusCode.OK, """
+                    {
+                      "sagaId": 2,
+                      "attachmentId": "att-up",
+                      "downloadPath": "/api/attachments/att-up/download",
+                      "objectKey": "content/att-up",
+                      "status": "Available",
+                      "sagaStatus": "Completed"
+                    }
+                    """));
+            return Task.FromResult(Json(HttpStatusCode.NotFound, "{}"));
+        });
+        var service = new AttachmentApiService(client);
+
+        var result = await service.UploadAndConfirmAsync(
+            new MemoryStream([4, 5, 6]), "application/octet-stream", 3);
+
+        Assert.Equal(1, putCount);
+        Assert.Equal("/api/attachments/att-up/upload", uploadUrl);
+        Assert.Equal("att-up", result.AttachmentId);
+    }
+
     private static HttpClient CreateClient(Func<HttpRequestMessage, Task<HttpResponseMessage>> handler) =>
         new(new StubHandler(handler))
         {

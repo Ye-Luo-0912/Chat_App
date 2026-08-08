@@ -181,13 +181,23 @@ public sealed class AttachmentApiService : IAttachmentClientService
                             ContentType = contentType,
                             ContentLength = contentLength,
                             OriginalName = originalName,
-                            ClientAttachmentId = clientAttachmentId
+                            ClientAttachmentId = clientAttachmentId,
+                            Sha256 = sha256
                         },
                         ct)
                     .ConfigureAwait(false);
 
-                await UploadAsync(ticket, content, contentType, contentLength, progress, ct)
-                    .ConfigureAwait(false);
+                if (ticket.Deduplicated)
+                {
+                    // 服务端已持有相同 SHA-256 内容：免上传，直接进入确认。
+                    Log.Information("附件秒传命中，跳过上传 AttachmentId={AttachmentId} ContentLength={Length}",
+                        ticket.AttachmentId, contentLength);
+                }
+                else
+                {
+                    await UploadAsync(ticket, content, contentType, contentLength, progress, ct)
+                        .ConfigureAwait(false);
+                }
 
                 var confirmed = await ConfirmAsync(
                         new ConfirmAttachmentRequest
