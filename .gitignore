@@ -3,6 +3,8 @@ obj/
 /packages/*
 !/packages/ChatApp.Protocol.Tcp.0.3.0.nupkg
 !/packages/ChatApp.Contracts.Http.0.3.0.nupkg
+!/packages/ChatApp.Protocol.Tcp.0.4.1.nupkg
+!/packages/ChatApp.Protocol.Tcp.Json.0.4.1.nupkg
 /.nuget/
 riderModule.iml
 /_ReSharper.Caches/
