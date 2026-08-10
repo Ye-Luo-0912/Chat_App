@@ -301,7 +301,7 @@
         "type": "CentralTransitive",
         "requested": "[0.4.1, )",
         "resolved": "0.4.1",
-        "contentHash": "x9EjK2SjPEolTIQjYUYESjHTDFO+EY+oYf97ufdvkAeUlDcI/O8r6EIUfLhI3sgeN95r8+45KjHpYVgUqxGP7w=="
+        "contentHash": "gzy/T+fKmELp1OH7jUaATnWXfyBzsxfDtFl688gSBBMxzosN++zMY8dfx+2pnBNz0NrAdWs8TRIRn1MZg5StHQ=="
       },
       "Microsoft.EntityFrameworkCore.Sqlite": {
         "type": "CentralTransitive",
