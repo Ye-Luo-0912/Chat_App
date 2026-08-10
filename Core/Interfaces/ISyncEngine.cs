@@ -10,8 +10,8 @@ namespace Core.Interfaces;
 /// <summary>
 /// 独立数据同步引擎：鉴权成功后启动，从服务端拉取会话列表与消息水位，
 /// 全部持久化到本地 DB 后通过 <see cref="Completed"/> 事件通知 UI 投影。
-/// 生命周期严格：RestartAsync 先取消并等待旧任务退出再启动新任务，
-/// 旧任务不得与新任务竞争或污染新会话。
+/// 生命周期严格：RestartAsync 先取消并等待旧任务退出再启动新任务；并发调用以最新有效
+/// 生命周期意图为准，旧 Restart 不得在 Stop 或新会话 Start 后启动孤儿任务。
 /// </summary>
 public interface ISyncEngine
 {
@@ -23,7 +23,7 @@ public interface ISyncEngine
 
     /// <summary>
     /// 重启同步：严格等待旧任务退出（取消其 CTS 并等待完成）后再启动新任务。
-    /// 重连/切账户时旧任务的 DB 访问与 RPC 不会与新任务竞争。
+    /// 等待期间 Stop/新会话意图会使本次重启失效，确保切账户时无旧代任务复活。
     /// </summary>
     Task RestartAsync(SessionStamp session, CancellationToken ct = default);
 

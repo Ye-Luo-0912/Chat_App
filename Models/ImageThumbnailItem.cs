@@ -50,7 +50,9 @@ public sealed class ImageThumbnailItem : INotifyPropertyChanged
         }
     }
 
-    public string DisplayName => Attachment.DisplayName;
+    public string DisplayName => string.IsNullOrWhiteSpace(Attachment.FileName)
+        ? Attachment.AttachmentId
+        : Attachment.FileName;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

@@ -4,7 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Chat"
              xmlns:models="clr-namespace:Chat_App.Models"
-             xmlns:dto="clr-namespace:Core.Models.DTO;assembly=Core"
+             xmlns:wire="clr-namespace:ChatApp.Shared.Protocol.Tcp;assembly=ChatApp.Protocol.Tcp"
              xmlns:conv="clr-namespace:Chat_App.Presentation.Converters"
              mc:Ignorable="d"
              d:DesignWidth="600"
@@ -199,7 +199,7 @@
                                         <ItemsControl ItemsSource="{Binding Attachments}"
                                                       IsVisible="{Binding HasAttachments}">
                                             <ItemsControl.ItemTemplate>
-                                                <DataTemplate DataType="dto:AttachmentRefDto">
+                                                <DataTemplate DataType="wire:TcpAttachmentRef">
                                                     <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2">
                                                         <TextBlock Text="📎"
                                                                    FontSize="13"
@@ -212,7 +212,7 @@
                                                                 Cursor="Hand"
                                                                 Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
                                                                 CommandParameter="{Binding}">
-                                                            <TextBlock Text="{Binding DisplayName}"
+                                                            <TextBlock Text="{Binding FileName, TargetNullValue=附件}"
                                                                        FontSize="13"
                                                                        TextDecorations="Underline"
                                                                        Foreground="#0F172A"

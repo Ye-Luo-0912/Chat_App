@@ -79,12 +79,15 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
         {
             OwnerUserId = owner,
             MessageId = dto.MessageId,
-            ClientMessageId = null,
+            ClientMessageId = string.IsNullOrWhiteSpace(dto.ClientMessageId)
+                ? null
+                : dto.ClientMessageId,
             ConversationId = conversationId,
             SenderUserId = dto.SenderUserId,
             ReceiverUserId = dto.TargetUserId,
             Content = content,
             ReceivedAtMs = receivedAtMs,
+            ChangedAtMs = receivedAtMs,
             DeliveredAtMs = null,
             ReadAtMs = null,
             RecalledAtMs = null,
@@ -172,11 +175,15 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
 
         var owner = session.OwnerUserId;
 
-        // 批次最大时间戳：目标水位（批量方法内做单调判断，旧水位不回退）。
+        // 批次最大变更时间：目标水位（v1 字段名仍为 ReceivedAt；旧水位不回退）。
         var maxItem = items[0];
         for (var i = 1; i < items.Count; i++)
         {
-            if (items[i].ReceivedAtMs > maxItem.ReceivedAtMs)
+            var candidateChangedAt = items[i].ChangedAtMs > 0 ? items[i].ChangedAtMs : items[i].ReceivedAtMs;
+            var maxChangedAt = maxItem.ChangedAtMs > 0 ? maxItem.ChangedAtMs : maxItem.ReceivedAtMs;
+            if (candidateChangedAt > maxChangedAt
+                || (candidateChangedAt == maxChangedAt
+                    && string.CompareOrdinal(items[i].MessageId, maxItem.MessageId) > 0))
                 maxItem = items[i];
         }
 
@@ -184,7 +191,7 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
         {
             OwnerUserId = owner,
             ConversationId = conversationId,
-            AfterReceivedAtMs = maxItem.ReceivedAtMs,
+            AfterReceivedAtMs = maxItem.ChangedAtMs > 0 ? maxItem.ChangedAtMs : maxItem.ReceivedAtMs,
             AfterMessageId = maxItem.MessageId
         };
 
@@ -478,6 +485,11 @@ public sealed class MessageStore : IMessageStore, IMetricsSource
     {
         var owner = session.OwnerUserId;
         var response = await _chatSession.QueryMessageHistoryAsync(conversationId, limit, beforeReceivedAtMs, beforeMessageId, ct);
+        if (!response.Succeeded)
+        {
+            throw new InvalidOperationException(
+                $"历史拉取失败: {response.ErrorCode ?? "history_failed"} {response.ErrorMessage}".Trim());
+        }
         if (response.Items is { Count: > 0 })
             await PersistHistoryAsync(session, conversationId, response.Items, ct);
         return await _db.GetMessagesAsync(owner, conversationId, limit, beforeReceivedAtMs, beforeMessageId);

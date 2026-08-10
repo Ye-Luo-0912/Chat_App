@@ -666,15 +666,22 @@ public class DatabaseService(
         }
         if (existing is not null)
         {
-            existing.ReceivedAtMs = message.ReceivedAtMs;
-            existing.DeliveredAtMs = message.DeliveredAtMs;
-            existing.ReadAtMs = message.ReadAtMs;
-            existing.RecalledAtMs = message.RecalledAtMs;
-            existing.AttachmentsJson = message.AttachmentsJson;
+            var incomingChangedAtMs = EffectiveChangedAt(message);
+            var existingChangedAtMs = EffectiveChangedAt(existing);
+            MergeServerTimestamps(existing, message.ReceivedAtMs, message.MessageId is not null,
+                message.DeliveredAtMs, message.ReadAtMs, message.RecalledAtMs);
+            if (incomingChangedAtMs >= existingChangedAtMs)
+            {
+                existing.AttachmentsJson = message.AttachmentsJson;
+                existing.ReactionsJson = message.ReactionsJson;
+                existing.ChangedAtMs = incomingChangedAtMs;
+            }
             existing.FailureReason = message.FailureReason;
             existing.UpdatedAt = message.UpdatedAt;
             // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
-            if (MessageStatusTransitions.CanTransition(existing.Status, message.Status))
+            if (existing.RecalledAtMs is > 0)
+                existing.Status = MessageStatus.Recalled;
+            else if (MessageStatusTransitions.CanTransition(existing.Status, message.Status))
                 existing.Status = message.Status;
             // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间。
             if (message.EditVersion > existing.EditVersion)
@@ -827,17 +834,26 @@ public class DatabaseService(
                 .FirstOrDefaultAsync(m => m.OwnerUserId == message.OwnerUserId
                                        && m.ClientMessageId == message.ClientMessageId, None);
         }
+        var acceptMutableSnapshot = true;
         if (existingMessage is not null)
         {
-            existingMessage.ReceivedAtMs = message.ReceivedAtMs;
-            existingMessage.DeliveredAtMs = message.DeliveredAtMs;
-            existingMessage.ReadAtMs = message.ReadAtMs;
-            existingMessage.RecalledAtMs = message.RecalledAtMs;
-            existingMessage.AttachmentsJson = message.AttachmentsJson;
+            var incomingChangedAtMs = EffectiveChangedAt(message);
+            var existingChangedAtMs = EffectiveChangedAt(existingMessage);
+            acceptMutableSnapshot = incomingChangedAtMs >= existingChangedAtMs;
+            MergeServerTimestamps(existingMessage, message.ReceivedAtMs, message.MessageId is not null,
+                message.DeliveredAtMs, message.ReadAtMs, message.RecalledAtMs);
+            if (acceptMutableSnapshot)
+            {
+                existingMessage.AttachmentsJson = message.AttachmentsJson;
+                existingMessage.ReactionsJson = message.ReactionsJson;
+                existingMessage.ChangedAtMs = incomingChangedAtMs;
+            }
             existingMessage.FailureReason = message.FailureReason;
             existingMessage.UpdatedAt = message.UpdatedAt;
             // 严格状态机：仅接受合法转换（撤回为终态、Read→Sent 等非法转换被拒绝）。
-            if (MessageStatusTransitions.CanTransition(existingMessage.Status, message.Status))
+            if (existingMessage.RecalledAtMs is > 0)
+                existingMessage.Status = MessageStatus.Recalled;
+            else if (MessageStatusTransitions.CanTransition(existingMessage.Status, message.Status))
                 existingMessage.Status = message.Status;
             // 编辑版本单调递增：仅当入站版本严格更新时才覆盖正文/版本/编辑时间。
             if (message.EditVersion > existingMessage.EditVersion)
@@ -858,7 +874,7 @@ public class DatabaseService(
         }
 
         // ---- Upsert LocalAttachment 批量（镜像 UpsertAttachmentAsync：按 OwnerUserId + AttachmentId，回退 ClientAttachmentId）----
-        if (attachments is { Count: > 0 })
+        if (acceptMutableSnapshot && attachments is { Count: > 0 })
         {
             foreach (var attachment in attachments)
             {
@@ -1019,6 +1035,8 @@ public class DatabaseService(
         {
             var messageId = string.IsNullOrWhiteSpace(item.MessageId) ? null : item.MessageId;
             var clientId = string.IsNullOrWhiteSpace(item.ClientMessageId) ? null : item.ClientMessageId;
+            var itemChangedAtMs = EffectiveChangedAt(item);
+            var acceptMutableSnapshot = true;
 
             LocalMessage? existing = null;
             if (messageId is not null) existing = messagesByServerId.GetValueOrDefault(messageId);
@@ -1026,15 +1044,13 @@ public class DatabaseService(
 
             if (existing is not null)
             {
+                var existingChangedAtMs = EffectiveChangedAt(existing);
+                acceptMutableSnapshot = itemChangedAtMs >= existingChangedAtMs;
                 // 单调合并（镜像 UpsertMessageAsyncImpl）：撤回最高优先级、编辑版本单调、MessageId 回填。
-                existing.ReceivedAtMs = item.ReceivedAtMs;
-                existing.DeliveredAtMs = item.DeliveredAtMs;
-                existing.ReadAtMs = item.ReadAtMs;
-                if (existing.Status != MessageStatus.Recalled && item.RecalledAtMs is > 0)
-                {
+                MergeServerTimestamps(existing, item.ReceivedAtMs, messageId is not null,
+                    item.DeliveredAtMs, item.ReadAtMs, item.RecalledAtMs);
+                if (existing.RecalledAtMs is > 0)
                     existing.Status = MessageStatus.Recalled;
-                    existing.RecalledAtMs = item.RecalledAtMs;
-                }
                 if (item.EditVersion > existing.EditVersion)
                 {
                     existing.EditVersion = item.EditVersion;
@@ -1043,7 +1059,12 @@ public class DatabaseService(
                 }
                 if (string.IsNullOrEmpty(existing.MessageId) && messageId is not null)
                     existing.MessageId = messageId;
-                existing.AttachmentsJson = AttachmentJson.Serialize(item.Attachments);
+                if (acceptMutableSnapshot)
+                {
+                    existing.AttachmentsJson = AttachmentJson.Serialize(item.Attachments);
+                    existing.ReactionsJson = ReactionJson.Serialize(item.Reactions);
+                    existing.ChangedAtMs = itemChangedAtMs;
+                }
                 existing.UpdatedAt = DateTime.UtcNow;
             }
             else
@@ -1058,12 +1079,14 @@ public class DatabaseService(
                     ReceiverUserId = item.ReceiverUserId,
                     Content = item.Content ?? string.Empty,
                     ReceivedAtMs = item.ReceivedAtMs,
+                    ChangedAtMs = itemChangedAtMs,
                     DeliveredAtMs = item.DeliveredAtMs,
                     ReadAtMs = item.ReadAtMs,
                     RecalledAtMs = item.RecalledAtMs,
                     EditVersion = item.EditVersion <= 0 ? 1 : item.EditVersion,
                     EditedAtMs = item.EditedAtMs,
                     AttachmentsJson = AttachmentJson.Serialize(item.Attachments),
+                    ReactionsJson = ReactionJson.Serialize(item.Reactions),
                     ReplyToMessageId = item.ReplyToMessageId,
                     ReplyToSenderUserId = item.ReplyToSenderUserId,
                     ReplyToPreview = item.ReplyToPreview,
@@ -1082,7 +1105,7 @@ public class DatabaseService(
             }
 
             // 附件批量 upsert（镜像 ApplyIncomingMessageAsyncImpl：先 AttachmentId，回退 ClientAttachmentId）。
-            if (item.Attachments is { Count: > 0 })
+            if (acceptMutableSnapshot && item.Attachments is { Count: > 0 })
             {
                 foreach (var a in item.Attachments)
                 {
@@ -1153,7 +1176,9 @@ public class DatabaseService(
                 cursor.UpdatedAt = DateTime.UtcNow;
                 await db.SyncCursors.AddAsync(cursor, None);
             }
-            else if (cursor.AfterReceivedAtMs > existingCursor.AfterReceivedAtMs)
+            else if (cursor.AfterReceivedAtMs > existingCursor.AfterReceivedAtMs
+                     || (cursor.AfterReceivedAtMs == existingCursor.AfterReceivedAtMs
+                         && string.CompareOrdinal(cursor.AfterMessageId, existingCursor.AfterMessageId) > 0))
             {
                 existingCursor.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
                 existingCursor.AfterMessageId = cursor.AfterMessageId;
@@ -1177,6 +1202,44 @@ public class DatabaseService(
         if (string.IsNullOrWhiteSpace(content))
             return string.Empty;
         return content.Length <= 200 ? content : content[..200];
+    }
+
+    private static long EffectiveChangedAt(MessageHistoryItemDto item)
+        => item.ChangedAtMs > 0 ? item.ChangedAtMs : item.ReceivedAtMs;
+
+    private static long EffectiveChangedAt(LocalMessage message)
+        => message.ChangedAtMs > 0
+            ? message.ChangedAtMs
+            : string.IsNullOrWhiteSpace(message.MessageId)
+                ? 0 // 本地未确认消息没有服务端变更水位，不能阻挡服务端回声/快照合并。
+                : message.ReceivedAtMs;
+
+    private static void MergeServerTimestamps(
+        LocalMessage existing,
+        long incomingReceivedAtMs,
+        bool incomingHasServerMessageId,
+        long? incomingDeliveredAtMs,
+        long? incomingReadAtMs,
+        long? incomingRecalledAtMs)
+    {
+        // ReceivedAt 是服务端稳定创建时间；只补空值，或用首次服务端确认替换本地排队时间。
+        if (incomingReceivedAtMs > 0
+            && (existing.ReceivedAtMs <= 0
+                || (string.IsNullOrWhiteSpace(existing.MessageId) && incomingHasServerMessageId)))
+        {
+            existing.ReceivedAtMs = incomingReceivedAtMs;
+        }
+
+        existing.DeliveredAtMs = LaterTimestamp(existing.DeliveredAtMs, incomingDeliveredAtMs);
+        existing.ReadAtMs = LaterTimestamp(existing.ReadAtMs, incomingReadAtMs);
+        existing.RecalledAtMs = LaterTimestamp(existing.RecalledAtMs, incomingRecalledAtMs);
+    }
+
+    private static long? LaterTimestamp(long? existing, long? incoming)
+    {
+        if (incoming is not > 0)
+            return existing;
+        return existing is > 0 && existing.Value >= incoming.Value ? existing : incoming;
     }
 
     // ---- Outbox----
@@ -1528,9 +1591,9 @@ public class DatabaseService(
             SELECT m."Id", m."OwnerUserId", m."MessageId", m."ClientMessageId", m."ConversationId",
                    m."SenderUserId", m."ReceiverUserId", m."Content", m."ReceivedAtMs",
                    m."DeliveredAtMs", m."ReadAtMs", m."RecalledAtMs", m."EditVersion", m."EditedAtMs",
-                   m."AttachmentsJson", m."ReplyToMessageId", m."ReplyToSenderUserId", m."ReplyToPreview",
+                   m."AttachmentsJson", m."ReactionsJson", m."ReplyToMessageId", m."ReplyToSenderUserId", m."ReplyToPreview",
                    m."ForwardedFromMessageId", m."ForwardedFromSenderUserId", m."ForwardedFromPreview",
-                   m."Status", m."FailureReason", m."RetryCount", m."CreatedAt", m."UpdatedAt"
+                   m."Status", m."FailureReason", m."RetryCount", m."CreatedAt", m."UpdatedAt", m."ChangedAtMs"
             FROM "Messages" m
             WHERE m."OwnerUserId" = {0}
               AND (
@@ -1932,27 +1995,13 @@ public class DatabaseService(
                                    && o.ClientMessageId == outbox.ClientMessageId, None);
         if (existingOutbox is not null)
         {
-            existingOutbox.MessageId = outbox.MessageId;
-            existingOutbox.ConversationId = outbox.ConversationId;
-            existingOutbox.TargetUserId = outbox.TargetUserId;
-            existingOutbox.Content = outbox.Content;
-            existingOutbox.AttachmentIdsJson = outbox.AttachmentIdsJson;
-            existingOutbox.ReplyToMessageId = outbox.ReplyToMessageId;
-            existingOutbox.ReplyToSenderUserId = outbox.ReplyToSenderUserId;
-            existingOutbox.ReplyToPreview = outbox.ReplyToPreview;
-            existingOutbox.ForwardedFromMessageId = outbox.ForwardedFromMessageId;
-            existingOutbox.ForwardedFromSenderUserId = outbox.ForwardedFromSenderUserId;
-            existingOutbox.ForwardedFromPreview = outbox.ForwardedFromPreview;
-            existingOutbox.Status = outbox.Status;
-            existingOutbox.FailureReason = outbox.FailureReason;
-            existingOutbox.QueuedAt = outbox.QueuedAt;
-            existingOutbox.SentAt = outbox.SentAt;
-            existingOutbox.NextRetryAt = outbox.NextRetryAt;
-            existingOutbox.AttemptId = outbox.AttemptId;
-            existingOutbox.AttemptStartedAt = outbox.AttemptStartedAt;
-            existingOutbox.LeaseUntil = outbox.LeaseUntil;
-            existingOutbox.LastErrorCode = outbox.LastErrorCode;
-            existingOutbox.FailureKind = outbox.FailureKind;
+            // ClientMessageId 是幂等键：重复 enqueue 必须保留首次写入的载荷、状态、重试与租约元数据。
+            // 状态推进/重试由专用状态机方法负责；这里只允许补入尚未确认的服务端 MessageId。
+            if (string.IsNullOrWhiteSpace(existingOutbox.MessageId)
+                && !string.IsNullOrWhiteSpace(outbox.MessageId))
+            {
+                existingOutbox.MessageId = outbox.MessageId;
+            }
         }
         else
         {
@@ -1975,17 +2024,32 @@ public class DatabaseService(
         }
         if (existingMessage is not null)
         {
-            existingMessage.Content = message.Content;
-            existingMessage.ReceivedAtMs = message.ReceivedAtMs;
-            existingMessage.DeliveredAtMs = message.DeliveredAtMs;
-            existingMessage.ReadAtMs = message.ReadAtMs;
-            existingMessage.RecalledAtMs = message.RecalledAtMs;
-            existingMessage.EditVersion = message.EditVersion;
-            existingMessage.EditedAtMs = message.EditedAtMs;
-            existingMessage.AttachmentsJson = message.AttachmentsJson;
-            existingMessage.Status = message.Status;
-            existingMessage.FailureReason = message.FailureReason;
-            existingMessage.UpdatedAt = message.UpdatedAt;
+            var incomingChangedAtMs = EffectiveChangedAt(message);
+            var existingChangedAtMs = EffectiveChangedAt(existingMessage);
+            MergeServerTimestamps(existingMessage, message.ReceivedAtMs, !string.IsNullOrWhiteSpace(message.MessageId),
+                message.DeliveredAtMs, message.ReadAtMs, message.RecalledAtMs);
+            // 同一 enqueue 的重放不应以相同/更旧快照清除附件或 reaction；仅接受严格更新的服务端水位。
+            if (incomingChangedAtMs > existingChangedAtMs)
+            {
+                existingMessage.AttachmentsJson = message.AttachmentsJson;
+                existingMessage.ReactionsJson = message.ReactionsJson;
+                existingMessage.ChangedAtMs = incomingChangedAtMs;
+            }
+            // 编辑正文只按 EditVersion 单调推进。
+            if (message.EditVersion > existingMessage.EditVersion)
+            {
+                existingMessage.EditVersion = message.EditVersion;
+                existingMessage.EditedAtMs = message.EditedAtMs;
+                existingMessage.Content = message.Content;
+            }
+            // 撤回是终态；普通重复 enqueue（Queued）不得把 Sent/Read/Failed 等状态退回。
+            if (existingMessage.RecalledAtMs is > 0)
+                existingMessage.Status = MessageStatus.Recalled;
+            else if (message.Status != MessageStatus.Queued
+                     && MessageStatusTransitions.CanTransition(existingMessage.Status, message.Status))
+                existingMessage.Status = message.Status;
+            if (message.UpdatedAt > existingMessage.UpdatedAt)
+                existingMessage.UpdatedAt = message.UpdatedAt;
             // 服务端确认后回填 MessageId（outbox 阶段仅写入 ClientMessageId）。
             if (string.IsNullOrEmpty(existingMessage.MessageId) && !string.IsNullOrEmpty(message.MessageId))
                 existingMessage.MessageId = message.MessageId;
@@ -2049,6 +2113,71 @@ public class DatabaseService(
             .FirstOrDefaultAsync(s => s.OwnerUserId == ownerUserId && s.ConversationId == conversationId, None);
     }
 
+    public Task ResetConversationSyncStateAsync(long ownerUserId, string conversationId)
+        => WriteAsync(() => ResetConversationSyncStateAsyncImpl(ownerUserId, conversationId));
+
+    private async Task ResetConversationSyncStateAsyncImpl(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        var confirmedMessageIds = db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.MessageId != null)
+            .Select(m => m.MessageId!);
+
+        await db.Attachments
+            .Where(a => a.OwnerUserId == ownerUserId
+                     && a.ConversationId == conversationId
+                     && a.MessageId != null
+                     && confirmedMessageIds.Contains(a.MessageId))
+            .ExecuteDeleteAsync(None);
+
+        await db.Messages
+            .Where(m => m.OwnerUserId == ownerUserId
+                     && m.ConversationId == conversationId
+                     && m.MessageId != null)
+            .ExecuteDeleteAsync(None);
+
+        await transaction.CommitAsync(None);
+    }
+
+    public Task ReplaceSyncCursorAsync(LocalSyncCursor cursor)
+        => WriteAsync(() => ReplaceSyncCursorAsyncImpl(cursor));
+
+    private async Task ReplaceSyncCursorAsyncImpl(LocalSyncCursor cursor)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var existing = await db.SyncCursors
+            .FirstOrDefaultAsync(s => s.OwnerUserId == cursor.OwnerUserId
+                                   && s.ConversationId == cursor.ConversationId, None);
+        if (existing is null)
+        {
+            cursor.UpdatedAt = DateTime.UtcNow;
+            await db.SyncCursors.AddAsync(cursor, None);
+        }
+        else
+        {
+            // reset recovery 已验证完整快照，必须允许替换 AheadOfTip 等失效的较高水位。
+            existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
+            existing.AfterMessageId = cursor.AfterMessageId;
+            existing.UpdatedAt = DateTime.UtcNow;
+        }
+        await db.SaveChangesAsync(None);
+    }
+
+    public Task DeleteSyncCursorAsync(long ownerUserId, string conversationId)
+        => WriteAsync(() => DeleteSyncCursorAsyncImpl(ownerUserId, conversationId));
+
+    private async Task DeleteSyncCursorAsyncImpl(long ownerUserId, string conversationId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.SyncCursors
+            .Where(s => s.OwnerUserId == ownerUserId && s.ConversationId == conversationId)
+            .ExecuteDeleteAsync(None);
+    }
+
     public Task UpsertSyncCursorAsync(LocalSyncCursor cursor) => WriteAsync(() => UpsertSyncCursorAsyncImpl(cursor));
 
     private async Task UpsertSyncCursorAsyncImpl(LocalSyncCursor cursor)
@@ -2059,7 +2188,9 @@ public class DatabaseService(
         if (existing is not null)
         {
             // 单调高水位：仅向前推进，绝不回退。
-            if (cursor.AfterReceivedAtMs > existing.AfterReceivedAtMs)
+            if (cursor.AfterReceivedAtMs > existing.AfterReceivedAtMs
+                || (cursor.AfterReceivedAtMs == existing.AfterReceivedAtMs
+                    && string.CompareOrdinal(cursor.AfterMessageId, existing.AfterMessageId) > 0))
             {
                 existing.AfterReceivedAtMs = cursor.AfterReceivedAtMs;
                 existing.AfterMessageId = cursor.AfterMessageId;

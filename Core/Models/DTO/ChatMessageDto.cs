@@ -5,6 +5,12 @@ namespace Core.Models.DTO;
 
 public class ChatMessageDto
 {
+    /// <summary>
+    /// 客户端生成的幂等消息 Id。下行时用于把服务端回声与本地 Outbox 消息合并；
+    /// 旧服务端可能不返回，因此保持可空。
+    /// </summary>
+    public string? ClientMessageId { get; set; }
+
     public string? MessageId { get; set; }
 
     public string? ConversationId { get; set; }

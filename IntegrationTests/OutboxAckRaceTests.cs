@@ -171,6 +171,94 @@ public class OutboxAckRaceTests : IDisposable
         Assert.Single(received.OfType<MessageStatusChangedEvent>());
     }
 
+    [Fact]
+    public async Task Duplicate_Transactional_Enqueue_Does_Not_Regress_Acknowledged_Outbox_Or_Newer_Message()
+    {
+        var clientId = $"c-{Guid.NewGuid():N}"[..20];
+        var serverId = $"svr-{clientId}";
+        var initialOutbox = NewOutbox(clientId);
+        initialOutbox.Content = "首次载荷";
+        initialOutbox.AttachmentIdsJson = "[\"attachment-1\"]";
+        var initialMessage = NewLocalMessage(clientId);
+        initialMessage.Content = "首次载荷";
+        initialMessage.AttachmentsJson = "[\"attachment-1\"]";
+        var stableReceivedAtMs = initialMessage.ReceivedAtMs;
+        await _db.EnqueueOutboxWithMessageAsync(initialOutbox, initialMessage);
+
+        var (store, _) = CreateStore(_db);
+        await store.HandleAckAsync(Session, new MessageAcknowledgementDto
+        {
+            ClientMessageId = clientId,
+            CommandId = serverId,
+            Accepted = true,
+            AcknowledgedUtc = DateTime.UtcNow
+        });
+
+        var changedAtMs = stableReceivedAtMs + 10_000;
+        await _db.UpsertMessageAsync(new LocalMessage
+        {
+            OwnerUserId = OwnerId,
+            MessageId = serverId,
+            ClientMessageId = clientId,
+            ConversationId = ConvId,
+            SenderUserId = OwnerId,
+            ReceiverUserId = PeerId,
+            Content = "服务端较新编辑",
+            ReceivedAtMs = stableReceivedAtMs,
+            ChangedAtMs = changedAtMs,
+            DeliveredAtMs = stableReceivedAtMs + 1_000,
+            ReadAtMs = stableReceivedAtMs + 2_000,
+            RecalledAtMs = stableReceivedAtMs + 3_000,
+            EditVersion = 2,
+            EditedAtMs = stableReceivedAtMs + 4_000,
+            AttachmentsJson = "[\"attachment-new\"]",
+            ReactionsJson = "[{\"emoji\":\"ok\",\"count\":2}]",
+            Status = MessageStatus.Recalled,
+            CreatedAt = initialMessage.CreatedAt,
+            UpdatedAt = DateTime.UtcNow
+        });
+
+        var acknowledgedOutbox = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
+        Assert.NotNull(acknowledgedOutbox);
+        var sentAt = acknowledgedOutbox!.SentAt;
+        var queuedAt = acknowledgedOutbox.QueuedAt;
+
+        var duplicateOutbox = NewOutbox(clientId);
+        duplicateOutbox.Content = "陈旧重复载荷";
+        duplicateOutbox.AttachmentIdsJson = null;
+        duplicateOutbox.QueuedAt = queuedAt.AddHours(1);
+        var duplicateMessage = NewLocalMessage(clientId);
+        duplicateMessage.Content = "陈旧重复载荷";
+        duplicateMessage.ReceivedAtMs = stableReceivedAtMs + 99_000;
+        duplicateMessage.ChangedAtMs = 0;
+        duplicateMessage.EditVersion = 1;
+        duplicateMessage.AttachmentsJson = null;
+        duplicateMessage.ReactionsJson = null;
+        await _db.EnqueueOutboxWithMessageAsync(duplicateOutbox, duplicateMessage);
+
+        var outbox = await _db.GetOutboxByClientIdAsync(OwnerId, clientId);
+        var message = await _db.GetMessageByClientIdAsync(OwnerId, clientId);
+        Assert.NotNull(outbox);
+        Assert.NotNull(message);
+        Assert.Equal(OutboxStatus.Sent, outbox!.Status);
+        Assert.Equal(serverId, outbox.MessageId);
+        Assert.Equal(sentAt, outbox.SentAt);
+        Assert.Equal(queuedAt, outbox.QueuedAt);
+        Assert.Equal("首次载荷", outbox.Content);
+        Assert.Equal("[\"attachment-1\"]", outbox.AttachmentIdsJson);
+        Assert.Equal(MessageStatus.Recalled, message!.Status);
+        Assert.Equal(serverId, message.MessageId);
+        Assert.Equal(stableReceivedAtMs, message.ReceivedAtMs);
+        Assert.Equal(changedAtMs, message.ChangedAtMs);
+        Assert.Equal(stableReceivedAtMs + 1_000, message.DeliveredAtMs);
+        Assert.Equal(stableReceivedAtMs + 2_000, message.ReadAtMs);
+        Assert.Equal(stableReceivedAtMs + 3_000, message.RecalledAtMs);
+        Assert.Equal(2, message.EditVersion);
+        Assert.Equal("服务端较新编辑", message.Content);
+        Assert.Equal("[\"attachment-new\"]", message.AttachmentsJson);
+        Assert.Equal("[{\"emoji\":\"ok\",\"count\":2}]", message.ReactionsJson);
+    }
+
     /// <summary>ACK 拒绝（Accepted=false）在 Queued 时到达：直接推进 Failed，可重试。</summary>
     [Fact]
     public async Task Rejected_Ack_Before_Sending_Persisted_Advances_Queued_To_Failed()

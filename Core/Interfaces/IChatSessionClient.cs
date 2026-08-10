@@ -125,6 +125,17 @@ public interface IChatSessionClient : IDisposable
         string? beforeMessageId = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// 正向拉取会话变更。afterReceivedAtMs 是 wire 兼容名称，服务端按 changed_at_ms 解释。
+    /// </summary>
+    Task<MessageHistoryPageDto> QueryMessageHistoryAfterAsync(
+        string conversationId,
+        long afterReceivedAtMs,
+        string afterMessageId,
+        int limit = 50,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话客户端不支持正向历史分页。");
+
     /// <summary>发送已读回执。告知服务端我已读到某条消息。</summary>
     Task<MessageReceiptAckDto> SendMessageReceiptAsync(
         string conversationId,

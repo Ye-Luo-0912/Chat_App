@@ -26,6 +26,8 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     private const int MaxConversationsWithHistory = 10;
     private const int MaxConversationPages = 10;
     private const int MaxCatchUpPagesPerConversation = 5;
+    private const string ConversationListCursorMissing = "CONVERSATION_LIST_CURSOR_MISSING";
+    private const string ConversationListPageFailed = "CONVERSATION_LIST_PAGE_FAILED";
 
     private readonly IChatSessionClient _chatSession;
     private readonly IMessageStore _messageStore;
@@ -35,6 +37,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     private readonly SyncDiagnostics _diagnostics = new();
 
     private readonly object _startLock = new();
+    private long _lifecycleIntent;
     private CancellationTokenSource? _syncCts;
     private Task? _syncTask;
 
@@ -94,31 +97,35 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     {
         Task? oldTask;
         CancellationTokenSource? oldCts;
+        long intent;
         lock (_startLock)
         {
+            intent = ++_lifecycleIntent;
             oldCts = _syncCts;
             oldTask = _syncTask;
-            _syncCts = null;
-            _syncTask = null;
-        }
-        oldCts?.Cancel();
-        if (oldTask is not null)
-        {
-            try
-            {
-                // 严格等待旧任务退出（旧任务的 Completed 事件可能已触发，由订阅方按 SessionStamp 过滤）。
-                await oldTask.ConfigureAwait(false);
-            }
-            catch
-            {
-                // 旧任务异常已在 RunAsync 内部捕获；此处仅等待退出。
-            }
-            oldCts?.Dispose();
         }
 
-        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        TryCancel(oldCts);
+        await WaitForExitAsync(oldTask).ConfigureAwait(false);
+
         lock (_startLock)
         {
+            // Stop、Start 或更新的 Restart 已表达了更新意图时，本次 Restart 不再有启动权限。
+            // 等待期间始终保留旧任务引用，Start 因而不会让新旧 RunAsync 重叠。
+            if (intent != _lifecycleIntent)
+                return;
+
+            if (ReferenceEquals(_syncTask, oldTask))
+            {
+                _syncTask = null;
+                _syncCts = null;
+            }
+            oldCts?.Dispose();
+
+            if (ct.IsCancellationRequested)
+                return;
+
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             _syncCts = cts;
             _syncTask = Task.Run(() => RunAsync(session, cts.Token));
         }
@@ -131,6 +138,9 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
         {
             if (_syncTask is { IsCompleted: false })
                 return;
+
+            ++_lifecycleIntent;
+            _syncCts?.Dispose();
             var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             _syncCts = cts;
             _syncTask = Task.Run(() => RunAsync(session, cts.Token));
@@ -144,25 +154,54 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     {
         Task? oldTask;
         CancellationTokenSource? oldCts;
+        long intent;
         lock (_startLock)
         {
+            intent = ++_lifecycleIntent;
             oldCts = _syncCts;
             oldTask = _syncTask;
-            _syncCts = null;
-            _syncTask = null;
         }
-        oldCts?.Cancel();
-        if (oldTask is not null)
+
+        TryCancel(oldCts);
+        await WaitForExitAsync(oldTask).ConfigureAwait(false);
+
+        lock (_startLock)
         {
-            try
+            // 只允许仍为最新意图的 Stop 清理它观察到的任务；否则由更新意图接管。
+            if (intent == _lifecycleIntent && ReferenceEquals(_syncTask, oldTask))
             {
-                await oldTask.ConfigureAwait(false);
+                _syncTask = null;
+                _syncCts = null;
+                oldCts?.Dispose();
             }
-            catch
-            {
-                // 旧任务异常已内部处理；此处仅等待退出。
-            }
-            oldCts?.Dispose();
+        }
+    }
+
+    private static void TryCancel(CancellationTokenSource? cts)
+    {
+        if (cts is null)
+            return;
+        try
+        {
+            cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 并发的更新意图已完成并回收同一代 CTS。
+        }
+    }
+
+    private static async Task WaitForExitAsync(Task? task)
+    {
+        if (task is null)
+            return;
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch
+        {
+            // RunAsync 已处理业务异常；生命周期入口只负责等待唯一运行实例退出。
         }
     }
 
@@ -196,8 +235,26 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 return;
             }
 
-            var conversations = new List<ConversationListItemDto>(sync.Conversations);
-            var catchUps = new List<ConversationHistoryCatchUpDto>(sync.CatchUps);
+            // 客户端尚未持久化关系水位/好友申请/黑名单投影。本版本不主动请求关系增量；
+            // 若服务端仍返回数据，显式失败，禁止把未应用的关系变化伪装成同步成功。
+            if (sync.RelationshipCatchUps?.Any(static catchUp =>
+                    catchUp.ResetRequired || catchUp.HasMore || catchUp.Changes?.Count > 0) == true)
+            {
+                Fail(session, "RELATIONSHIP_SYNC_UNSUPPORTED",
+                    "服务端返回了客户端尚未启用的关系增量；本轮未应用任何关系水位。");
+                return;
+            }
+
+            if (sync.ConversationsHasMore && sync.ConversationsNextCursor is null)
+            {
+                Fail(session, ConversationListCursorMissing,
+                    "bootstrap 会话列表声明仍有更多数据但未返回游标。");
+                return;
+            }
+
+            var conversations = new List<ConversationListItemDto>(sync.Conversations ?? []);
+            var catchUps = new List<ConversationHistoryCatchUpDto>(sync.CatchUps ?? []);
+            var resetsRequired = sync.ResetsRequired ?? [];
 
             // 预算截断标记：会话列表或历史续页达到页数上限且服务端仍有更多 → Partial（不得静默成功）。
             var partial = false;
@@ -218,43 +275,105 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                         ct)
                     .ConfigureAwait(false);
                 if (!resp.Succeeded)
-                    break;
+                {
+                    var detail = string.IsNullOrWhiteSpace(resp.ErrorCode)
+                        ? resp.ErrorMessage
+                        : string.IsNullOrWhiteSpace(resp.ErrorMessage)
+                            ? resp.ErrorCode
+                            : $"{resp.ErrorCode}: {resp.ErrorMessage}";
+                    Fail(session, ConversationListPageFailed, detail);
+                    return;
+                }
+                if (resp.HasMore && resp.NextCursor is null)
+                {
+                    Fail(session, ConversationListCursorMissing,
+                        "会话列表续页声明仍有更多数据但未返回游标。");
+                    return;
+                }
                 foreach (var item in resp.Items)
                 {
                     await PersistConversationAsync(session, item, ct).ConfigureAwait(false);
                     conversations.Add(item);
                 }
-                if (!resp.HasMore || resp.NextCursor is null)
+                if (!resp.HasMore)
                     break;
                 listCursor = resp.NextCursor;
                 if (page == MaxConversationPages - 1)
                     partial = true; // 达到会话列表页数上限且仍有更多
             }
 
-            // 4. 持久化 catch-up（forward 方向：以正向水位判定 + 推进水位）+ 对仍有更多的会话继续拉历史
-            foreach (var cu in catchUps)
+            // 4. 失效水位恢复：先清除已确认的本地服务端投影，再从最新页向后完整重建。
+            // 仅当所有页完成后才原子替换 changed-at 水位；中断或失败保留旧失效水位以便重入。
+            var resetConversationIds = resetsRequired
+                .Where(static reset => !string.IsNullOrWhiteSpace(reset.ConversationId))
+                .Select(static reset => reset.ConversationId)
+                .ToHashSet(StringComparer.Ordinal);
+            var missingForwardCursor = catchUps.FirstOrDefault(c =>
+                !resetConversationIds.Contains(c.ConversationId)
+                && c.HasMore
+                && c.NextCursor is null);
+            if (missingForwardCursor is not null)
+            {
+                Fail(session, "FORWARD_CURSOR_MISSING",
+                    $"bootstrap 正向同步声明仍有更多数据但未返回游标: {missingForwardCursor.ConversationId}");
+                return;
+            }
+            foreach (var reset in resetsRequired)
+            {
+                var recovered = await RecoverResetConversationAsync(session, reset, ct).ConfigureAwait(false);
+                if (!recovered)
+                    partial = true;
+            }
+
+            // 5. 持久化 catch-up（forward 方向：changed-at 水位判定 + 推进水位）。
+            // reset 会话已由全量恢复处理，不重复应用 bootstrap 中可能残留的 catch-up。
+            foreach (var cu in catchUps.Where(c => !resetConversationIds.Contains(c.ConversationId)))
                 await PersistCatchUpAsync(session, cu, ct).ConfigureAwait(false);
 
-            foreach (var cu in catchUps.Where(c => c.HasMore && c.NextCursor is not null).ToArray())
+            foreach (var cu in catchUps.Where(c =>
+                         !resetConversationIds.Contains(c.ConversationId)
+                         && c.HasMore
+                         && c.NextCursor is not null).ToArray())
             {
                 var cursor = cu.NextCursor;
                 for (var page = 0; page < MaxCatchUpPagesPerConversation && cursor is not null; page++)
                 {
-                    var resp = await _chatSession.QueryMessageHistoryAsync(
+                    var resp = await _chatSession.QueryMessageHistoryAfterAsync(
                             cu.ConversationId,
-                            HistoryLimitPerConversation,
-                            cursor.ReceivedAtMs,
+                            EffectiveChangedAt(cursor),
                             cursor.MessageId,
+                            HistoryLimitPerConversation,
                             ct)
                         .ConfigureAwait(false);
-                    if (!resp.Succeeded || resp.Items.Count == 0)
+                    if (!resp.Succeeded)
+                    {
+                        Fail(session, resp.ErrorCode ?? "FORWARD_CATCHUP_FAILED", resp.ErrorMessage);
+                        return;
+                    }
+                    if (resp.HasMore && resp.NextCursor is null)
+                    {
+                        Fail(session, "FORWARD_CURSOR_MISSING",
+                            $"正向同步声明仍有更多数据但未返回游标: {cu.ConversationId}");
+                        return;
+                    }
+                    if (resp.Items.Count == 0)
+                    {
+                        if (resp.HasMore)
+                            partial = true; // 服务端宣称有更多但没有可推进条目，禁止死循环。
                         break;
-                    // backward 方向：Before... 游标返回的是"更早"的消息，天然小于正向水位，
-                    // 绝不能复用 HasNewerMessages（会被整页跳过）；这里无条件幂等合并
-                    // （ApplyHistoryBatchAsync 内部按 MessageId 幂等），且不推进正向水位。
-                    await PersistHistoryPageAsync(session, cu.ConversationId, resp.Items, ct).ConfigureAwait(false);
+                    }
+
+                    await PersistForwardHistoryPageAsync(session, cu.ConversationId, resp.Items, ct)
+                        .ConfigureAwait(false);
                     if (!resp.HasMore || resp.NextCursor is null)
                         break;
+                    if (EffectiveChangedAt(cursor) == EffectiveChangedAt(resp.NextCursor)
+                        && string.Equals(cursor.MessageId, resp.NextCursor.MessageId, StringComparison.Ordinal))
+                    {
+                        Fail(session, "FORWARD_CURSOR_NOT_ADVANCED",
+                            $"正向同步游标未推进: {cu.ConversationId}/{cursor.MessageId}/{EffectiveChangedAt(cursor)}");
+                        return;
+                    }
                     cursor = resp.NextCursor;
                     if (page == MaxCatchUpPagesPerConversation - 1)
                         partial = true; // 达到单会话历史页数上限且仍有更多
@@ -329,13 +448,13 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
         if (!_conflicts.HasNewerMessages(cursor?.AfterReceivedAtMs, cursor?.AfterMessageId, cu.Items))
             return;
 
-        // 目标水位：批次最大 (ReceivedAtMs, MessageId) 复合游标（批量方法内做单调判断，不回退旧水位）。
-        var maxItem = MaxItem(cu.Items);
+        // 目标水位：批次最大 (ChangedAtMs, MessageId) 复合游标。
+        var maxItem = MaxChangedItem(cu.Items);
         var target = new LocalSyncCursor
         {
             OwnerUserId = session.OwnerUserId,
             ConversationId = cu.ConversationId,
-            AfterReceivedAtMs = maxItem.ReceivedAtMs,
+            AfterReceivedAtMs = EffectiveChangedAt(maxItem),
             AfterMessageId = maxItem.MessageId
         };
 
@@ -345,10 +464,9 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     }
 
     /// <summary>
-    /// backward 历史续页落库：无条件幂等合并（不判定水位、不推进正向水位，cursor=null）。
-    /// 早于水位的消息正是分页要补的历史，若用正向水位过滤会整页丢失。
+    /// forward catch-up 续页：按 changed-at 最大项推进正向水位。
     /// </summary>
-    private async Task PersistHistoryPageAsync(
+    private async Task PersistForwardHistoryPageAsync(
         SessionStamp session,
         string conversationId,
         IReadOnlyList<MessageHistoryItemDto> items,
@@ -356,12 +474,133 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     {
         if (items.Count == 0)
             return;
-        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, cursor: null, ct).ConfigureAwait(false);
+
+        var max = MaxChangedItem(items);
+        var cursor = new LocalSyncCursor
+        {
+            OwnerUserId = session.OwnerUserId,
+            ConversationId = conversationId,
+            AfterReceivedAtMs = EffectiveChangedAt(max),
+            AfterMessageId = max.MessageId
+        };
+        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, cursor, ct).ConfigureAwait(false);
         _diagnostics.AddMessages(items.Count);
-        _diagnostics.RecordSyncedMessages(MaxItem(items).ReceivedAtMs);
+        _diagnostics.RecordSyncedMessages(MaxReceivedItem(items).ReceivedAtMs);
     }
 
-    private static MessageHistoryItemDto MaxItem(IReadOnlyList<MessageHistoryItemDto> items)
+    private async Task PersistBackwardHistoryPageAsync(
+        SessionStamp session,
+        string conversationId,
+        IReadOnlyList<MessageHistoryItemDto> items,
+        CancellationToken ct)
+    {
+        if (items.Count == 0)
+            return;
+        await _messageStore.ApplyHistoryBatchAsync(session, conversationId, items, cursor: null, ct)
+            .ConfigureAwait(false);
+        _diagnostics.AddMessages(items.Count);
+        _diagnostics.RecordSyncedMessages(MaxReceivedItem(items).ReceivedAtMs);
+    }
+
+    private async Task<bool> RecoverResetConversationAsync(
+        SessionStamp session,
+        SyncCursorResetRequiredDto reset,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(reset.ConversationId))
+            throw new InvalidDataException("SyncBootstrap reset 缺少 ConversationId。");
+
+        var conversationId = reset.ConversationId;
+        await _db.ResetConversationSyncStateAsync(session.OwnerUserId, conversationId).ConfigureAwait(false);
+
+        if (reset.Reason == SyncCursorResetReasonDto.MembershipLost)
+        {
+            await _db.DeleteSyncCursorAsync(session.OwnerUserId, conversationId).ConfigureAwait(false);
+            await _messageStore.MarkOutboxPermanentByConversationAsync(
+                session.OwnerUserId,
+                conversationId,
+                "membership_lost",
+                ct).ConfigureAwait(false);
+            await _db.SetConversationLocalStateAsync(
+                session.OwnerUserId,
+                conversationId,
+                archived: true,
+                deleted: true).ConfigureAwait(false);
+            return true;
+        }
+
+        MessageHistoryCursorDto? before = null;
+        MessageHistoryItemDto? maxChanged = null;
+        for (var page = 0; ; page++)
+        {
+            var response = await _chatSession.QueryMessageHistoryAsync(
+                    conversationId,
+                    ConversationListLimit,
+                    before?.ReceivedAtMs,
+                    before?.MessageId,
+                    ct)
+                .ConfigureAwait(false);
+
+            if (!response.Succeeded)
+                throw new InvalidOperationException(
+                    $"reset recovery 失败: {response.ErrorCode ?? "history_failed"} {response.ErrorMessage}".Trim());
+
+            if (response.Items.Count > 0)
+            {
+                await PersistBackwardHistoryPageAsync(session, conversationId, response.Items, ct)
+                    .ConfigureAwait(false);
+                var pageMax = MaxChangedItem(response.Items);
+                if (maxChanged is null || CompareChanged(pageMax, maxChanged) > 0)
+                    maxChanged = pageMax;
+            }
+
+            if (!response.HasMore)
+            {
+                if (maxChanged is not null)
+                {
+                    await _db.ReplaceSyncCursorAsync(new LocalSyncCursor
+                    {
+                        OwnerUserId = session.OwnerUserId,
+                        ConversationId = conversationId,
+                        AfterReceivedAtMs = EffectiveChangedAt(maxChanged),
+                        AfterMessageId = maxChanged.MessageId,
+                        UpdatedAt = DateTime.UtcNow
+                    }).ConfigureAwait(false);
+                }
+                else
+                    await _db.DeleteSyncCursorAsync(session.OwnerUserId, conversationId).ConfigureAwait(false);
+                return true;
+            }
+
+            if (response.Items.Count == 0 || response.NextCursor is null)
+            {
+                throw new InvalidDataException(
+                    $"reset recovery 无法推进分页: {conversationId}, page={page}");
+            }
+            if (before is not null
+                && before.ReceivedAtMs == response.NextCursor.ReceivedAtMs
+                && string.Equals(before.MessageId, response.NextCursor.MessageId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"reset recovery 游标未推进: {conversationId}/{before.MessageId}/{before.ReceivedAtMs}");
+            }
+            before = response.NextCursor;
+        }
+    }
+
+    private static MessageHistoryItemDto MaxChangedItem(IReadOnlyList<MessageHistoryItemDto> items)
+    {
+        var max = items[0];
+        for (var i = 1; i < items.Count; i++)
+        {
+            var item = items[i];
+            if (CompareChanged(item, max) > 0)
+                max = item;
+        }
+        return max;
+    }
+
+    private static MessageHistoryItemDto MaxReceivedItem(IReadOnlyList<MessageHistoryItemDto> items)
     {
         var max = items[0];
         for (var i = 1; i < items.Count; i++)
@@ -374,6 +613,18 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
         }
         return max;
     }
+
+    private static int CompareChanged(MessageHistoryItemDto left, MessageHistoryItemDto right)
+    {
+        var byTime = EffectiveChangedAt(left).CompareTo(EffectiveChangedAt(right));
+        return byTime != 0 ? byTime : string.CompareOrdinal(left.MessageId, right.MessageId);
+    }
+
+    private static long EffectiveChangedAt(MessageHistoryItemDto item)
+        => item.ChangedAtMs > 0 ? item.ChangedAtMs : item.ReceivedAtMs;
+
+    private static long EffectiveChangedAt(MessageHistoryCursorDto cursor)
+        => cursor.ChangedAtMs ?? cursor.ReceivedAtMs;
 }
 
 /// <summary>同步水位存取：委托 IMessageStore / IDatabaseService 现有能力。</summary>
@@ -398,7 +649,7 @@ public sealed class SyncCheckpointStore(
 /// <summary>
 /// 冲突判定：存在比本地正向水位更新的消息才值得持久化。
 /// 仅用于 bootstrap catch-up（forward 方向）；backward 历史续页不经过此判定。
-/// 同时间戳按 (ReceivedAtMs, MessageId) 复合比较：本地水位消息 Id 更早时视为有更新。
+/// 同时间戳按 (ChangedAtMs, MessageId) 复合比较：本地水位消息 Id 更早时视为有更新。
 /// </summary>
 public sealed class SyncConflictResolver : ISyncConflictResolver
 {
@@ -413,10 +664,11 @@ public sealed class SyncConflictResolver : ISyncConflictResolver
             return true;
         foreach (var item in items)
         {
-            if (item.ReceivedAtMs > after)
+            var changedAtMs = item.ChangedAtMs > 0 ? item.ChangedAtMs : item.ReceivedAtMs;
+            if (changedAtMs > after)
                 return true;
             // 同时间戳：仅当本地水位消息 Id 字典序更早（即本地落后）才视为有更新。
-            if (item.ReceivedAtMs == after
+            if (changedAtMs == after
                 && localAfterMessageId is not null
                 && string.CompareOrdinal(item.MessageId, localAfterMessageId) > 0)
                 return true;
