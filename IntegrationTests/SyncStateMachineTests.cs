@@ -412,6 +412,175 @@ public class SyncStateMachineTests : IDisposable
         Assert.Equal("服务器新版本 v3", afterNew.Content);
     }
 
+    [Fact]
+    public async Task History_Response_Missing_ConversationId_Is_Inferred_And_Observable()
+    {
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        tcp.OnFrameSent += (command, body) =>
+        {
+            if (command != PacketCommand.MessageHistoryRequest)
+                return;
+            var request = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+            InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage, new MessageHistoryPageDto
+            {
+                RequestId = request!.RequestId,
+                Succeeded = true,
+                ConversationId = null
+            });
+        };
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        var page = await session.QueryMessageHistoryAsync(ConvId);
+        Assert.Equal(ConvId, page.ConversationId);
+        Assert.Equal(1, session.Counters["history_conversation_ids_inferred"]);
+    }
+
+    [Fact]
+    public async Task History_Response_Wrong_ConversationId_Fails_Request_Immediately()
+    {
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        tcp.OnFrameSent += (command, body) =>
+        {
+            if (command != PacketCommand.MessageHistoryRequest)
+                return;
+            var request = serializer.Deserialize<MessageHistoryRequestDto>(new ReadOnlySequence<byte>(body));
+            InjectPacket(tcp, serializer, PacketCommand.MessageHistoryPage, new MessageHistoryPageDto
+            {
+                RequestId = request!.RequestId,
+                Succeeded = true,
+                ConversationId = "wrong-conversation"
+            });
+        };
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => session.QueryMessageHistoryAsync(ConvId));
+        Assert.Equal(1, session.Counters["history_conversation_mismatches"]);
+        Assert.Equal(0, session.PendingRequestCount);
+    }
+
+    [Theory]
+    [InlineData("{")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    public async Task Invalid_Sync_Response_Fails_Pending_Request_And_Increments_Diagnostic(string responseJson)
+    {
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        tcp.OnFrameSent += (command, _) =>
+        {
+            if (command == PacketCommand.SyncBootstrapRequest)
+                InjectRawPacket(tcp, PacketCommand.SyncBootstrapResponse, responseJson);
+        };
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => session.QuerySyncBootstrapAsync());
+        Assert.Equal(1, session.Counters["route_failures"]);
+        Assert.Equal(0, session.PendingRequestCount);
+    }
+
+    [Theory]
+    [InlineData("{")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    public async Task Invalid_History_Response_Fails_Pending_Request_And_Increments_Diagnostic(string responseJson)
+    {
+        using var tcp = new ScriptedTcpClient();
+        var serializer = new JsonPacketBodySerializer();
+        var session = new ChatSessionClient(tcp, new MessagePacketCodec(), serializer);
+        SetupAutoAuth(tcp, serializer, OwnerId);
+        tcp.OnFrameSent += (command, _) =>
+        {
+            if (command == PacketCommand.MessageHistoryRequest)
+                InjectRawPacket(tcp, PacketCommand.MessageHistoryPage, responseJson);
+        };
+
+        await session.ConnectAsync(new ServerEndpoint { ServerIpAddress = "127.0.0.1", ServerPort = 7000 });
+        await session.AuthenticateAsync("token", OwnerId, null, null);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => session.QueryMessageHistoryAsync(ConvId));
+        Assert.Equal(1, session.Counters["route_failures"]);
+        Assert.Equal(0, session.PendingRequestCount);
+    }
+
+    [Fact]
+    public async Task Older_ChangedAt_Snapshot_Does_Not_Regress_Mutable_Message_State()
+    {
+        const long receivedAt = 1_700_000_000_000;
+        var newer = NewHistoryItem("reaction-1", "", "消息", receivedAt);
+        newer.ChangedAtMs = receivedAt + 2_000;
+        newer.DeliveredAtMs = receivedAt + 100;
+        newer.ReadAtMs = receivedAt + 200;
+        newer.RecalledAtMs = receivedAt + 300;
+        newer.Attachments =
+        [
+            new AttachmentRefDto
+            {
+                AttachmentId = "attachment-newer",
+                FileName = "newer.bin",
+                ContentType = "application/octet-stream",
+                SizeBytes = 200
+            }
+        ];
+        newer.Reactions =
+        [
+            new MessageReactionSummaryDto { Emoji = "👍", Count = 3, ReactedByMe = true }
+        ];
+
+        await _db.ApplyHistoryBatchAsync(OwnerId, ConvId, [newer], null);
+
+        var stale = NewHistoryItem("reaction-1", "", "消息", receivedAt - 10_000);
+        stale.ChangedAtMs = receivedAt + 1_000;
+        stale.Attachments =
+        [
+            new AttachmentRefDto
+            {
+                AttachmentId = "attachment-stale",
+                FileName = "stale.bin",
+                ContentType = "application/octet-stream",
+                SizeBytes = 100
+            }
+        ];
+        stale.Reactions =
+        [
+            new MessageReactionSummaryDto { Emoji = "👍", Count = 1, ReactedByMe = false }
+        ];
+        await _db.ApplyHistoryBatchAsync(OwnerId, ConvId, [stale], null);
+
+        var stored = await _db.GetMessageByServerIdAsync(OwnerId, "reaction-1");
+        Assert.NotNull(stored);
+        Assert.Equal(receivedAt + 2_000, stored!.ChangedAtMs);
+        Assert.Equal(receivedAt, stored.ReceivedAtMs);
+        Assert.Equal(receivedAt + 100, stored.DeliveredAtMs);
+        Assert.Equal(receivedAt + 200, stored.ReadAtMs);
+        Assert.Equal(receivedAt + 300, stored.RecalledAtMs);
+        Assert.Equal(MessageStatus.Recalled, stored.Status);
+        var attachment = Assert.Single(AttachmentJson.Deserialize(stored.AttachmentsJson)!);
+        Assert.Equal("attachment-newer", attachment.AttachmentId);
+        var reactions = ReactionJson.Deserialize(stored.ReactionsJson);
+        var reaction = Assert.Single(reactions!);
+        Assert.Equal(3, reaction.Count);
+        Assert.True(reaction.ReactedByMe);
+
+        var storedAttachments = await _db.GetAttachmentsByMessageIdAsync(OwnerId, "reaction-1");
+        var storedAttachment = Assert.Single(storedAttachments);
+        Assert.Equal("attachment-newer", storedAttachment.AttachmentId);
+        Assert.Null(await _db.GetAttachmentByAttachmentIdAsync(OwnerId, "attachment-stale"));
+    }
+
     /// <summary>历史滚动分页：游标递减逐页拉取 → 增量入库 → 无重复；同游标重复拉取幂等。</summary>
     [Fact]
     public async Task History_Paging_Incremental_And_Idempotent()
@@ -661,6 +830,18 @@ public class SyncStateMachineTests : IDisposable
         var packet = new MessagePacket(command,
             bodyLen == 0 ? ReadOnlySequence<byte>.Empty : new ReadOnlySequence<byte>(writer.WrittenSpan.ToArray()));
         var frameWriter = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + bodyLen);
+        new MessagePacketCodec().TryWrite(packet, frameWriter, out _);
+        tcp.InjectData(frameWriter.WrittenMemory);
+    }
+
+    private static void InjectRawPacket(
+        ScriptedTcpClient tcp,
+        PacketCommand command,
+        string json)
+    {
+        var body = System.Text.Encoding.UTF8.GetBytes(json);
+        var packet = new MessagePacket(command, new ReadOnlySequence<byte>(body));
+        var frameWriter = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + body.Length);
         new MessagePacketCodec().TryWrite(packet, frameWriter, out _);
         tcp.InjectData(frameWriter.WrittenMemory);
     }

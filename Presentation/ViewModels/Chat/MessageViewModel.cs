@@ -836,7 +836,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             _ = SaveDraftSnapshotAsync(prevOwner, prevConv);
         }
 
-        var isGroup = conversation.Type == (byte)Core.Models.DTO.ConversationTypeDto.Group;
+        var isGroup = conversation.Type == (byte)ConversationTypeDto.Group;
         var targetPeerId = conversation.PeerUserId ?? 0;
         var previousPeerId = CurrPeerId;
         if (previousPeerId > 0 && previousPeerId != targetPeerId)
@@ -850,7 +850,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         CurrPeerId = targetPeerId;
         CurrDestination = new Core.Models.DTO.MessageDestination(
             conversation.ConversationId,
-            isGroup ? Core.Models.DTO.ConversationTypeDto.Group : Core.Models.DTO.ConversationTypeDto.Direct,
+            isGroup ? ConversationTypeDto.Group : ConversationTypeDto.Direct,
             conversation.PeerUserId);
         try
         {
@@ -1559,7 +1559,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
             OwnerUserId = selfId,
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
-            ConversationType = (byte)(CurrDestination?.Type ?? Core.Models.DTO.ConversationTypeDto.Direct),
+            ConversationType = (byte)(CurrDestination?.Type ?? ConversationTypeDto.Direct),
             TargetUserId = targetUserId,
             Content = text,
             AttachmentIdsJson = attachmentIdsJson,
@@ -1637,7 +1637,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(source);
 
-        var isGroupTarget = target.Type == (byte)Core.Models.DTO.ConversationTypeDto.Group;
+        var isGroupTarget = target.Type == (byte)ConversationTypeDto.Group;
         var targetPeerId = target.PeerUserId ?? 0;
         // 群聊无对端用户：按会话寻址即可转发；直聊要求有对端。
         if (!isGroupTarget && targetPeerId <= 0)
@@ -1692,8 +1692,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
             ClientMessageId = clientMessageId,
             ConversationId = conversationId,
             ConversationType = (byte)(isGroupTarget
-                ? Core.Models.DTO.ConversationTypeDto.Group
-                : Core.Models.DTO.ConversationTypeDto.Direct),
+                ? ConversationTypeDto.Group
+                : ConversationTypeDto.Direct),
             TargetUserId = isGroupTarget ? null : targetPeerId,
             Content = content,
             ForwardedFromMessageId = source.MessageId,

@@ -413,7 +413,7 @@
         "type": "Project",
         "dependencies": {
           "ChatApp.Contracts.Http": "[0.3.0, )",
-          "ChatApp.Protocol.Tcp": "[0.3.0, )"
+          "ChatApp.Protocol.Tcp": "[0.4.1, )"
         }
       },
       "ChatApp.Contracts.Http": {
@@ -424,9 +424,9 @@
       },
       "ChatApp.Protocol.Tcp": {
         "type": "CentralTransitive",
-        "requested": "[0.3.0, )",
-        "resolved": "0.3.0",
-        "contentHash": "6WOuS+tfGT2JGcV78FtYUWhF7L9uDCn4wwNdB5M54WYBHB7fykOnzdbAiEZ1+xrLsia/qiRmneYGKRh2Mmo6qQ=="
+        "requested": "[0.4.1, )",
+        "resolved": "0.4.1",
+        "contentHash": "x9EjK2SjPEolTIQjYUYESjHTDFO+EY+oYf97ufdvkAeUlDcI/O8r6EIUfLhI3sgeN95r8+45KjHpYVgUqxGP7w=="
       },
       "SQLitePCLRaw.bundle_e_sqlite3": {
         "type": "CentralTransitive",

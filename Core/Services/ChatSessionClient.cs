@@ -66,6 +66,9 @@ namespace Core.Services
         private readonly LatencyHistogram _heartbeatRtt = new();
         private readonly LatencyHistogram _rpcLatency = new();
         private long _rpcsSent;
+        private long _routeFailures;
+        private long _historyConversationIdsInferred;
+        private long _historyConversationMismatches;
 
         // 请求超时（秒）—— 按业务类型分级
         private const int AuthTimeoutSec = 5;
@@ -245,7 +248,7 @@ namespace Core.Services
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"路由帧失败 Command={packet.Command}, Error={ex.Message}");
+                    HandleRouteFailure(packet.Command, ex);
                 }
             }
         }
@@ -414,6 +417,30 @@ namespace Core.Services
                 if (state is not null)
                     Interlocked.CompareExchange(ref _handshakeState, null, state);
                 _connectGate.Release();
+            }
+        }
+
+        private void HandleRouteFailure(PacketCommand command, Exception exception)
+        {
+            Interlocked.Increment(ref _routeFailures);
+            var contractException = new InvalidDataException(
+                $"无法解析或处理 {command} 响应，协议契约可能不兼容。",
+                exception);
+            Trace.TraceError(
+                "路由帧失败 Command={0}, Error={1}",
+                command,
+                exception.Message);
+
+            // 无法可靠读取 RequestId 时，失败该命令全部在途请求；比等待业务超时更可观测，
+            // 且仅影响同一响应类型，不扩大到其他并行 RPC。
+            switch (command)
+            {
+                case PacketCommand.MessageHistoryPage:
+                    FailAll(_historyPending, contractException);
+                    break;
+                case PacketCommand.SyncBootstrapResponse:
+                    FailAll(_syncPending, contractException);
+                    break;
             }
         }
 
@@ -895,21 +922,84 @@ namespace Core.Services
             long? beforeReceivedAtMs = null,
             string? beforeMessageId = null,
             CancellationToken ct = default)
+            => QueryMessageHistoryCoreAsync(
+                conversationId,
+                limit,
+                beforeReceivedAtMs,
+                beforeMessageId,
+                afterReceivedAtMs: null,
+                afterMessageId: null,
+                ct);
+
+        public Task<MessageHistoryPageDto> QueryMessageHistoryAfterAsync(
+            string conversationId,
+            long afterReceivedAtMs,
+            string afterMessageId,
+            int limit = 50,
+            CancellationToken ct = default)
+            => QueryMessageHistoryCoreAsync(
+                conversationId,
+                limit,
+                beforeReceivedAtMs: null,
+                beforeMessageId: null,
+                afterReceivedAtMs,
+                afterMessageId,
+                ct);
+
+        private async Task<MessageHistoryPageDto> QueryMessageHistoryCoreAsync(
+            string conversationId,
+            int limit,
+            long? beforeReceivedAtMs,
+            string? beforeMessageId,
+            long? afterReceivedAtMs,
+            string? afterMessageId,
+            CancellationToken ct)
         {
             EnsureAuthenticated();
             if (string.IsNullOrWhiteSpace(conversationId))
                 throw new ArgumentException("会话 Id 不能为空", nameof(conversationId));
+            if (afterReceivedAtMs is <= 0)
+                throw new ArgumentOutOfRangeException(nameof(afterReceivedAtMs));
+            if (afterReceivedAtMs.HasValue != !string.IsNullOrWhiteSpace(afterMessageId))
+                throw new ArgumentException("正向历史游标必须同时包含时间和消息 Id。", nameof(afterMessageId));
+            if (beforeReceivedAtMs.HasValue != !string.IsNullOrWhiteSpace(beforeMessageId))
+                throw new ArgumentException("反向历史游标必须同时包含时间和消息 Id。", nameof(beforeMessageId));
+            if (beforeReceivedAtMs.HasValue && afterReceivedAtMs.HasValue)
+                throw new ArgumentException("历史请求不能同时包含正向和反向游标。");
 
-            return SendRequestAsync(_historyPending, PacketCommand.MessageHistoryRequest,
+            var requestedConversationId = conversationId.Trim();
+
+            var response = await SendRequestAsync(_historyPending, PacketCommand.MessageHistoryRequest,
                 new MessageHistoryRequestDto
                 {
-                    ConversationId = conversationId.Trim(),
+                    ConversationId = requestedConversationId,
                     BeforeReceivedAtMs = beforeReceivedAtMs,
                     BeforeMessageId = beforeMessageId,
+                    AfterReceivedAtMs = afterReceivedAtMs,
+                    AfterMessageId = afterMessageId,
                     Limit = Math.Clamp(limit, 1, 100)
                 },
                 TimeSpan.FromSeconds(HistoryFetchTimeoutSec),
-                "历史拉取请求 Id 冲突", ct);
+                "历史拉取请求 Id 冲突", ct).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(response.ConversationId))
+            {
+                // 兼容旧 Gateway；明确留下诊断标记，避免调用方误以为服务端已返回完整契约。
+                response.ConversationId = requestedConversationId;
+                Interlocked.Increment(ref _historyConversationIdsInferred);
+                Trace.TraceWarning(
+                    "MessageHistoryPage 缺少 ConversationId，已按请求会话推断。RequestId={0} ConversationId={1}",
+                    response.RequestId,
+                    requestedConversationId);
+            }
+            else if (!string.Equals(response.ConversationId, requestedConversationId, StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref _historyConversationMismatches);
+                throw new InvalidDataException(
+                    $"历史响应会话错配：期望 {requestedConversationId}，实际 {response.ConversationId}。");
+            }
+
+            return response;
         }
         public Task<MessageReceiptAckDto> SendMessageReceiptAsync(
             string conversationId,
@@ -974,7 +1064,7 @@ namespace Core.Services
             TimeSpan timeout,
             string conflictMessage,
             CancellationToken ct)
-            where TRequest : IRequestDto
+            where TRequest : ChatApp.Shared.Protocol.Tcp.ITcpRequest
         {
             var requestId = Guid.NewGuid().ToString("N");
             request.RequestId = requestId;
@@ -1186,9 +1276,11 @@ namespace Core.Services
                     return;
                 case PacketCommand.SyncBootstrapResponse:
                     var sync = _bodySerializer.Deserialize<SyncBootstrapResponseDto>(packet.Body);
-                    if (sync is not null
-                        && !string.IsNullOrWhiteSpace(sync.RequestId)
-                        && _syncPending.TryRemove(sync.RequestId, out var syncTcs))
+                    if (sync is null)
+                        throw new InvalidDataException("SyncBootstrapResponse 反序列化结果为空。");
+                    if (string.IsNullOrWhiteSpace(sync.RequestId))
+                        throw new InvalidDataException("SyncBootstrapResponse 缺少 RequestId。");
+                    if (_syncPending.TryRemove(sync.RequestId, out var syncTcs))
                     {
                         syncTcs.TrySetResult(sync);
                     }
@@ -1232,14 +1324,15 @@ namespace Core.Services
                     return;
                 case PacketCommand.MessageHistoryPage:
                     var historyPage = _bodySerializer.Deserialize<MessageHistoryPageDto>(packet.Body);
-                    if (historyPage is not null
-                        && !string.IsNullOrWhiteSpace(historyPage.RequestId)
-                        && _historyPending.TryRemove(historyPage.RequestId, out var historyTcs))
+                    if (historyPage is null)
+                        throw new InvalidDataException("MessageHistoryPage 反序列化结果为空。");
+                    if (string.IsNullOrWhiteSpace(historyPage.RequestId))
+                        throw new InvalidDataException("MessageHistoryPage 缺少 RequestId。");
+                    if (_historyPending.TryRemove(historyPage.RequestId, out var historyTcs))
                     {
                         historyTcs.TrySetResult(historyPage);
                     }
-                    if (historyPage is not null)
-                        MessageHistoryPageReceived?.Invoke(this, historyPage);
+                    MessageHistoryPageReceived?.Invoke(this, historyPage);
                     return;
                 case PacketCommand.ConversationMarkReadResponse:
                     var markReadResp = _bodySerializer.Deserialize<ConversationMarkReadResponseDto>(packet.Body);
@@ -1671,6 +1764,9 @@ namespace Core.Services
             ["packets_received"] = Volatile.Read(ref _packetsReceived),
             ["heartbeats_sent"] = Volatile.Read(ref _heartbeatsSent),
             ["rpc_requests"] = Volatile.Read(ref _rpcsSent),
+            ["route_failures"] = Volatile.Read(ref _routeFailures),
+            ["history_conversation_ids_inferred"] = Volatile.Read(ref _historyConversationIdsInferred),
+            ["history_conversation_mismatches"] = Volatile.Read(ref _historyConversationMismatches),
             ["disconnects"] = Volatile.Read(ref _disconnects),
             ["pending_requests"] = PendingRequestCount
         };

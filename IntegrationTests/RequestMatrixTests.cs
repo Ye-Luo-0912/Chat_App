@@ -536,7 +536,7 @@ public class RequestMatrixTests
         }
 
         private string Record<T>(PacketCommand cmd, ReadOnlyMemory<byte> body, out T req)
-            where T : class, IRequestDto
+            where T : class, ChatApp.Shared.Protocol.Tcp.ITcpRequest
         {
             req = _serializer.Deserialize<T>(new ReadOnlySequence<byte>(body))!;
             var requestId = req.RequestId ?? string.Empty;

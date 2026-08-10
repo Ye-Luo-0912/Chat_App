@@ -31,6 +31,9 @@ public class LocalMessage
     /// <summary>服务端接收时间（Unix 毫秒）。</summary>
     public long ReceivedAtMs { get; set; }
 
+    /// <summary>消息最近一次插入/编辑/撤回/Reaction 变更时间（Unix 毫秒）。</summary>
+    public long ChangedAtMs { get; set; }
+
     public long? DeliveredAtMs { get; set; }
 
     public long? ReadAtMs { get; set; }
@@ -43,6 +46,9 @@ public class LocalMessage
 
     /// <summary>附件 JSON 序列化。</summary>
     public string? AttachmentsJson { get; set; }
+
+    /// <summary>Reaction 聚合快照 JSON；UI 可按需反序列化。</summary>
+    public string? ReactionsJson { get; set; }
 
     public string? ReplyToMessageId { get; set; }
 

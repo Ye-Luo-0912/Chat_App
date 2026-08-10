@@ -459,6 +459,44 @@ public class GroupDomainTests : IDisposable
         Assert.Equal(1, store.Counters["incoming_deduped"]);
         Assert.Single(published.OfType<MessagePersistedEvent>());
     }
+
+    [Fact]
+    public async Task Incoming_Message_Preserves_ClientMessageId_For_Outbox_Echo_Merge()
+    {
+        var (store, _) = CreateStore(_db);
+        var session = new SessionStamp(OwnerId, 1, Guid.NewGuid());
+
+        await _db.UpsertMessageAsync(new LocalMessage
+        {
+            OwnerUserId = OwnerId,
+            ClientMessageId = "client-echo-1",
+            ConversationId = GroupId,
+            SenderUserId = OwnerId,
+            ReceiverUserId = 0,
+            Content = "本地待确认",
+            ReceivedAtMs = 1_700_000_000_000,
+            Status = MessageStatus.Queued,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        });
+
+        Assert.True(await store.PersistIncomingAsync(session, new ChatMessageDto
+        {
+            ClientMessageId = "client-echo-1",
+            MessageId = "server-echo-1",
+            ConversationId = GroupId,
+            SenderUserId = OwnerId,
+            TargetUserId = 0,
+            Content = "本地待确认",
+            SentUtc = DateTime.UtcNow
+        }));
+
+        var byClientId = await _db.GetMessageByClientIdAsync(OwnerId, "client-echo-1");
+        Assert.NotNull(byClientId);
+        Assert.Equal("server-echo-1", byClientId!.MessageId);
+        Assert.Equal("client-echo-1", byClientId.ClientMessageId);
+        Assert.Single(await _db.GetMessagesAsync(OwnerId, GroupId));
+    }
 }
 
 

@@ -204,6 +204,15 @@ public interface IDatabaseService
 
     // ---- 同步水位----
     Task<LocalSyncCursor?> GetSyncCursorAsync(long ownerUserId, string conversationId);
+    /// <summary>
+    /// 重置会话的服务端消息投影：删除已确认消息和关联附件，但保留失效水位，
+    /// 使取消/崩溃后的下一轮仍会收到 reset；未确认本地 Outbox 消息保留。
+    /// </summary>
+    Task ResetConversationSyncStateAsync(long ownerUserId, string conversationId);
+    /// <summary>完整恢复后原子替换水位；允许 AheadOfTip 等场景回退。</summary>
+    Task ReplaceSyncCursorAsync(LocalSyncCursor cursor);
+    /// <summary>删除水位；仅 MembershipLost 等不再允许恢复的场景使用。</summary>
+    Task DeleteSyncCursorAsync(long ownerUserId, string conversationId);
     Task UpsertSyncCursorAsync(LocalSyncCursor cursor);
     Task<List<LocalSyncCursor>> GetAllSyncCursorsAsync(long ownerUserId);
 
