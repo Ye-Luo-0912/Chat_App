@@ -684,7 +684,6 @@ public class SyncBootstrapMultiPageTests : IDisposable
                         [
                             new RelationshipChangeLogEntryDto
                             {
-                                ChangeSequence = 1,
                                 Operation = RelationshipChangeOperationDto.Upsert,
                                 ResourceId = "friendship-1",
                                 UserId = PeerId

@@ -238,7 +238,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             // 客户端尚未持久化关系水位/好友申请/黑名单投影。本版本不主动请求关系增量；
             // 若服务端仍返回数据，显式失败，禁止把未应用的关系变化伪装成同步成功。
             if (sync.RelationshipCatchUps?.Any(static catchUp =>
-                    catchUp.ResetRequired || catchUp.HasMore || catchUp.Changes?.Count > 0) == true)
+                    catchUp.ResetRequired == true || catchUp.HasMore || catchUp.Changes?.Count > 0) == true)
             {
                 Fail(session, "RELATIONSHIP_SYNC_UNSUPPORTED",
                     "服务端返回了客户端尚未启用的关系增量；本轮未应用任何关系水位。");
