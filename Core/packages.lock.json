@@ -10,9 +10,9 @@
       },
       "ChatApp.Protocol.Tcp": {
         "type": "Direct",
-        "requested": "[0.4.2, )",
-        "resolved": "0.4.2",
-        "contentHash": "ePcrEj9qds9dsKD0GQPMwVCuS6UFhoZKl5WezYGf9ZUpVMjK2oCG3quaWQD31JYpP6Pqj5JwLCK5X5hkPRdkgA=="
+        "requested": "[0.5.0, )",
+        "resolved": "0.5.0",
+        "contentHash": "DW8GPHKhErrH9ANyHZrVX3P5zMp3dXrmrTscqdYSRNPZlX6MSSxHtNHlaqzeBgZg08pDkFm0iPlPYJboj153HQ=="
       }
     }
   }
