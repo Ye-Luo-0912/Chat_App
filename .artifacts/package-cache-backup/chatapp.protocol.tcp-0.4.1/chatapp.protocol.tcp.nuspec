@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>ChatApp.Protocol.Tcp</id>
+    <version>0.4.1</version>
+    <title>ChatApp TCP protocol contracts</title>
+    <authors>ChatApp</authors>
+    <readme>README.md</readme>
+    <description>BCL-only TCP framing and wire contracts for ChatApp.</description>
+    <tags>ChatApp contracts TCP protocol</tags>
+    <repository type="git" commit="a167b171a75efdd5d5851dca22e843479914c93d" />
+    <dependencies>
+      <group targetFramework="net10.0" />
+    </dependencies>
+  </metadata>
+</package>

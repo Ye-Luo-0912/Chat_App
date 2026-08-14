@@ -660,7 +660,7 @@ public class SyncBootstrapMultiPageTests : IDisposable
     }
 
     [Fact]
-    public async Task Unexpected_Relationship_CatchUp_Fails_Explicitly_Instead_Of_Dropping_Data()
+    public async Task Relationship_CatchUp_Is_Applied_To_Local_Projection_And_Watermark()
     {
         using var tcp = new ScriptedTcpClient();
         var serializer = new JsonPacketBodySerializer();
@@ -701,8 +701,15 @@ public class SyncBootstrapMultiPageTests : IDisposable
         var engine = new SyncEngine(session, store, _db, new SyncCheckpointStore(store, _db), new SyncConflictResolver());
         var result = await RunSyncAsync(engine);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal("RELATIONSHIP_SYNC_UNSUPPORTED", result.ErrorCode);
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        var projection = await _db.GetRelationshipProjectionAsync(
+            OwnerId, RelationshipListTypeDto.Friends);
+        var item = Assert.Single(projection);
+        Assert.Equal("friendship-1", item.ResourceId);
+        Assert.Equal(PeerId, item.UserId);
+        var watermark = Assert.Single(await _db.GetRelationshipWatermarksAsync(OwnerId));
+        Assert.Equal(RelationshipListTypeDto.Friends, watermark.ListType);
+        Assert.Equal(1, watermark.AfterSequence);
     }
 
     /// <summary>

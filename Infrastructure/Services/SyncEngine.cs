@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Models;
@@ -26,6 +28,8 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
     private const int MaxConversationsWithHistory = 10;
     private const int MaxConversationPages = 10;
     private const int MaxCatchUpPagesPerConversation = 5;
+    private const int RelationshipListLimit = 100;
+    private const int MaxRelationshipPages = 20;
     private const string ConversationListCursorMissing = "CONVERSATION_LIST_CURSOR_MISSING";
     private const string ConversationListPageFailed = "CONVERSATION_LIST_PAGE_FAILED";
 
@@ -219,13 +223,19 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             // 1. 本地水位
             var watermarks = await _checkpoints.GetWatermarksAsync(session, ct).ConfigureAwait(false);
             var watermarkList = watermarks.Count == 0 ? null : watermarks;
+            var relationshipReadEnabled = _chatSession.SupportsRelationshipRead;
+            var relationshipWatermarks = relationshipReadEnabled
+                ? await _db.GetRelationshipWatermarksAsync(session.OwnerUserId).ConfigureAwait(false)
+                : null;
 
             // 2. Bootstrap
-            var sync = await _chatSession.QuerySyncBootstrapAsync(
+            var sync = await _chatSession.QuerySyncBootstrapWithRelationshipsAsync(
                     ConversationListLimit,
                     HistoryLimitPerConversation,
                     MaxConversationsWithHistory,
                     watermarkList,
+                    relationshipWatermarks,
+                    relationshipReadEnabled ? RelationshipListLimit : null,
                     ct)
                 .ConfigureAwait(false);
 
@@ -235,14 +245,23 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
                 return;
             }
 
-            // 客户端尚未持久化关系水位/好友申请/黑名单投影。本版本不主动请求关系增量；
-            // 若服务端仍返回数据，显式失败，禁止把未应用的关系变化伪装成同步成功。
-            if (sync.RelationshipCatchUps?.Any(static catchUp =>
-                    catchUp.ResetRequired == true || catchUp.HasMore || catchUp.Changes?.Count > 0) == true)
+            if (!relationshipReadEnabled && sync.RelationshipCatchUps?.Any(HasRelationshipPayload) == true)
             {
                 Fail(session, "RELATIONSHIP_SYNC_UNSUPPORTED",
                     "服务端返回了客户端尚未启用的关系增量；本轮未应用任何关系水位。");
                 return;
+            }
+
+            if (relationshipReadEnabled)
+            {
+                var relationshipResult = await ApplyRelationshipSyncAsync(
+                        session, sync.RelationshipCatchUps, relationshipWatermarks ?? [], ct)
+                    .ConfigureAwait(false);
+                if (relationshipResult is not null)
+                {
+                    Fail(session, relationshipResult.Value.Code, relationshipResult.Value.Message);
+                    return;
+                }
             }
 
             if (sync.ConversationsHasMore && sync.ConversationsNextCursor is null)
@@ -411,6 +430,155 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             ErrorCode = errorCode,
             ErrorMessage = errorMessage
         });
+    }
+
+    private async Task<(string Code, string Message)?> ApplyRelationshipSyncAsync(
+        SessionStamp session,
+        IReadOnlyList<RelationshipCatchUpDto>? catchUps,
+        IReadOnlyList<RelationshipSyncWatermarkDto> watermarks,
+        CancellationToken ct)
+    {
+        if (catchUps is null or { Count: 0 })
+            return null;
+
+        var currentByType = watermarks
+            .Where(static x => IsRelationshipListType(x.ListType) && x.AfterSequence >= 0)
+            .GroupBy(static x => x.ListType)
+            .ToDictionary(static x => x.Key, static x => x.Last().AfterSequence);
+        var seen = new HashSet<RelationshipListTypeDto>();
+
+        foreach (var catchUp in catchUps)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!IsRelationshipListType(catchUp.ListType))
+                return ("RELATIONSHIP_LIST_TYPE_INVALID", $"未知关系列表类型: {(byte)catchUp.ListType}");
+            if (!seen.Add(catchUp.ListType))
+                return ("RELATIONSHIP_DUPLICATE_LIST", $"关系列表类型重复: {catchUp.ListType}");
+
+            currentByType.TryGetValue(catchUp.ListType, out var currentSequence);
+            if (catchUp.ErrorCode is not null && catchUp.ResetRequired != true)
+                return ("RELATIONSHIP_SYNC_FAILED",
+                    $"{catchUp.ErrorCode}: {catchUp.ErrorMessage}".TrimEnd(':', ' '));
+
+            if (catchUp.ResetRequired == true)
+            {
+                var rebuilt = await RebuildRelationshipListAsync(
+                        session, catchUp.ListType, catchUp.NextSequence, ct)
+                    .ConfigureAwait(false);
+                if (!rebuilt)
+                    return ("RELATIONSHIP_RESET_FAILED", $"关系列表重建失败: {catchUp.ListType}");
+                continue;
+            }
+
+            if (catchUp.HasMore)
+                return ("RELATIONSHIP_CURSOR_UNSUPPORTED",
+                    $"关系增量分页暂不支持在 bootstrap 外续页: {catchUp.ListType}");
+            if (catchUp.NextSequence < currentSequence)
+                return ("RELATIONSHIP_WATERMARK_REGRESSED",
+                    $"关系水位回退: {catchUp.ListType} {catchUp.NextSequence} < {currentSequence}");
+
+            foreach (var change in catchUp.Changes ?? [])
+            {
+                var validation = ValidateRelationshipChange(change);
+                if (validation is not null)
+                    return ("RELATIONSHIP_CHANGE_INVALID", validation);
+            }
+
+            await _db.ApplyRelationshipChangesAsync(
+                    session.OwnerUserId,
+                    catchUp.ListType,
+                    catchUp.Changes ?? [],
+                    catchUp.NextSequence)
+                .ConfigureAwait(false);
+        }
+
+        return null;
+    }
+
+    private async Task<bool> RebuildRelationshipListAsync(
+        SessionStamp session,
+        RelationshipListTypeDto listType,
+        long afterSequence,
+        CancellationToken ct)
+    {
+        var items = new List<RelationshipListItemDto>();
+        string? cursor = null;
+        for (var page = 0; page < MaxRelationshipPages; page++)
+        {
+            var response = await _chatSession.QueryRelationshipListAsync(
+                    listType, RelationshipListLimit, cursor, ct)
+                .ConfigureAwait(false);
+            if (!response.Succeeded)
+                return false;
+            if (response.ListType != listType)
+                return false;
+            if (response.ResetRequired == true)
+                return false;
+
+            foreach (var item in response.Items ?? [])
+            {
+                if (ValidateRelationshipListItem(item) is not null)
+                    return false;
+                items.Add(item);
+            }
+
+            if (!response.HasMore)
+            {
+                await _db.ReplaceRelationshipProjectionAsync(
+                        session.OwnerUserId, listType, items, Math.Max(0, afterSequence))
+                    .ConfigureAwait(false);
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(response.NextCursor)
+                || string.Equals(cursor, response.NextCursor, StringComparison.Ordinal))
+                return false;
+            cursor = response.NextCursor;
+        }
+
+        return false;
+    }
+
+    private static bool HasRelationshipPayload(RelationshipCatchUpDto catchUp)
+        => catchUp.ResetRequired == true
+           || catchUp.HasMore
+           || catchUp.Changes?.Count > 0
+           || catchUp.ErrorCode is not null;
+
+    private static bool IsRelationshipListType(RelationshipListTypeDto listType)
+        => listType is RelationshipListTypeDto.Friends
+            or RelationshipListTypeDto.FriendRequests
+            or RelationshipListTypeDto.BlockedUsers;
+
+    private static string? ValidateRelationshipListItem(RelationshipListItemDto item)
+    {
+        if (string.IsNullOrWhiteSpace(item.ResourceId)
+            || Encoding.UTF8.GetByteCount(item.ResourceId) > 64)
+            return "关系列表项 ResourceId 无效。";
+        if (item.UserId <= 0)
+            return "关系列表项 UserId 无效。";
+        if (item.Status is not null && Encoding.UTF8.GetByteCount(item.Status) > 32)
+            return "关系列表项 Status 超限。";
+        if (item.Message is not null && Encoding.UTF8.GetByteCount(item.Message) > 512)
+            return "关系列表项 Message 超限。";
+        return null;
+    }
+
+    private static string? ValidateRelationshipChange(RelationshipChangeLogEntryDto change)
+    {
+        if (change.Operation is not RelationshipChangeOperationDto.Upsert
+            and not RelationshipChangeOperationDto.Delete)
+            return "关系变更 Operation 未知。";
+        if (string.IsNullOrWhiteSpace(change.ResourceId)
+            || Encoding.UTF8.GetByteCount(change.ResourceId) > 64)
+            return "关系变更 ResourceId 无效。";
+        if (change.UserId <= 0)
+            return "关系变更 UserId 无效。";
+        if (change.Status is not null && Encoding.UTF8.GetByteCount(change.Status) > 32)
+            return "关系变更 Status 超限。";
+        if (change.Message is not null && Encoding.UTF8.GetByteCount(change.Message) > 512)
+            return "关系变更 Message 超限。";
+        return null;
     }
 
     private async Task PersistConversationAsync(SessionStamp session, ConversationListItemDto item, CancellationToken ct)

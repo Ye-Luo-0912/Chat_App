@@ -2213,6 +2213,172 @@ public class DatabaseService(
             .ToListAsync(None);
     }
 
+    // ---- 关系只读投影与水位 ----
+
+    public async Task<List<LocalRelationshipProjection>> GetRelationshipProjectionAsync(
+        long ownerUserId, RelationshipListTypeDto listType)
+    {
+        var listTypeValue = (byte)listType;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.RelationshipProjections
+            .AsNoTracking()
+            .Where(x => x.OwnerUserId == ownerUserId
+                     && x.ListType == listTypeValue
+                     && !x.IsDeleted)
+            .OrderBy(x => x.CreatedAtMs)
+            .ThenBy(x => x.ResourceId)
+            .ToListAsync(None);
+    }
+
+    public async Task<List<RelationshipSyncWatermarkDto>> GetRelationshipWatermarksAsync(long ownerUserId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var rows = await db.RelationshipWatermarks
+            .AsNoTracking()
+            .Where(x => x.OwnerUserId == ownerUserId)
+            .OrderBy(x => x.ListType)
+            .ToListAsync(None);
+
+        return rows
+            .Where(x => x.ListType is >= 1 and <= 3)
+            .Select(x => new RelationshipSyncWatermarkDto
+            {
+                ListType = (RelationshipListTypeDto)x.ListType,
+                AfterSequence = x.AfterSequence
+            })
+            .ToList();
+    }
+
+    public Task ReplaceRelationshipProjectionAsync(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipListItemDto> items,
+        long afterSequence)
+        => WriteAsync(() => ReplaceRelationshipProjectionAsyncImpl(
+            ownerUserId, listType, items, afterSequence));
+
+    private async Task ReplaceRelationshipProjectionAsyncImpl(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipListItemDto> items,
+        long afterSequence)
+    {
+        var listTypeValue = (byte)listType;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        await db.RelationshipProjections
+            .Where(x => x.OwnerUserId == ownerUserId && x.ListType == listTypeValue)
+            .ExecuteDeleteAsync(None);
+
+        var now = DateTime.UtcNow;
+        var uniqueItems = items
+            .Where(x => !string.IsNullOrWhiteSpace(x.ResourceId))
+            .GroupBy(x => x.ResourceId, StringComparer.Ordinal)
+            .Select(static group => group.Last())
+            .Select(x => new LocalRelationshipProjection
+            {
+                OwnerUserId = ownerUserId,
+                ListType = listTypeValue,
+                ResourceId = x.ResourceId,
+                UserId = x.UserId,
+                Status = x.Status,
+                Message = x.Message,
+                CreatedAtMs = x.CreatedAtMs,
+                OccurredAtMs = x.CreatedAtMs,
+                IsDeleted = false,
+                UpdatedAt = now
+            })
+            .ToList();
+        await db.RelationshipProjections.AddRangeAsync(uniqueItems, None);
+
+        await UpsertRelationshipWatermarkAsync(db, ownerUserId, listTypeValue, afterSequence, now);
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+    }
+
+    public Task ApplyRelationshipChangesAsync(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipChangeLogEntryDto> changes,
+        long afterSequence)
+        => WriteAsync(() => ApplyRelationshipChangesAsyncImpl(
+            ownerUserId, listType, changes, afterSequence));
+
+    private async Task ApplyRelationshipChangesAsyncImpl(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipChangeLogEntryDto> changes,
+        long afterSequence)
+    {
+        var listTypeValue = (byte)listType;
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await using var transaction = await db.Database.BeginTransactionAsync(None);
+
+        var resourceIds = changes
+            .Where(x => !string.IsNullOrWhiteSpace(x.ResourceId))
+            .Select(x => x.ResourceId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var existing = await db.RelationshipProjections
+            .Where(x => x.OwnerUserId == ownerUserId
+                     && x.ListType == listTypeValue
+                     && resourceIds.Contains(x.ResourceId))
+            .ToDictionaryAsync(x => x.ResourceId, StringComparer.Ordinal, None);
+
+        var now = DateTime.UtcNow;
+        foreach (var change in changes)
+        {
+            if (string.IsNullOrWhiteSpace(change.ResourceId))
+                continue;
+
+            if (!existing.TryGetValue(change.ResourceId, out var row))
+            {
+                row = new LocalRelationshipProjection
+                {
+                    OwnerUserId = ownerUserId,
+                    ListType = listTypeValue,
+                    ResourceId = change.ResourceId
+                };
+                existing.Add(change.ResourceId, row);
+                await db.RelationshipProjections.AddAsync(row, None);
+            }
+
+            row.UserId = change.UserId;
+            row.Status = change.Status;
+            row.Message = change.Message;
+            row.CreatedAtMs = change.CreatedAtMs;
+            row.OccurredAtMs = change.OccurredAtMs;
+            row.IsDeleted = change.Operation == RelationshipChangeOperationDto.Delete;
+            row.UpdatedAt = now;
+        }
+
+        await UpsertRelationshipWatermarkAsync(db, ownerUserId, listTypeValue, afterSequence, now);
+        await db.SaveChangesAsync(None);
+        await transaction.CommitAsync(None);
+    }
+
+    private static async Task UpsertRelationshipWatermarkAsync(
+        ClientDbContext db, long ownerUserId, byte listType, long afterSequence, DateTime now)
+    {
+        var existing = await db.RelationshipWatermarks
+            .FirstOrDefaultAsync(x => x.OwnerUserId == ownerUserId && x.ListType == listType, None);
+        if (existing is null)
+        {
+            await db.RelationshipWatermarks.AddAsync(new LocalRelationshipWatermark
+            {
+                OwnerUserId = ownerUserId,
+                ListType = listType,
+                AfterSequence = afterSequence,
+                UpdatedAt = now
+            }, None);
+            return;
+        }
+
+        existing.AfterSequence = afterSequence;
+        existing.UpdatedAt = now;
+    }
+
     // ---- 会话已读状态----
 
     public async Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId)

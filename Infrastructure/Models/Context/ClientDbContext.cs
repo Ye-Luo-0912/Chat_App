@@ -20,6 +20,8 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     public DbSet<LocalMessage> Messages { get; set; }
     public DbSet<LocalOutboxMessage> OutboxMessages { get; set; }
     public DbSet<LocalSyncCursor> SyncCursors { get; set; }
+    public DbSet<LocalRelationshipProjection> RelationshipProjections { get; set; }
+    public DbSet<LocalRelationshipWatermark> RelationshipWatermarks { get; set; }
     public DbSet<LocalConversationReadState> ConversationReadStates { get; set; }
 
     // ---- 阶段 3 附件元数据 ----
@@ -105,6 +107,23 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         modelBuilder.Entity<LocalSyncCursor>()
             .HasIndex(x => new { x.OwnerUserId, x.ConversationId })
             .IsUnique();
+
+        // ---- 关系只读投影与水位 ----
+        var relationship = modelBuilder.Entity<LocalRelationshipProjection>();
+        relationship.HasKey(x => x.Id);
+        relationship.Property(x => x.ResourceId).HasMaxLength(64).IsRequired();
+        relationship.Property(x => x.Status).HasMaxLength(32);
+        relationship.Property(x => x.Message).HasMaxLength(512);
+        relationship.HasIndex(x => new { x.OwnerUserId, x.ListType, x.ResourceId })
+            .IsUnique()
+            .HasDatabaseName("ix_relationship_projection_owner_type_resource");
+        relationship.HasIndex(x => new { x.OwnerUserId, x.ListType, x.IsDeleted, x.CreatedAtMs });
+
+        var relationshipWatermark = modelBuilder.Entity<LocalRelationshipWatermark>();
+        relationshipWatermark.HasKey(x => x.Id);
+        relationshipWatermark.HasIndex(x => new { x.OwnerUserId, x.ListType })
+            .IsUnique()
+            .HasDatabaseName("ix_relationship_watermark_owner_type");
 
         // ---- 会话已读状态----
         modelBuilder.Entity<LocalConversationReadState>()

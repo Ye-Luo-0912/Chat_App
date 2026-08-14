@@ -216,6 +216,23 @@ public interface IDatabaseService
     Task UpsertSyncCursorAsync(LocalSyncCursor cursor);
     Task<List<LocalSyncCursor>> GetAllSyncCursorsAsync(long ownerUserId);
 
+    // ---- 关系只读投影与水位 ----
+    Task<List<LocalRelationshipProjection>> GetRelationshipProjectionAsync(
+        long ownerUserId, RelationshipListTypeDto listType);
+    Task<List<RelationshipSyncWatermarkDto>> GetRelationshipWatermarksAsync(long ownerUserId);
+    /// <summary>全量 list 完成后原子替换该列表投影并建立水位。</summary>
+    Task ReplaceRelationshipProjectionAsync(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipListItemDto> items,
+        long afterSequence);
+    /// <summary>应用一批增量；只有尾页才允许传入并持久化新水位。</summary>
+    Task ApplyRelationshipChangesAsync(
+        long ownerUserId,
+        RelationshipListTypeDto listType,
+        IReadOnlyList<RelationshipChangeLogEntryDto> changes,
+        long afterSequence);
+
     // ---- 会话已读状态----
     Task<LocalConversationReadState?> GetReadStateAsync(long ownerUserId, string conversationId);
     Task UpsertReadStateAsync(LocalConversationReadState readState);

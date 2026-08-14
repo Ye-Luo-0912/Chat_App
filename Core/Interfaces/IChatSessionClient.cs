@@ -78,6 +78,17 @@ public interface IChatSessionClient : IDisposable
         string? beforeConversationId = null,
         CancellationToken ct = default);
 
+    /// <summary>当前会话是否支持关系列表只读查询。</summary>
+    bool SupportsRelationshipRead => false;
+
+    /// <summary>分页查询指定关系列表。</summary>
+    Task<RelationshipListResponseDto> QueryRelationshipListAsync(
+        RelationshipListTypeDto listType,
+        int? pageSize = null,
+        string? cursor = null,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话客户端不支持关系列表查询。");
+
     /// <summary>设置会话偏好（置顶/免打扰，超时 8 秒）。</summary>
     Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
         string conversationId,
@@ -116,6 +127,22 @@ public interface IChatSessionClient : IDisposable
         int maxConversationsWithHistory = 10,
         IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null,
         CancellationToken ct = default);
+
+    /// <summary>带关系水位的同步引导；默认实现兼容旧测试替身。</summary>
+    Task<SyncBootstrapResponseDto> QuerySyncBootstrapWithRelationshipsAsync(
+        int listLimit = 50,
+        int historyLimitPerConversation = 20,
+        int maxConversationsWithHistory = 10,
+        IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null,
+        IReadOnlyList<RelationshipSyncWatermarkDto>? relationshipWatermarks = null,
+        int? relationshipListLimit = null,
+        CancellationToken ct = default)
+        => QuerySyncBootstrapAsync(
+            listLimit,
+            historyLimitPerConversation,
+            maxConversationsWithHistory,
+            watermarks,
+            ct);
 
     /// <summary>显式拉取会话历史消息（按游标分页）。</summary>
     Task<MessageHistoryPageDto> QueryMessageHistoryAsync(

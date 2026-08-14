@@ -38,6 +38,7 @@ namespace Core.Services
         private int _serverHeartbeatIntervalMs;
         private int _serverMaxPayloadBytes;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<RelationshipListResponseDto>> _relationshipListPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationSetPrefsResponseDto>> _prefsPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageRecallAcknowledgementDto>> _recallPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageEditAcknowledgementDto>> _editPending = new(StringComparer.Ordinal);
@@ -88,6 +89,8 @@ namespace Core.Services
             TcpGatewayFeature.PresenceAndTyping |
             TcpGatewayFeature.GroupManagement;
 
+        public bool SupportsRelationshipRead => true;
+
         // 协议上限
         private const int MaxAttachmentsPerMessage = 32;
         private const int MaxAttachmentIdLength = 64;
@@ -111,6 +114,7 @@ namespace Core.Services
         /// </summary>
         public int PendingRequestCount =>
             _listPending.Count + _prefsPending.Count + _recallPending.Count + _editPending.Count
+            + _relationshipListPending.Count
             + _presencePending.Count + _syncPending.Count + _historyPending.Count + _receiptPending.Count
             + _markReadPending.Count + _createGroupPending.Count + _addGroupMembersPending.Count
             + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _dissolveGroupPending.Count
@@ -441,6 +445,9 @@ namespace Core.Services
                 case PacketCommand.SyncBootstrapResponse:
                     FailAll(_syncPending, contractException);
                     break;
+                case PacketCommand.RelationshipListResponse:
+                    FailAll(_relationshipListPending, contractException);
+                    break;
             }
         }
 
@@ -627,6 +634,29 @@ namespace Core.Services
                 },
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
                 "会话列表请求 Id 冲突", ct);
+        }
+
+        public Task<RelationshipListResponseDto> QueryRelationshipListAsync(
+            RelationshipListTypeDto listType,
+            int? pageSize = null,
+            string? cursor = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (listType is < RelationshipListTypeDto.Friends or > RelationshipListTypeDto.BlockedUsers)
+                throw new ArgumentOutOfRangeException(nameof(listType));
+            if (pageSize is < 1 or > 200)
+                throw new ArgumentOutOfRangeException(nameof(pageSize));
+
+            return SendRequestAsync(_relationshipListPending, PacketCommand.RelationshipListRequest,
+                new RelationshipListRequestDto
+                {
+                    ListType = listType,
+                    PageSize = pageSize,
+                    Cursor = string.IsNullOrWhiteSpace(cursor) ? null : cursor
+                },
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
+                "关系列表请求 Id 冲突", ct);
         }
 
         public Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
@@ -916,6 +946,32 @@ namespace Core.Services
                 "同步引导请求 Id 冲突", ct);
         }
 
+        public Task<SyncBootstrapResponseDto> QuerySyncBootstrapWithRelationshipsAsync(
+            int listLimit = 50,
+            int historyLimitPerConversation = 20,
+            int maxConversationsWithHistory = 10,
+            IReadOnlyList<ConversationSyncWatermarkDto>? watermarks = null,
+            IReadOnlyList<RelationshipSyncWatermarkDto>? relationshipWatermarks = null,
+            int? relationshipListLimit = null,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            return SendRequestAsync(_syncPending, PacketCommand.SyncBootstrapRequest,
+                new SyncBootstrapRequestDto
+                {
+                    ListLimit = Math.Clamp(listLimit, 1, 100),
+                    HistoryLimitPerConversation = Math.Clamp(historyLimitPerConversation, 1, 50),
+                    MaxConversationsWithHistory = Math.Clamp(maxConversationsWithHistory, 0, 20),
+                    Watermarks = watermarks,
+                    RelationshipWatermarks = relationshipWatermarks,
+                    RelationshipListLimit = relationshipListLimit is null
+                        ? null
+                        : Math.Clamp(relationshipListLimit.Value, 1, 200)
+                },
+                TimeSpan.FromSeconds(SyncBootstrapTimeoutSec),
+                "同步引导请求 Id 冲突", ct);
+        }
+
         public Task<MessageHistoryPageDto> QueryMessageHistoryAsync(
             string conversationId,
             int limit = 50,
@@ -1111,6 +1167,7 @@ namespace Core.Services
         private void FailPendingRequests(Exception ex)
         {
             FailAll(_listPending, ex);
+            FailAll(_relationshipListPending, ex);
             FailAll(_prefsPending, ex);
             FailAll(_recallPending, ex);
             FailAll(_editPending, ex);
@@ -1216,6 +1273,15 @@ namespace Core.Services
                         && _listPending.TryRemove(listPage.RequestId, out var listTcs))
                     {
                         listTcs.TrySetResult(listPage);
+                    }
+                    return;
+                case PacketCommand.RelationshipListResponse:
+                    var relationshipPage = _bodySerializer.Deserialize<RelationshipListResponseDto>(packet.Body);
+                    if (relationshipPage is not null
+                        && !string.IsNullOrWhiteSpace(relationshipPage.RequestId)
+                        && _relationshipListPending.TryRemove(relationshipPage.RequestId, out var relationshipTcs))
+                    {
+                        relationshipTcs.TrySetResult(relationshipPage);
                     }
                     return;
                 case PacketCommand.ConversationSetPrefsResponse:
@@ -1622,6 +1688,11 @@ namespace Core.Services
                 listTcs.TrySetException(new ProtocolRequestException(error));
                 return true;
             }
+            if (_relationshipListPending.TryRemove(requestId, out var relationshipTcs))
+            {
+                relationshipTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
             if (_prefsPending.TryRemove(requestId, out var prefsTcs))
             {
                 prefsTcs.TrySetException(new ProtocolRequestException(error));
@@ -1678,6 +1749,7 @@ namespace Core.Services
             return command switch
             {
                 PacketCommand.ConversationListRequest => FailAll(_listPending, exception),
+                PacketCommand.RelationshipListRequest => FailAll(_relationshipListPending, exception),
                 PacketCommand.ConversationSetPrefsRequest => FailAll(_prefsPending, exception),
                 PacketCommand.MessageRecallRequest => FailAll(_recallPending, exception),
                 PacketCommand.MessageEditRequest => FailAll(_editPending, exception),
