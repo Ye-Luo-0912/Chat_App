@@ -89,7 +89,7 @@ namespace Core.Services
             TcpGatewayFeature.PresenceAndTyping |
             TcpGatewayFeature.GroupManagement;
 
-        public bool SupportsRelationshipRead => true;
+        public virtual bool SupportsRelationshipRead => true;
 
         // 协议上限
         private const int MaxAttachmentsPerMessage = 32;
