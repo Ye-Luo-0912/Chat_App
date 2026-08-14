@@ -127,6 +127,13 @@ public partial class App : Application
             // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
             {
+                // 单次录音最长时长默认 60s；可用配置 Voice:MaxDurationSeconds 覆盖（秒），
+                // 便于真机验证录音超时自动收尾路径。覆盖 0/负值时回退默认值。
+                var maxDurationSeconds = configuration.GetValue<double?>("Voice:MaxDurationSeconds");
+                var maxDuration = maxDurationSeconds is > 0
+                    ? TimeSpan.FromSeconds(maxDurationSeconds.Value)
+                    : TimeSpan.FromSeconds(60);
+
                 // VOICE-MSG-2：Windows 用真实麦克风采集；其他平台回退到确定性正弦波源，
                 // 保证 UI/上传/发送链路跨平台可用。真实采集源由 MicrophoneSampleSource 提供。
                 IWaveSampleSource source;
@@ -139,9 +146,9 @@ public partial class App : Application
                     source = new SineToneSampleSource(
                         sampleRateHz: 16_000,
                         channels: 1,
-                        maxDuration: TimeSpan.FromSeconds(60));
+                        maxDuration: maxDuration);
                 }
-                return new VoiceRecorderService(source, maxDuration: TimeSpan.FromSeconds(60));
+                return new VoiceRecorderService(source, maxDuration: maxDuration);
             });
 
 
