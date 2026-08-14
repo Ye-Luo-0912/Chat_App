@@ -18,13 +18,20 @@ public sealed class DraftEditTarget
     public int EditVersion { get; init; }
 }
 
-/// <summary>草稿附件项（附件已上传到服务端，仅记录元数据用于恢复）。</summary>
+/// <summary>草稿附件项（附件已上传到服务端，仅记录元数据用于恢复；语音附件携带 VOICE-MSG-2 元数据）。</summary>
 public sealed class DraftAttachment
 {
     public string AttachmentId { get; init; } = string.Empty;
     public string? FileName { get; init; }
     public string ContentType { get; init; } = "application/octet-stream";
     public long SizeBytes { get; init; }
+
+    public bool IsVoice { get; init; }
+    public string? VoiceCodec { get; init; }
+    public string? VoiceContainer { get; init; }
+    public long? VoiceDurationMs { get; init; }
+    public int? VoiceSampleRateHz { get; init; }
+    public short? VoiceChannels { get; init; }
 }
 
 /// <summary>

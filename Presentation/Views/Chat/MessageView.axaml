@@ -325,8 +325,20 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
-                <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
                     <Button Grid.Column="0"
+                            Content="录音"
+                            Command="{Binding StartRecordingCommand}"
+                            Margin="0 0 8 0"
+                            Padding="12 10"
+                            MinWidth="56"
+                            CornerRadius="12"
+                            Background="#F3F4F6"
+                            Foreground="#111827"
+                            VerticalAlignment="Bottom"
+                            IsVisible="{Binding !IsRecording}"/>
+
+                    <Button Grid.Column="1"
                             Content="附件"
                             Command="{Binding AttachFileCommand}"
                             Margin="0 0 8 0"
@@ -335,9 +347,10 @@
                             CornerRadius="12"
                             Background="#F3F4F6"
                             Foreground="#111827"
-                            VerticalAlignment="Bottom"/>
+                            VerticalAlignment="Bottom"
+                            IsVisible="{Binding !IsRecording}"/>
 
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center">
                         <TextBox Text="{Binding NewMessage, Mode=TwoWay}"
                                  PlaceholderText="输入消息..."
                                  BorderThickness="0"
@@ -345,7 +358,8 @@
                                  VerticalAlignment="Center"
                                  FontSize="14"
                                  AcceptsReturn="True"
-                                 MaxHeight="100">
+                                 MaxHeight="100"
+                                 IsVisible="{Binding !IsRecording}">
                             <TextBox.KeyBindings>
                                 <KeyBinding Command="{Binding SendMessageCommand}"
                                             Gesture="Ctrl+Enter"/>
@@ -355,10 +369,25 @@
                                      Value="{Binding UploadProgress}"
                                      Height="4"
                                      Margin="0 4 0 0"
-                                     IsVisible="{Binding IsUploading}"/>
+                                     IsVisible="{Binding !IsRecording}"/>
+                        <!-- 录音状态：时长实时更新（VOICE-MSG-2）。 -->
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="8"
+                                    IsVisible="{Binding IsRecording}">
+                            <Ellipse Width="10" Height="10" Fill="#EF4444"/>
+                            <TextBlock Text="{Binding RecordingDurationText}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       Foreground="#111827"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Text="录音中，点击右上角发送"
+                                       FontSize="12"
+                                       Foreground="#6B7280"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
                     </StackPanel>
 
-                    <Button Grid.Column="2"
+                    <Button Grid.Column="3"
                             Content="取消"
                             Command="{Binding CancelUploadCommand}"
                             Margin="8 0 0 0"
@@ -370,6 +399,17 @@
                             VerticalAlignment="Bottom"/>
 
                     <Button Grid.Column="3"
+                            Content="取消录音"
+                            Command="{Binding CancelRecordingCommand}"
+                            Margin="8 0 0 0"
+                            Padding="12 10"
+                            IsVisible="{Binding IsRecording}"
+                            CornerRadius="12"
+                            Background="#FEE2E2"
+                            Foreground="#991B1B"
+                            VerticalAlignment="Bottom"/>
+
+                    <Button Grid.Column="4"
                             Content="{Binding SendButtonText}"
                             Command="{Binding SendMessageCommand}"
                             Margin="10 0 0 0"
@@ -379,7 +419,21 @@
                             Background="#3B82F6"
                             Foreground="White"
                             FontWeight="SemiBold"
-                            VerticalAlignment="Bottom"/>
+                            VerticalAlignment="Bottom"
+                            IsVisible="{Binding !IsRecording}"/>
+
+                    <Button Grid.Column="4"
+                            Content="发送语音"
+                            Command="{Binding SendRecordingCommand}"
+                            Margin="10 0 0 0"
+                            Padding="20 10"
+                            MinWidth="72"
+                            CornerRadius="12"
+                            Background="#3B82F6"
+                            Foreground="White"
+                            FontWeight="SemiBold"
+                            VerticalAlignment="Bottom"
+                            IsVisible="{Binding IsRecording}"/>
                 </Grid>
             </StackPanel>
         </Border>

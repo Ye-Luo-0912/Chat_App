@@ -42,6 +42,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IAttachmentStorageService _storage;
     private readonly IAttachmentDownloadService _downloadService;
     private readonly IAttachmentThumbnailService _thumbnailService;
+    private readonly IVoiceRecorder _voiceRecorder;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
     private long CurrPeerId { get; set; }
@@ -128,6 +129,16 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 CancelUploadCommand.RaiseCanExecuteChanged();
             }
         }
+    }
+
+    // 录音（VOICE-MSG-2）：跨平台 fallback 采集；UI 显示是否在录与已录时长。
+    public bool IsRecording => _voiceRecorder.IsRecording;
+
+    private string _recordingDurationText = "0:00";
+    public string RecordingDurationText
+    {
+        get => _recordingDurationText;
+        private set => SetProperty(ref _recordingDurationText, value);
     }
 
     // 多附件草稿（阶段 3-5）
@@ -243,6 +254,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand SendMessageCommand { get; }
     public AsyncRelayCommand AttachFileCommand { get; }
     public AsyncRelayCommand CancelUploadCommand { get; }
+    public AsyncRelayCommand StartRecordingCommand { get; }
+    public AsyncRelayCommand SendRecordingCommand { get; }
+    public AsyncRelayCommand CancelRecordingCommand { get; }
     public AsyncRelayCommand<PendingAttachment?> ClearPendingAttachmentCommand { get; }
     public AsyncRelayCommand ClearReplyDraftCommand { get; }
     public AsyncRelayCommand ClearEditDraftCommand { get; }
@@ -278,7 +292,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ICurrentUserContext currentUserContext,
         IAttachmentStorageService storage,
         IAttachmentDownloadService downloadService,
-        IAttachmentThumbnailService thumbnailService)
+        IAttachmentThumbnailService thumbnailService,
+        IVoiceRecorder voiceRecorder)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
@@ -286,6 +301,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _storage = storage;
         _downloadService = downloadService;
         _thumbnailService = thumbnailService;
+        _voiceRecorder = voiceRecorder;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -316,6 +332,43 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 return Task.CompletedTask;
             },
             () => IsUploading);
+
+        StartRecordingCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                _voiceRecorder.Start();
+                OnPropertyChanged(nameof(IsRecording));
+                RefreshRecordingCommandStates();
+                return Task.CompletedTask;
+            },
+            () => !IsRecording && !IsUploading && CurrConversationId is not null);
+
+        SendRecordingCommand = new AsyncRelayCommand(
+            SendVoiceAsync,
+            () => IsRecording && !IsUploading,
+            ex =>
+            {
+                Log.Error(ex, "语音发送失败");
+                _notificationService.ShowError($"语音发送失败: {ex.Message}");
+            });
+
+        CancelRecordingCommand = new AsyncRelayCommand(
+            _ =>
+            {
+                _voiceRecorder.Cancel();
+                RecordingDurationText = "0:00";
+                OnPropertyChanged(nameof(IsRecording));
+                RefreshRecordingCommandStates();
+                return Task.CompletedTask;
+            },
+            () => IsRecording);
+
+        // 录音进度 → UI 时长显示（时长递增）。
+        _voiceRecorder.Progress += p =>
+        {
+            var totalSec = (int)Math.Max(0, p.Elapsed.TotalSeconds);
+            RecordingDurationText = $"{totalSec / 60}:{totalSec % 60:00}";
+        };
 
         ClearPendingAttachmentCommand = new AsyncRelayCommand<PendingAttachment?>(
             async (att, ct) =>
@@ -944,7 +997,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     AttachmentId = a.AttachmentId,
                     FileName = a.FileName,
                     ContentType = a.ContentType,
-                    SizeBytes = a.SizeBytes
+                    SizeBytes = a.SizeBytes,
+                    IsVoice = a.IsVoice,
+                    VoiceCodec = a.VoiceCodec,
+                    VoiceContainer = a.VoiceContainer,
+                    VoiceDurationMs = a.VoiceDurationMs,
+                    VoiceSampleRateHz = a.VoiceSampleRateHz,
+                    VoiceChannels = a.VoiceChannels
                 });
         }
 
@@ -1044,7 +1103,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 AttachmentId = a.AttachmentId,
                 FileName = a.FileName,
                 ContentType = a.ContentType,
-                SizeBytes = a.SizeBytes
+                SizeBytes = a.SizeBytes,
+                IsVoice = a.IsVoice,
+                VoiceCodec = a.VoiceCodec,
+                VoiceContainer = a.VoiceContainer,
+                VoiceDurationMs = a.VoiceDurationMs,
+                VoiceSampleRateHz = a.VoiceSampleRateHz,
+                VoiceChannels = a.VoiceChannels
             })];
         }
 
@@ -1534,7 +1599,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 ContentType = a.ContentType,
                 SizeBytes = a.SizeBytes,
                 Status = 1,
-                DownloadApiHint = a.AttachmentId
+                DownloadApiHint = a.AttachmentId,
+                // VOICE-MSG-2：语音附件携带编解码/容器/时长/采样率/声道元数据。
+                IsVoice = a.IsVoice,
+                VoiceCodec = a.IsVoice ? a.VoiceCodec : null,
+                VoiceContainer = a.IsVoice ? a.VoiceContainer : null,
+                VoiceDurationMs = a.IsVoice ? a.VoiceDurationMs : null,
+                VoiceSampleRateHz = a.IsVoice ? a.VoiceSampleRateHz : null,
+                VoiceChannels = a.IsVoice ? a.VoiceChannels : null
             }).ToList();
         }
 
@@ -1945,6 +2017,95 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// 结束录音并上传为语音附件（VOICE-MSG-2）：Stop → 取 WAV → 复用
+    /// <see cref="IAttachmentClientService.UploadAndConfirmAsync"/> 上传 → 作为语音
+    /// 附件加入草稿 → 立即发送。codec=pcm、container=wav。
+    /// </summary>
+    private async Task SendVoiceAsync(CancellationToken ct)
+    {
+        if (CurrConversationId is null)
+        {
+            _voiceRecorder.Cancel();
+            return;
+        }
+
+        var recording = _voiceRecorder.Stop();
+        RecordingDurationText = "0:00";
+        OnPropertyChanged(nameof(IsRecording));
+        SendRecordingCommand.RaiseCanExecuteChanged();
+        CancelRecordingCommand.RaiseCanExecuteChanged();
+
+        if (recording is null)
+        {
+            _notificationService.ShowError("录音为空，无法发送。");
+            return;
+        }
+
+        using (recording)
+        {
+            var contentType = recording.Metadata.Container == "wav"
+                ? "audio/wav"
+                : $"audio/{recording.Metadata.Container}";
+            var fileName = $"voice-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.{recording.Metadata.Container}";
+
+            IsUploading = true;
+            UploadProgress = 0;
+            string? clientAttachmentId = null;
+            try
+            {
+                clientAttachmentId = Guid.NewGuid().ToString("N");
+                var progress = new Progress<AttachmentUploadProgress>(p =>
+                {
+                    Dispatcher.UIThread.Post(() => UploadProgress = p.Percent);
+                });
+                var wavStream = recording.WavStream;
+                wavStream.Position = 0;
+                var result = await _attachments.UploadAndConfirmAsync(
+                        wavStream, contentType, wavStream.Length, fileName,
+                        clientAttachmentId: clientAttachmentId, progress, maxAttempts: 3, sha256: null, ct)
+                    .ConfigureAwait(true);
+
+                AddPendingAttachment(new PendingAttachment
+                {
+                    AttachmentId = result.AttachmentId,
+                    FileName = result.OriginalName ?? fileName,
+                    ContentType = result.ContentType,
+                    SizeBytes = result.SizeBytes,
+                    IsVoice = true,
+                    VoiceCodec = recording.Metadata.Codec,
+                    VoiceContainer = recording.Metadata.Container,
+                    VoiceDurationMs = recording.Metadata.DurationMs,
+                    VoiceSampleRateHz = recording.Metadata.SampleRateHz,
+                    VoiceChannels = recording.Metadata.Channels
+                });
+                UploadProgress = 100;
+            }
+            catch (OperationCanceledException)
+            {
+                if (!string.IsNullOrEmpty(clientAttachmentId))
+                    await _attachments.AbandonAsync(clientAttachmentId, CancellationToken.None).ConfigureAwait(true);
+                _notificationService.ShowError("语音上传已取消。");
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "语音上传失败 ClientAttachmentId={ClientAttachmentId}", clientAttachmentId);
+                if (!string.IsNullOrEmpty(clientAttachmentId))
+                    await _attachments.AbandonAsync(clientAttachmentId, CancellationToken.None).ConfigureAwait(true);
+                _notificationService.ShowError($"语音上传失败: {ex.Message}");
+                return;
+            }
+            finally
+            {
+                IsUploading = false;
+            }
+        }
+
+        // 语音作为附件已加入草稿，复用统一发送路径（文本为空、仅附件语音可发送）。
+        await SendMessage(ct).ConfigureAwait(true);
+    }
+
     private async Task MarkAttachmentFailedAsync(string? clientAttachmentId, string? uploadingRelativePath, string reason)
     {
         if (string.IsNullOrEmpty(clientAttachmentId)) return;
@@ -2131,6 +2292,14 @@ public class MessageViewModel : ViewModelBase, IDisposable
         ScheduleDraftSave();
     }
 
+    /// <summary>统一刷新录音相关命令的可用状态（录音开始/结束/取消后调用）。</summary>
+    private void RefreshRecordingCommandStates()
+    {
+        StartRecordingCommand.RaiseCanExecuteChanged();
+        SendRecordingCommand.RaiseCanExecuteChanged();
+        CancelRecordingCommand.RaiseCanExecuteChanged();
+    }
+
     private void AddPendingAttachment(PendingAttachment attachment)
     {
         _pendingAttachments.Add(attachment);
@@ -2209,6 +2378,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         foreach (var sub in _eventSubscriptions)
             sub.Dispose();
         _eventSubscriptions.Clear();
+        // 若正在录音则放弃并停止采集（幂等）。
+        _voiceRecorder.Cancel();
         _thumbnailGate.Dispose();
         GC.SuppressFinalize(this);
     }
@@ -2383,12 +2554,30 @@ public sealed class PickedAttachmentFile
     public required Func<CancellationToken, Task<Stream>> OpenReadAsync { get; init; }
 }
 
-/// <summary>待发送附件草稿项（阶段 3-5 多附件草稿）。</summary>
+/// <summary>待发送附件草稿项（阶段 3-5 多附件草稿；语音附件携带 VOICE-MSG-2 元数据）。</summary>
 public sealed class PendingAttachment
 {
     public string AttachmentId { get; init; } = string.Empty;
     public string? FileName { get; init; }
     public string ContentType { get; init; } = "application/octet-stream";
     public long SizeBytes { get; init; }
+
+    /// <summary>是否为语音附件（VOICE-MSG-2）。为 true 时语音字段必须非空且为正。</summary>
+    public bool IsVoice { get; init; }
+
+    /// <summary>音频编解码器（如 pcm、opus）。仅语音附件有值。</summary>
+    public string? VoiceCodec { get; init; }
+
+    /// <summary>音频容器格式（如 wav、ogg）。仅语音附件有值。</summary>
+    public string? VoiceContainer { get; init; }
+
+    /// <summary>语音时长（毫秒）。仅语音附件有值。</summary>
+    public long? VoiceDurationMs { get; init; }
+
+    /// <summary>采样率（Hz）。仅语音附件有值。</summary>
+    public int? VoiceSampleRateHz { get; init; }
+
+    /// <summary>声道数。仅语音附件有值。</summary>
+    public short? VoiceChannels { get; init; }
 }
 

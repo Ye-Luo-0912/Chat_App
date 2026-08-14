@@ -11,6 +11,7 @@ using Chat_App.Services;
 using Core.Interfaces;
 using Core.Protocol;
 using Core.Services;
+using Core.Services.Voice;
 using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Networking;
 using Chat_App.Infrastructure.Serialization;
@@ -120,7 +121,16 @@ public partial class App : Application
             .AddSingleton<IThumbnailImageCodec, SkiaThumbnailImageCodec>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<AttachmentRecoveryService>()
-            .AddSingleton<DiagnosticsService>();
+            .AddSingleton<DiagnosticsService>()
+            // VOICE-MSG-2：跨平台 fallback 录音（正弦波采样源）。真实麦克风采集后续经
+            // IWaveSampleSource 注入替换，UI/发送链路不感知采集实现。
+            .AddSingleton<IVoiceRecorder>(_ =>
+                new VoiceRecorderService(
+                    new SineToneSampleSource(
+                        sampleRateHz: 16_000,
+                        channels: 1,
+                        maxDuration: TimeSpan.FromSeconds(60)),
+                    maxDuration: TimeSpan.FromSeconds(60)));
 
 
         services.AddHttpClient<IAuthClientService, AuthClientService>("AuthClient", (sp, client) =>
