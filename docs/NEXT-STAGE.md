@@ -82,3 +82,52 @@ Server 提供关系权威、附件安全策略和短期 call grant；Realtime �
 ## 验证顺序
 
 聚焦单测/契约测试 → Release 构建 → 5–20 分钟故障与联调短测。当前阶段到功能联调验收为止。
+
+## 真机人工验证手册：VOICE-MSG-2 三条降级路径
+
+环境形态：远程 relgate 主机提供 API(HTTP:8080)/Realtime(:8081/:8082)/TCP Gateway(:8888) 与
+infra(postgres/garnet/nats)；本机 + 另一台真机各跑一个 Avalonia 客户端，互为好友。
+
+### 前置条件（每台设备都满足）
+
+1. 客户端 `appsettings.json`：
+   - `AuthServer:BaseUrl` = `http://<远程IP>:8080`（远程为 HTTP 明文时；HTTPS/域名则在登录页覆盖）。
+   - `Tcp:UseTls` = `false`（远程 Gateway 为明文端口；如远程走 TLS 则保持 `true`）。
+   - `Voice:MaxDurationSeconds` 默认 60；路径 1 验证时临时改小（如 10）以快速观察自动收尾，验完恢复 60。
+2. 远程已跑且为带语音元数据字段的版本：登录响应携带 `Server.Host/Port` 指向真机可达的 Gateway；
+   Gateway 监听 `0.0.0.0:8888`（对应 `TcpGateway__ListenAddress=0.0.0.0`）。
+3. A/B 两账号已互为好友；客户端日志目录 `%LOCALAPPDATA%\ChatApp\Data\logs`。
+
+### 路径 1：录音超时自动收尾（recording timeout auto-finalize）
+
+1. 两机 `Voice:MaxDurationSeconds` 临时设 10，重启客户端。
+2. A 打开与 B 的会话，长按录音 ≥10s 不松手。
+3. 预期：到时长后录音自动结束（录音按钮复位、时长停在 ~0:10、`IsRecording=false`），
+   触发 `AutoCompleted` → 自动上传并发送；B 收到该语音。
+4. 验收：A 无残留录音态；B 收到语音且元数据（duration≈10s、codec=pcm、container=wav）正确；
+   日志无未处理异常。若上传失败则按路径 3 给出终态提示（不悬挂）。
+5. 验完恢复 `MaxDurationSeconds=60` 并重启客户端。
+
+### 路径 2：播放下载失败防护（playback download-failure terminal state）
+
+1. 正常网络下 A 发一条语音给 B；B 收到后**不要**点播放（保证本地未缓存）。
+2. B 断开网络（断 WiFi/拔网线或关闭到远程的访问）。
+3. B 点该语音气泡。
+4. 预期：下载失败后出现红色 toast「语音加载失败，请稍后重试。」；播放器不进播放态
+   （无进度条、播放按钮不置为暂停态，即不伪播放）。
+5. 验收：明确终态提示 + 播放器复位；日志记录 `语音下载失败 AttachmentId=...`。
+6. 恢复网络后再次点播应能正常播放（缓存/重试恢复）。
+
+### 路径 3：上传失败恢复（upload-failure abandon + terminal state）
+
+1. B 打开与 A 的会话，先断开网络或使远程不可达。
+2. B 按住录音几秒，松手发送。
+3. 预期：上传失败 → toast「语音上传失败: <原因>」；服务端不留孤儿附件（已 `AbandonAsync`）；
+   会话无悬挂「上传中」状态。
+4. 验收：明确终态提示；上传进度复位；日志记录上传失败与 Abandon（`ClientAttachmentId=...`）。
+5. 恢复网络后重新录音发送应成功（恢复能力验证）。
+
+### 记录与回归
+
+每条路径记录：设备、时间、步骤截图、实际结果 vs 预期、日志关键行。完成后在下一提交中更新本节状态。
+
