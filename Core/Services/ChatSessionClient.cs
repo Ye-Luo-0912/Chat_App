@@ -87,9 +87,15 @@ namespace Core.Services
             TcpGatewayFeature.ConversationPreferences |
             TcpGatewayFeature.MessageMutation |
             TcpGatewayFeature.PresenceAndTyping |
-            TcpGatewayFeature.GroupManagement;
+            TcpGatewayFeature.GroupManagement |
+            TcpGatewayFeature.RelationshipRead;
 
-        public virtual bool SupportsRelationshipRead => true;
+        /// <summary>
+        /// 关系只读能力是否已协商启用：仅当握手中服务端回显 <see cref="TcpGatewayFeature.RelationshipRead"/>
+        /// 能力位时，SyncEngine 才发起关系增量同步；未协商则 fail-closed（不发送关系水位、不应用关系增量）。
+        /// </summary>
+        public virtual bool SupportsRelationshipRead =>
+            (NegotiatedFeatureBits & (uint)TcpGatewayFeature.RelationshipRead) != 0;
 
         // 协议上限
         private const int MaxAttachmentsPerMessage = 32;
