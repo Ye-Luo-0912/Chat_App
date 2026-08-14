@@ -83,14 +83,19 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 
 完成标准：两端在直连、TURN、拒绝、超时、断线重连和网络切换下都得到唯一终态；关闭通话能力不影响消息与同步。
 
-#### 进展（客户端信令控制面 wire 层已闭环）
+#### 进展（客户端信令控制面 wire 层已闭环，状态机与会话编排已闭环）
 
 - `ChatSessionClient` 新增 `SendCallCommandAsync`（call id + command id 幂等、单调 revision；grant 只原样携带）与 `CallSignalReceived` S2C push 事件；`PacketCommand.CallCommandRequest/Response/CallSignal` 走真实编解码与按 RequestId 精确配对。
 - 能力协商：仅当握手服务端回显 `GatewayFeature.CallSignaling` 时 `SupportsCallSignaling=true`，未协商则 fail-closed（`NotSupportedException`）；断线/Error 包按 RequestId 批量失败在途 call 命令并清空 pending。
-- 集成测试：新增 `CallSignalingClientTests`（能力协商 2 + invite wire 往返 1 + push 事件 1 + 参数校验 1 + 断线 fail-closed 1）；`RequestMatrixTests` 扩展 `call` 到成功/业务拒绝/协议拒绝/超时矩阵。
-- 测试：Unit 75 / Protocol 58 / Integration 213 全部通过。
+- 纯状态机 `Core/Models/CallSession.cs`：invite/ringing/accept/reject/cancel/end/reconnect 迁移表、终态唯一不可逆、本地乐观迁移 + 服务端权威覆盖、对端信令按 signal id 幂等去重、单调 revision。
+- 媒体面抽象 `Core/Interfaces/ICallMediaSession.cs`：控制面只交换 SDP offer/answer 与 ICE candidate，媒体面（WebRTC/SRTP/ICE/STUN/TURN）留待真机接入；SDP 经信令平面完整双向透传。
+- 会话管理器 `Core/Services/CallSessionManager.cs`：命令编排（乐观迁移 → 权威收敛）、来电分派、invite/ringing 超时收尾（TimedOut/Missed）、Active 时启动媒体面、终态收尾释放；`App.axaml.cs` 注册 `ICallSessionManager`（MediaFactory 暂缺省）。
+- 测试：
+  - Unit：`CallSessionStateMachineTests`（状态机迁移表 + 管理器，假客户端 + 手动延迟，34 项）；Unit 合计 114。
+  - Integration：新增 `CallSessionManagerE2ETests`（双设备 over 真实 wire：邀请 → 来电 → 应答/拒绝/取消 → Active 媒体面双向 SDP → 挂断终态收敛，3 项）；`CallSignalingClientTests` 与 `RequestMatrixTests` 保持。
+  - 全量 Unit 114 / Protocol 58 / Integration 216 通过。
 
-下一步：客户端通话状态机（invite/ringing/accept/reject/cancel/end/timeout/reconnect 与多设备竞争）、WebRTC/SRTP 媒体面（ICE/STUN/TURN）接入，以及与真实 Gateway 的联调。
+下一步：WebRTC/SRTP 媒体面（ICE/STUN/TURN）接入 `ICallMediaSession` 真实实现，以及与真实 Gateway 的联调。
 
 ### P1：`APP-OPS-1` 客户端完整性
 

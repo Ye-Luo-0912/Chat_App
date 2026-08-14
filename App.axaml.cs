@@ -124,6 +124,15 @@ public partial class App : Application
             .AddSingleton<AttachmentRecoveryService>()
             .AddSingleton<DiagnosticsService>()
             .AddSingleton<IAudioPlayer, PcmAudioPlayer>()
+            // CALL-E2E-2：通话会话管理器（控制面状态机编排 + 媒体面抽象注入点）。
+            // 依赖 IChatSessionClient（wire 信令）与 ICurrentUserContext（当前用户）。
+            // MediaFactory 暂缺省：WebRTC/SRTP 媒体面接入点留给真机联调阶段。
+            .AddSingleton<ICallSessionManager>(sp => new CallSessionManager(
+                sp.GetRequiredService<IChatSessionClient>(),
+                sp.GetRequiredService<ICurrentUserContext>())
+            {
+                MediaFactory = null
+            })
             // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
             {
