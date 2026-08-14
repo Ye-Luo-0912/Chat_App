@@ -45,6 +45,13 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
 
     public event Action<VoiceRecordingProgress>? Progress;
 
+    /// <summary>
+    /// 达到 <see cref="_maxDuration"/> 自动收尾时触发，携带已封装的合法 WAV 产物。
+    /// 调用方接管产物的释放（<see cref="VoiceRecording.Dispose"/>）。
+    /// 触发后录音状态已复位（<see cref="IsRecording"/> 为 false）。
+    /// </summary>
+    public event Action<VoiceRecording>? AutoCompleted;
+
     public void Start()
     {
         lock (_gate)
@@ -141,12 +148,16 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
     {
         var buffer = new byte[64 * 1024];
         var stopwatch = _stopwatch;
+        var hitMaxDuration = false;
         try
         {
             while (!_finishRequested)
             {
                 if (stopwatch is not null && stopwatch.Elapsed >= _maxDuration)
+                {
+                    hitMaxDuration = true;
                     break;
+                }
 
                 var read = _source.Read(buffer);
                 if (read <= 0)
@@ -167,6 +178,49 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
         {
             // 释放被阻塞的采集源（若其 Read 依赖 Stop 解除阻塞）。
             try { _source.Stop(); } catch { /* 忽略 */ }
+        }
+
+        // 达到最长时长：自动收尾（而非用户 Stop/Cancel），复位状态并产出合法 WAV。
+        if (hitMaxDuration)
+            AutoFinalize(stopwatch);
+    }
+
+    /// <summary>
+    /// 达到最长时长后的自动收尾：复位录音状态、封装 WAV、触发 <see cref="AutoCompleted"/>。
+    /// RequestFinish 已由 <see cref="Stop"/> 触发的场景不进入此路径（那时 state 已复位）。
+    /// </summary>
+    private void AutoFinalize(Stopwatch? stopwatch)
+    {
+        lock (_gate)
+        {
+            if (Volatile.Read(ref _state) != 1)
+                return;
+
+            Volatile.Write(ref _state, 0);
+            var stream = _captureStream;
+            var dataBytes = _dataBytes;
+            var elapsedMs = stopwatch?.ElapsedMilliseconds ?? 0;
+            _captureStream = null;
+            _stopwatch = null;
+            _cts.Dispose();
+            _cts = new CancellationTokenSource();
+
+            if (stream is null || dataBytes <= 0)
+            {
+                stream?.Dispose();
+                return;
+            }
+
+            FinalizeWav(stream, dataBytes);
+            var metadata = new VoiceMetadata(
+                Codec: "pcm",
+                Container: "wav",
+                DurationMs: Math.Max(1, elapsedMs),
+                SampleRateHz: Options.SampleRateHz,
+                Channels: Options.Channels,
+                SizeBytes: stream.Length);
+            var recording = new VoiceRecording(stream, metadata);
+            AutoCompleted?.Invoke(recording);
         }
     }
 

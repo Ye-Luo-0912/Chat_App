@@ -64,6 +64,12 @@ public interface IVoiceRecorder
     /// <summary>录音过程中周期性触发（时长递增；UI 用于显示秒数）。</summary>
     event Action<VoiceRecordingProgress>? Progress;
 
+    /// <summary>
+    /// 录音达到最长时长自动收尾时触发，携带已封装的合法 WAV 产物。
+    /// 调用方接管产物的释放（<see cref="VoiceRecording.Dispose"/>）；触发后 <see cref="IsRecording"/> 为 false。
+    /// </summary>
+    event Action<VoiceRecording>? AutoCompleted;
+
     /// <summary>开始录音。幂等：已在录音则无操作。</summary>
     void Start();
 

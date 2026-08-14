@@ -144,6 +144,97 @@ public sealed class VoiceRecorderTests
     }
 
     /// <summary>
+    /// 降级策略：录音达到最长时长（maxDuration）应自动收尾——状态复位、产出合法 WAV、
+    /// 触发 <see cref="VoiceRecorderService.AutoCompleted"/>，避免无限录音导致内存无界增长。
+    /// </summary>
+    [Fact]
+    public void Record_ReachesMaxDuration_AutoFinalizesAndFiresAutoCompleted()
+    {
+        VoiceRecording? auto = null;
+        // 源按实时节奏产出（模拟真实麦克风）；录音机自身的 maxDuration 触发自动收尾。
+        using var recorder = new VoiceRecorderService(
+            new PacedSilenceSource(SampleRate, Channels),
+            maxDuration: TimeSpan.FromMilliseconds(250));
+        recorder.AutoCompleted += r => auto = r;
+
+        recorder.Start();
+        Thread.Sleep(600); // 超过 maxDuration
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (auto is null && DateTime.UtcNow < deadline)
+            Thread.Sleep(10);
+
+        // 自动收尾后：状态已复位，不再录音。
+        Assert.False(recorder.IsRecording, "超时后不应仍在录音");
+        Assert.NotNull(auto);
+        using (auto!)
+        {
+            Assert.Equal("pcm", auto.Metadata.Codec);
+            Assert.Equal("wav", auto.Metadata.Container);
+            Assert.True(auto.Metadata.DurationMs > 0);
+            Assert.True(auto.Metadata.SizeBytes > 44, "应包含完整 WAV 头 + 数据");
+            // Stop 应返回 null（AutoCompleted 已消费产物，无在录会话）。
+            Assert.Null(recorder.Stop());
+        }
+    }
+
+    /// <summary>
+    /// 降级策略：超时自动收尾后，录音实例可被复用开始下一次录音，且新录音不受旧产物影响。
+    /// </summary>
+    [Fact]
+    public void Record_AfterAutoFinalize_CanRestartFreshRecording()
+    {
+        using var recorder = new VoiceRecorderService(
+            new PacedSilenceSource(SampleRate, Channels),
+            maxDuration: TimeSpan.FromMilliseconds(250));
+        recorder.Start();
+        Thread.Sleep(600);
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (recorder.IsRecording && DateTime.UtcNow < deadline)
+            Thread.Sleep(10);
+        Assert.False(recorder.IsRecording, "首次超时后应已自动收尾");
+
+        // 重新开始并手动停止：应产出新 WAV，且长度与旧产物无关。
+        recorder.Start();
+        Thread.Sleep(100);
+        var second = recorder.Stop();
+        Assert.NotNull(second);
+        using (second!)
+        {
+            Assert.True(second.Metadata.SizeBytes > 44);
+            Assert.Equal(SampleRate, second.Metadata.SampleRateHz);
+        }
+    }
+
+    /// <summary>
+    /// 按实时节奏产出静音 PCM 的采样源（模拟真实麦克风的阻塞式采集节奏）：
+    /// 每 100ms 产出一块静音，使 <see cref="VoiceRecorderService"/> 的 maxDuration 判定在真实时间上成立。
+    /// </summary>
+    private sealed class PacedSilenceSource(int sampleRate, short channels) : IWaveSampleSource
+    {
+        private const int ChunkBytes = 3_200; // 100ms @ 16kHz mono 16-bit
+        private volatile bool _running;
+
+        public int SampleRateHz => sampleRate;
+        public short Channels => channels;
+
+        public void Start() => _running = true;
+
+        public int Read(Span<byte> pcm16)
+        {
+            if (!_running)
+                return 0;
+            var bytes = Math.Min(pcm16.Length, ChunkBytes);
+            pcm16[..bytes].Clear();
+            Thread.Sleep(100);
+            return _running ? bytes : 0;
+        }
+
+        public void Stop() => _running = false;
+
+        public void Dispose() { }
+    }
+
+    /// <summary>
     /// VOICE-MSG-2 链路桥接：真实录音产物的元数据按 SendVoiceAsync 的映射
     /// 写入 wire AttachmentRefDto，并经 AttachmentJson 往返后语音字段保持一致。
     /// </summary>

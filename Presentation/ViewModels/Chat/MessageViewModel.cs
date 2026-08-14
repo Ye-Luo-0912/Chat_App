@@ -403,6 +403,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
             RecordingDurationText = $"{totalSec / 60}:{totalSec % 60:00}";
         };
 
+        // 录音达到最长时长自动收尾 → 自动上传并发送（降级策略：超时不再无限录音）。
+        _voiceRecorder.AutoCompleted += recording =>
+        {
+            _ = SendVoiceRecordingAsync(recording, CancellationToken.None);
+        };
+
         // VOICE-MSG-2 播放：点击语音气泡 → 下载 WAV → 播放；再次点击暂停/恢复。
         PlayVoiceCommand = new AsyncRelayCommand<AttachmentRefDto?>(
             PlayVoiceAsync,
@@ -2098,6 +2104,18 @@ public class MessageViewModel : ViewModelBase, IDisposable
         }
 
         var recording = _voiceRecorder.Stop();
+        await SendVoiceRecordingAsync(recording, ct).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 上传录音为语音附件并发送（VOICE-MSG-2）：取 WAV → 复用
+    /// <see cref="IAttachmentClientService.UploadAndConfirmAsync"/> 上传 → 作为语音
+    /// 附件加入草稿 → 立即发送。codec=pcm、container=wav。
+    /// 由录音结束命令（<see cref="SendVoiceAsync"/>）与自动收尾（超时）共用。
+    /// <paramref name="recording"/> 为 null 表示无有效录音（放弃或尚未开始）。
+    /// </summary>
+    private async Task SendVoiceRecordingAsync(VoiceRecording? recording, CancellationToken ct)
+    {
         RecordingDurationText = "0:00";
         OnPropertyChanged(nameof(IsRecording));
         SendRecordingCommand.RaiseCanExecuteChanged();
@@ -2201,11 +2219,32 @@ public class MessageViewModel : ViewModelBase, IDisposable
         var fileName = !string.IsNullOrWhiteSpace(attachment.FileName)
             ? attachment.FileName
             : $"{attachment.AttachmentId}.wav";
-        var path = await _downloadService.GetOrDownloadAsync(
-                attachment.AttachmentId, fileName, attachment.DownloadApiHint, ct)
-            .ConfigureAwait(true);
+
+        string? path;
+        try
+        {
+            path = await _downloadService.GetOrDownloadAsync(
+                    attachment.AttachmentId, fileName, attachment.DownloadApiHint, ct)
+                .ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // 手动切换/取消：复位，不提示。
+            return;
+        }
+        catch (Exception ex)
+        {
+            // 降级策略：下载失败（断网/过期附件/服务端不可用）不复位播放器为"播放中"，
+            // 给出明确终态并复位，避免 UI 卡在伪播放状态。
+            _audioPlayer.Stop();
+            Log.Warning(ex, "语音下载失败 AttachmentId={AttachmentId}", attachment.AttachmentId);
+            _notificationService.ShowError("语音加载失败，请稍后重试。");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(path))
         {
+            _audioPlayer.Stop();
             _notificationService.ShowError("语音加载失败，请稍后重试。");
             return;
         }
