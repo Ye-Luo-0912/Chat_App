@@ -33,14 +33,17 @@
 
 **录音/上传链路已完成（Client 侧）**：新增 `IVoiceRecorder` 抽象与 `WavPcmEncoder`
 （确定性 RIFF/PCM WAV，跨平台字节级一致）、`VoiceRecorderService`（Start/Stop/Cancel 线程安全，
-产出含正确 data 长度的 WAV 与 codec=pcm/container=wav 元数据）、`SineToneSampleSource`
-（跨平台 fallback 采样源，供无麦克风的开发/测试环境打通全链路）。`MessageViewModel` 注入
+产出含正确 data 长度的 WAV 与 codec=pcm/container=wav 元数据）。`MessageViewModel` 注入
 `IVoiceRecorder`，新增 Start/Send/Cancel 录音命令与实时时长显示，`PendingAttachment` 携带语音
 元数据并在 `SendMessage` 映射到 wire `AttachmentRefDto` 语音字段；`SendVoiceAsync` 复用
 `IAttachmentClientService.UploadAndConfirmAsync` 上传后立即发送；草稿（`DraftState`）同样持久化语音
-字段。DI 已注册 fallback 录音机。录音单测 7 项 + 链路桥接测试覆盖 WAV 结构/时长/元数据/取消/往返。
+字段。录音单测 7 项 + 链路桥接测试覆盖 WAV 结构/时长/元数据/取消/往返。
 
-剩余工作：真实麦克风采集源（`IWaveSampleSource` 替换注入）、播放链路与跨设备端到端联调。
+**真实麦克风采集已接入**：新增 `MicrophoneSampleSource`（NAudio/WinMM，Windows）。
+NAudio 推式回调经有界队列桥接为拉式 `Read`；DI 在 Windows 用真实麦克风，其他平台回退到
+`SineToneSampleSource`，保证跨平台可用。平台边界与参数校验单测 2 项。
+
+剩余工作：播放链路、跨设备端到端联调，以及真实设备上的采集压测/降级策略。
 
 完成标准：录制 → 上传 → 发送 → 跨设备接收 → 播放 → 历史/同步恢复形成完整测试链路，扫描拒绝、断网、重启和过期附件均可恢复或给出明确终态。
 

@@ -12,6 +12,7 @@ using Core.Interfaces;
 using Core.Protocol;
 using Core.Services;
 using Core.Services.Voice;
+using Chat_App.Infrastructure.Services.Voice;
 using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Networking;
 using Chat_App.Infrastructure.Serialization;
@@ -122,15 +123,25 @@ public partial class App : Application
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<AttachmentRecoveryService>()
             .AddSingleton<DiagnosticsService>()
-            // VOICE-MSG-2：跨平台 fallback 录音（正弦波采样源）。真实麦克风采集后续经
-            // IWaveSampleSource 注入替换，UI/发送链路不感知采集实现。
+            // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
-                new VoiceRecorderService(
-                    new SineToneSampleSource(
+            {
+                // VOICE-MSG-2：Windows 用真实麦克风采集；其他平台回退到确定性正弦波源，
+                // 保证 UI/上传/发送链路跨平台可用。真实采集源由 MicrophoneSampleSource 提供。
+                IWaveSampleSource source;
+                try
+                {
+                    source = new MicrophoneSampleSource(sampleRateHz: 16_000, channels: 1);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    source = new SineToneSampleSource(
                         sampleRateHz: 16_000,
                         channels: 1,
-                        maxDuration: TimeSpan.FromSeconds(60)),
-                    maxDuration: TimeSpan.FromSeconds(60)));
+                        maxDuration: TimeSpan.FromSeconds(60));
+                }
+                return new VoiceRecorderService(source, maxDuration: TimeSpan.FromSeconds(60));
+            });
 
 
         services.AddHttpClient<IAuthClientService, AuthClientService>("AuthClient", (sp, client) =>

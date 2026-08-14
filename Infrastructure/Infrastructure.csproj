@@ -24,6 +24,7 @@
       <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
       <PackageReference Include="System.IO.Hashing" />
       <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+      <PackageReference Include="NAudio" />
     </ItemGroup>
 
     <ItemGroup>
