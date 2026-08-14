@@ -301,7 +301,7 @@
         "type": "Project",
         "dependencies": {
           "ChatApp.Contracts.Http": "[0.3.0, )",
-          "ChatApp.Protocol.Tcp": "[0.5.0, )"
+          "ChatApp.Protocol.Tcp": "[0.5.3, )"
         }
       },
       "infrastructure": {
@@ -323,9 +323,9 @@
       },
       "ChatApp.Protocol.Tcp": {
         "type": "CentralTransitive",
-        "requested": "[0.5.0, )",
-        "resolved": "0.5.0",
-        "contentHash": "DW8GPHKhErrH9ANyHZrVX3P5zMp3dXrmrTscqdYSRNPZlX6MSSxHtNHlaqzeBgZg08pDkFm0iPlPYJboj153HQ=="
+        "requested": "[0.5.3, )",
+        "resolved": "0.5.3",
+        "contentHash": "uxcuHMPGhBrqilqGOrpXC8YQk7JJu4uYXHddsL+uNXPawhu7+8DPrPi6RdvIFYiSm5VA5jptuQmFMmsXh2sQ3g=="
       },
       "Microsoft.EntityFrameworkCore.Sqlite": {
         "type": "CentralTransitive",
