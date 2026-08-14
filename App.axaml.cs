@@ -123,6 +123,7 @@ public partial class App : Application
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<AttachmentRecoveryService>()
             .AddSingleton<DiagnosticsService>()
+            .AddSingleton<IAudioPlayer, PcmAudioPlayer>()
             // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
             {

@@ -43,7 +43,15 @@
 NAudio 推式回调经有界队列桥接为拉式 `Read`；DI 在 Windows 用真实麦克风，其他平台回退到
 `SineToneSampleSource`，保证跨平台可用。平台边界与参数校验单测 2 项。
 
-剩余工作：播放链路、跨设备端到端联调，以及真实设备上的采集压测/降级策略。
+**播放链路已完成（Client 侧）**：新增 `IAudioPlayer` 抽象（`Play/Pause/Resume/Stop`，进度/停止事件），
+`Infrastructure` 实现 `PcmAudioPlayer`（NAudio WaveOutEvent/WaveFileReader，定时器上报进度，线程安全
+单实例状态）。`MessageViewModel` 注入 `IAudioPlayer`，新增 `PlayVoiceCommand` 与全局播放状态
+（`PlayingVoiceAttachmentId`/`IsVoicePlaying`/`VoicePlaybackProgress`/`VoicePlaybackDisplayText`），
+点击语音气泡经 `IAttachmentDownloadService` 取本地缓存 WAV 后播放，再次点击暂停/恢复、点其他气泡自动切换。
+UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`VoicePlaybackStateConverter`（多值转播放图标/进度）
+与 `VoiceDurationConverter`（毫秒→mm:ss/H:mm:ss）。播放单测 17 项覆盖时长格式化与播放器边界。
+
+剩余工作：跨设备端到端联调，以及真实设备上的采集压测/降级策略。
 
 完成标准：录制 → 上传 → 发送 → 跨设备接收 → 播放 → 历史/同步恢复形成完整测试链路，扫描拒绝、断网、重启和过期附件均可恢复或给出明确终态。
 

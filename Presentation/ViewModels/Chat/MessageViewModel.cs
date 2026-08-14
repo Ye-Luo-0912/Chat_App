@@ -43,6 +43,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IAttachmentDownloadService _downloadService;
     private readonly IAttachmentThumbnailService _thumbnailService;
     private readonly IVoiceRecorder _voiceRecorder;
+    private readonly IAudioPlayer _audioPlayer;
     private readonly List<IDisposable> _eventSubscriptions = [];
 
     private long CurrPeerId { get; set; }
@@ -139,6 +140,35 @@ public class MessageViewModel : ViewModelBase, IDisposable
     {
         get => _recordingDurationText;
         private set => SetProperty(ref _recordingDurationText, value);
+    }
+
+    // 语音播放（VOICE-MSG-2）：全局单实例播放状态，UI 据此驱动语音气泡。
+    private string? _playingVoiceAttachmentId;
+    public string? PlayingVoiceAttachmentId
+    {
+        get => _playingVoiceAttachmentId;
+        private set => SetProperty(ref _playingVoiceAttachmentId, value);
+    }
+
+    private bool _isVoicePlaying;
+    public bool IsVoicePlaying
+    {
+        get => _isVoicePlaying;
+        private set => SetProperty(ref _isVoicePlaying, value);
+    }
+
+    private double _voicePlaybackProgress;
+    public double VoicePlaybackProgress
+    {
+        get => _voicePlaybackProgress;
+        private set => SetProperty(ref _voicePlaybackProgress, value);
+    }
+
+    private string _voicePlaybackDisplayText = string.Empty;
+    public string VoicePlaybackDisplayText
+    {
+        get => _voicePlaybackDisplayText;
+        private set => SetProperty(ref _voicePlaybackDisplayText, value);
     }
 
     // 多附件草稿（阶段 3-5）
@@ -257,6 +287,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand StartRecordingCommand { get; }
     public AsyncRelayCommand SendRecordingCommand { get; }
     public AsyncRelayCommand CancelRecordingCommand { get; }
+    public AsyncRelayCommand<AttachmentRefDto?> PlayVoiceCommand { get; }
     public AsyncRelayCommand<PendingAttachment?> ClearPendingAttachmentCommand { get; }
     public AsyncRelayCommand ClearReplyDraftCommand { get; }
     public AsyncRelayCommand ClearEditDraftCommand { get; }
@@ -293,7 +324,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IAttachmentStorageService storage,
         IAttachmentDownloadService downloadService,
         IAttachmentThumbnailService thumbnailService,
-        IVoiceRecorder voiceRecorder)
+        IVoiceRecorder voiceRecorder,
+        IAudioPlayer audioPlayer)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
@@ -302,6 +334,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _downloadService = downloadService;
         _thumbnailService = thumbnailService;
         _voiceRecorder = voiceRecorder;
+        _audioPlayer = audioPlayer;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -368,6 +401,40 @@ public class MessageViewModel : ViewModelBase, IDisposable
         {
             var totalSec = (int)Math.Max(0, p.Elapsed.TotalSeconds);
             RecordingDurationText = $"{totalSec / 60}:{totalSec % 60:00}";
+        };
+
+        // VOICE-MSG-2 播放：点击语音气泡 → 下载 WAV → 播放；再次点击暂停/恢复。
+        PlayVoiceCommand = new AsyncRelayCommand<AttachmentRefDto?>(
+            PlayVoiceAsync,
+            att => att is not null && att.IsVoice && !string.IsNullOrWhiteSpace(att.AttachmentId),
+            ex =>
+            {
+                Log.Error(ex, "语音播放失败");
+                _notificationService.ShowError($"语音播放失败: {ex.Message}");
+            });
+
+        // 播放进度 → 全局进度/时长文本；停止 → 复位播放状态。
+        _audioPlayer.Progress += p =>
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                PlayingVoiceAttachmentId = p.Key;
+                IsVoicePlaying = _audioPlayer.IsPlaying;
+                var durationMs = Math.Max(1, p.Duration.TotalMilliseconds);
+                VoicePlaybackProgress = Math.Clamp(p.Position.TotalMilliseconds / durationMs, 0, 1);
+                VoicePlaybackDisplayText = $"{FormatVoiceTime(p.Position)} / {FormatVoiceTime(p.Duration)}";
+            });
+        };
+        _audioPlayer.Stopped += () =>
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (PlayingVoiceAttachmentId is not null)
+                    PlayingVoiceAttachmentId = null;
+                IsVoicePlaying = false;
+                VoicePlaybackProgress = 0;
+                VoicePlaybackDisplayText = string.Empty;
+            });
         };
 
         ClearPendingAttachmentCommand = new AsyncRelayCommand<PendingAttachment?>(
@@ -2104,6 +2171,52 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
         // 语音作为附件已加入草稿，复用统一发送路径（文本为空、仅附件语音可发送）。
         await SendMessage(ct).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 语音播放（VOICE-MSG-2）：点击语音气泡时下载 WAV 到本地缓存并播放。
+    /// 再次点击：若为当前播放项则暂停/恢复切换；若为其他项则切换播放。<see cref="IAudioPlayer"/>
+    /// 负责进度上报与停止复位，本方法只负责"取缓存路径 → 交给播放器"。
+    /// </summary>
+    private async Task PlayVoiceAsync(AttachmentRefDto? attachment, CancellationToken ct)
+    {
+        if (attachment is null || !attachment.IsVoice || string.IsNullOrWhiteSpace(attachment.AttachmentId))
+            return;
+
+        // 同一附件：暂停/恢复切换。
+        if (_audioPlayer.IsPlaying && _audioPlayer.CurrentKey == attachment.AttachmentId)
+        {
+            _audioPlayer.Pause();
+            return;
+        }
+        if (_audioPlayer.CurrentKey == attachment.AttachmentId)
+        {
+            _audioPlayer.Resume();
+            return;
+        }
+        // 其他附件：停止当前，切换播放。
+        if (_audioPlayer.IsPlaying)
+            _audioPlayer.Stop();
+
+        var fileName = !string.IsNullOrWhiteSpace(attachment.FileName)
+            ? attachment.FileName
+            : $"{attachment.AttachmentId}.wav";
+        var path = await _downloadService.GetOrDownloadAsync(
+                attachment.AttachmentId, fileName, attachment.DownloadApiHint, ct)
+            .ConfigureAwait(true);
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            _notificationService.ShowError("语音加载失败，请稍后重试。");
+            return;
+        }
+
+        _audioPlayer.Play(attachment.AttachmentId, path);
+    }
+
+    private static string FormatVoiceTime(TimeSpan t)
+    {
+        var totalSec = (int)Math.Max(0, t.TotalSeconds);
+        return $"{totalSec / 60}:{totalSec % 60:00}";
     }
 
     private async Task MarkAttachmentFailedAsync(string? clientAttachmentId, string? uploadingRelativePath, string reason)

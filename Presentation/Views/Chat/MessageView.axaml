@@ -24,6 +24,7 @@
         <conv:MessageStatusMatchConverter x:Key="StatusMatch"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmap"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmapPreview" MaxCacheEntries="4"/>
+        <conv:VoicePlaybackStateConverter x:Key="VoicePlaybackState"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -200,7 +201,65 @@
                                                       IsVisible="{Binding HasAttachments}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate DataType="wire:TcpAttachmentRef">
-                                                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2">
+                                                    <StackPanel>
+                                                        <!-- 语音附件气泡（VOICE-MSG-2） -->
+                                                        <StackPanel Orientation="Horizontal"
+                                                                Spacing="8"
+                                                                Margin="0,2"
+                                                                IsVisible="{Binding IsVoice}">
+                                                        <Button Padding="0"
+                                                                Width="34"
+                                                                Height="34"
+                                                                CornerRadius="17"
+                                                                Background="#3B82F6"
+                                                                Foreground="White"
+                                                                Cursor="Hand"
+                                                                Command="{Binding #Root.((vm:MessageViewModel)DataContext).PlayVoiceCommand}"
+                                                                CommandParameter="{Binding}">
+                                                            <TextBlock FontSize="12"
+                                                                       FontWeight="SemiBold"
+                                                                       VerticalAlignment="Center">
+                                                                <TextBlock.Text>
+                                                                    <MultiBinding Converter="{StaticResource VoicePlaybackState}"
+                                                                                  ConverterParameter="Icon">
+                                                                        <Binding Path="#Root.((vm:MessageViewModel)DataContext).IsVoicePlaying"/>
+                                                                        <Binding Path="#Root.((vm:MessageViewModel)DataContext).PlayingVoiceAttachmentId"/>
+                                                                        <Binding Path="AttachmentId"/>
+                                                                    </MultiBinding>
+                                                                </TextBlock.Text>
+                                                            </TextBlock>
+                                                        </Button>
+                                                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                                                            <ProgressBar Width="130"
+                                                                         Height="4"
+                                                                         Maximum="1"
+                                                                         Minimum="0">
+                                                                <ProgressBar.Value>
+                                                                    <MultiBinding Converter="{StaticResource VoicePlaybackState}"
+                                                                                  ConverterParameter="Progress">
+                                                                        <Binding Path="#Root.((vm:MessageViewModel)DataContext).IsVoicePlaying"/>
+                                                                        <Binding Path="#Root.((vm:MessageViewModel)DataContext).PlayingVoiceAttachmentId"/>
+                                                                        <Binding Path="AttachmentId"/>
+                                                                        <Binding Path="#Root.((vm:MessageViewModel)DataContext).VoicePlaybackProgress"/>
+                                                                    </MultiBinding>
+                                                                </ProgressBar.Value>
+                                                            </ProgressBar>
+                                                            <TextBlock FontSize="11"
+                                                                       Foreground="#6B7280">
+                                                                <TextBlock.Text>
+                                                                    <Binding Path="VoiceDurationMs"
+                                                                             TargetNullValue="0:00">
+                                                                        <Binding.Converter>
+                                                                            <conv:VoiceDurationConverter/>
+                                                                        </Binding.Converter>
+                                                                    </Binding>
+                                                                </TextBlock.Text>
+                                                            </TextBlock>
+                                                        </StackPanel>
+                                                    </StackPanel>
+                                                    <!-- 普通附件链接 -->
+                                                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2"
+                                                                IsVisible="{Binding !IsVoice}">
                                                         <TextBlock Text="📎"
                                                                    FontSize="13"
                                                                    VerticalAlignment="Center"/>
@@ -223,6 +282,7 @@
                                                                    Foreground="Gray"
                                                                    VerticalAlignment="Center"
                                                                    IsVisible="{Binding SizeBytes, Converter={StaticResource LongToBool}}"/>
+                                                    </StackPanel>
                                                     </StackPanel>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
