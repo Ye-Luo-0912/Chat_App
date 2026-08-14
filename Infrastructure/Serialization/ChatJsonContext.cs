@@ -88,6 +88,10 @@ namespace Chat_App.Infrastructure.Serialization;
 [JsonSerializable(typeof(RoleChangedUpdateDto))]
 [JsonSerializable(typeof(MembersAddedUpdateDto))]
 [JsonSerializable(typeof(ConversationDissolvedUpdateDto))]
+[JsonSerializable(typeof(CallCommandRequestDto))]
+[JsonSerializable(typeof(CallCommandResponseDto))]
+[JsonSerializable(typeof(CallSignalDto))]
+[JsonSerializable(typeof(CallGrantDto))]
 public partial class ChatJsonContext : JsonSerializerContext
 {
 }

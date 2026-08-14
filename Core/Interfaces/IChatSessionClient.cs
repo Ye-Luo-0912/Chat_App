@@ -97,6 +97,20 @@ public interface IChatSessionClient : IDisposable
         long? mutedUntilMs = null,
         CancellationToken ct = default);
 
+    /// <summary>当前会话是否支持通话信令控制面（仅握手协商到 CallSignaling 能力时启用）。</summary>
+    bool SupportsCallSignaling => false;
+
+    /// <summary>
+    /// 发送一条通话信令命令（invite/ringing/accept/reject/cancel/end/reconnect）。
+    /// <paramref name="request"/> 以 call id + command id 幂等、单调 revision 排序；
+    /// grant 为 Server 签发的短期授权输入，客户端只原样携带不做校验。
+    /// </summary>
+    Task<CallCommandResponseDto> SendCallCommandAsync(
+        CallCommandRequestDto request,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话客户端不支持通话信令命令。");
+
+
     /// <summary>撤回已发送的消息（超时 8 秒）。</summary>
     Task<MessageRecallAcknowledgementDto> RecallMessageAsync(
         string messageId,
@@ -239,6 +253,9 @@ public interface IChatSessionClient : IDisposable
     event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
     event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
     event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
+
+    /// <summary>收到对端通话信令（S2C push，仅临时信令路径，不落持久化存储）。</summary>
+    event EventHandler<CallSignalDto>? CallSignalReceived;
 
     // ── 群聊事件 ──
     event EventHandler<MemberJoinedUpdateDto>? GroupMemberJoined;

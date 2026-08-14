@@ -13,6 +13,7 @@ using System.Text;
 using TcpClientHello = ChatApp.Shared.Protocol.Tcp.ClientHello;
 using TcpGatewayFeature = ChatApp.Shared.Protocol.Tcp.GatewayFeature;
 using TcpGoAway = ChatApp.Shared.Protocol.Tcp.GoAway;
+using TcpCallConstants = ChatApp.Shared.Protocol.Tcp.TcpCallConstants;
 using TcpProtocolErrorCode = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCode;
 using TcpProtocolErrorCodeExtensions = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCodeExtensions;
 using TcpProtocolErrorFrame = ChatApp.Shared.Protocol.Tcp.ProtocolErrorFrame;
@@ -39,6 +40,7 @@ namespace Core.Services
         private int _serverMaxPayloadBytes;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<RelationshipListResponseDto>> _relationshipListPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<CallCommandResponseDto>> _callCommandPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationSetPrefsResponseDto>> _prefsPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageRecallAcknowledgementDto>> _recallPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<MessageEditAcknowledgementDto>> _editPending = new(StringComparer.Ordinal);
@@ -88,7 +90,8 @@ namespace Core.Services
             TcpGatewayFeature.MessageMutation |
             TcpGatewayFeature.PresenceAndTyping |
             TcpGatewayFeature.GroupManagement |
-            TcpGatewayFeature.RelationshipRead;
+            TcpGatewayFeature.RelationshipRead |
+            TcpGatewayFeature.CallSignaling;
 
         /// <summary>
         /// 关系只读能力是否已协商启用：仅当握手中服务端回显 <see cref="TcpGatewayFeature.RelationshipRead"/>
@@ -96,6 +99,14 @@ namespace Core.Services
         /// </summary>
         public virtual bool SupportsRelationshipRead =>
             (NegotiatedFeatureBits & (uint)TcpGatewayFeature.RelationshipRead) != 0;
+
+        /// <summary>
+        /// 通话信令控制面是否已协商启用：仅当握手中服务端回显
+        /// <see cref="TcpGatewayFeature.CallSignaling"/> 能力位时，客户端才允许发送通话信令命令；
+        /// 未协商则 fail-closed（<see cref="SendCallCommandAsync"/> 抛 <see cref="NotSupportedException"/>）。
+        /// </summary>
+        public virtual bool SupportsCallSignaling =>
+            (NegotiatedFeatureBits & (uint)TcpGatewayFeature.CallSignaling) != 0;
 
         // 协议上限
         private const int MaxAttachmentsPerMessage = 32;
@@ -120,7 +131,7 @@ namespace Core.Services
         /// </summary>
         public int PendingRequestCount =>
             _listPending.Count + _prefsPending.Count + _recallPending.Count + _editPending.Count
-            + _relationshipListPending.Count
+            + _relationshipListPending.Count + _callCommandPending.Count
             + _presencePending.Count + _syncPending.Count + _historyPending.Count + _receiptPending.Count
             + _markReadPending.Count + _createGroupPending.Count + _addGroupMembersPending.Count
             + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _dissolveGroupPending.Count
@@ -186,6 +197,7 @@ namespace Core.Services
         public event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
         public event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
         public event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
+        public event EventHandler<CallSignalDto>? CallSignalReceived;
 
         // ── 群聊事件 ──
         public event EventHandler<MemberJoinedUpdateDto>? GroupMemberJoined;
@@ -454,6 +466,9 @@ namespace Core.Services
                 case PacketCommand.RelationshipListResponse:
                     FailAll(_relationshipListPending, contractException);
                     break;
+                case PacketCommand.CallCommandResponse:
+                    FailAll(_callCommandPending, contractException);
+                    break;
             }
         }
 
@@ -663,6 +678,33 @@ namespace Core.Services
                 },
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec),
                 "关系列表请求 Id 冲突", ct);
+        }
+
+        /// <summary>
+        /// 发送一条通话信令命令（invite/ringing/accept/reject/cancel/end/reconnect）。
+        /// <paramref name="request"/> 以 call id + command id 幂等、单调 revision 排序；
+        /// grant 为 Server 签发的短期授权输入，客户端只原样携带不做校验。
+        /// 仅当握手协商到 <see cref="TcpGatewayFeature.CallSignaling"/> 能力位时允许发送，否则 fail-closed。
+        /// </summary>
+        public Task<CallCommandResponseDto> SendCallCommandAsync(
+            CallCommandRequestDto request,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (!SupportsCallSignaling)
+                throw new NotSupportedException("服务器未协商通话信令能力（CallSignaling）。");
+            ArgumentNullException.ThrowIfNull(request);
+            if (string.IsNullOrWhiteSpace(request.CommandId) || request.CommandId.Length > TcpCallConstants.MaxCommandIdBytes)
+                throw new ArgumentException("command id 缺失或超长。", nameof(request));
+            if (string.IsNullOrWhiteSpace(request.CallId) || request.CallId.Length > TcpCallConstants.MaxCallIdBytes)
+                throw new ArgumentException("call id 缺失或超长。", nameof(request));
+            if (request.ActorUserId <= 0)
+                throw new ArgumentException("通话参与者（actor）无效。", nameof(request));
+            if (request.Sdp is { Length: > 0 } && request.Sdp.Length > TcpCallConstants.MaxSdpBytes)
+                throw new ArgumentException($"SDP 载荷超过预算（>{TcpCallConstants.MaxSdpBytes} 字节）。", nameof(request));
+
+            return SendRequestAsync(_callCommandPending, PacketCommand.CallCommandRequest, request,
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec), "通话信令命令 Id 冲突", ct);
         }
 
         public Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
@@ -1174,6 +1216,7 @@ namespace Core.Services
         {
             FailAll(_listPending, ex);
             FailAll(_relationshipListPending, ex);
+            FailAll(_callCommandPending, ex);
             FailAll(_prefsPending, ex);
             FailAll(_recallPending, ex);
             FailAll(_editPending, ex);
@@ -1421,6 +1464,20 @@ namespace Core.Services
                     var unreadChanged = _bodySerializer.Deserialize<UnreadCountChangedDto>(packet.Body);
                     if (unreadChanged is not null)
                         UnreadCountChanged?.Invoke(this, unreadChanged);
+                    return;
+                case PacketCommand.CallCommandResponse:
+                    var callResponse = _bodySerializer.Deserialize<CallCommandResponseDto>(packet.Body);
+                    if (callResponse is not null
+                        && !string.IsNullOrWhiteSpace(callResponse.RequestId)
+                        && _callCommandPending.TryRemove(callResponse.RequestId, out var callTcs))
+                    {
+                        callTcs.TrySetResult(callResponse);
+                    }
+                    return;
+                case PacketCommand.CallSignal:
+                    var callSignal = _bodySerializer.Deserialize<CallSignalDto>(packet.Body);
+                    if (callSignal is not null)
+                        CallSignalReceived?.Invoke(this, callSignal);
                     return;
                 case PacketCommand.CreateGroupResponse:
                     var createGroup = _bodySerializer.Deserialize<CreateGroupResponseDto>(packet.Body);
@@ -1739,6 +1796,11 @@ namespace Core.Services
                 markReadTcs.TrySetException(new ProtocolRequestException(error));
                 return true;
             }
+            if (_callCommandPending.TryRemove(requestId, out var callTcs))
+            {
+                callTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
             return false;
         }
 
@@ -1756,6 +1818,7 @@ namespace Core.Services
             {
                 PacketCommand.ConversationListRequest => FailAll(_listPending, exception),
                 PacketCommand.RelationshipListRequest => FailAll(_relationshipListPending, exception),
+                PacketCommand.CallCommandRequest => FailAll(_callCommandPending, exception),
                 PacketCommand.ConversationSetPrefsRequest => FailAll(_prefsPending, exception),
                 PacketCommand.MessageRecallRequest => FailAll(_recallPending, exception),
                 PacketCommand.MessageEditRequest => FailAll(_editPending, exception),

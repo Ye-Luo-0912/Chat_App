@@ -23,13 +23,13 @@ public class RequestMatrixTests
 
     public static TheoryData<string> Kinds { get; } = new()
     {
-        "list", "prefs", "recall", "edit", "presence", "sync", "history", "receipt", "markRead"
+        "list", "prefs", "recall", "edit", "presence", "sync", "history", "receipt", "markRead", "call"
     };
 
     // 业务层拒绝（Succeeded/Accepted=false）：presence 无错误通道，走通用 Error 路径
     public static TheoryData<string> BusinessRejectKinds { get; } = new()
     {
-        "list", "prefs", "recall", "edit", "sync", "history", "receipt", "markRead"
+        "list", "prefs", "recall", "edit", "sync", "history", "receipt", "markRead", "call"
     };
 
     // ── 成功：响应按 RequestId 精确配对，pending 清零 ──
@@ -270,6 +270,21 @@ public class RequestMatrixTests
         "history" => (object?)await client.QueryMessageHistoryAsync(ConvId, limit: 10),
         "receipt" => (object?)await client.SendMessageReceiptAsync(ConvId, "msg-1", 1234567890),
         "markRead" => (object?)await client.MarkConversationReadAsync(ConvId, "msg-1", 1234567890),
+        "call" => (object?)await client.SendCallCommandAsync(new CallCommandRequestDto
+        {
+            CommandId = "cmd-1",
+            CallId = "call-1",
+            Type = CallCommandTypeDto.Invite,
+            ActorUserId = OwnerId,
+            Revision = 1,
+            Grant = new CallGrantDto
+            {
+                CallId = "call-1", CallerUserId = OwnerId, CalleeUserId = PeerId,
+                ExpiresAtMs = 1_900_000_000_000L, Nonce = "n", Signature = "sig"
+            },
+            Sdp = "v=0\r\no=caller 1 1 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 40000 RTP/AVP 0\r\n",
+            ClientOccurredAtMs = 1_900_000_000_000L
+        }),
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
 
@@ -284,6 +299,7 @@ public class RequestMatrixTests
         "history" => PacketCommand.MessageHistoryRequest,
         "receipt" => PacketCommand.MessageReceipt,
         "markRead" => PacketCommand.ConversationMarkReadRequest,
+        "call" => PacketCommand.CallCommandRequest,
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
 
@@ -298,6 +314,7 @@ public class RequestMatrixTests
         MessageHistoryPageDto r => r.RequestId,
         MessageReceiptAckDto r => r.RequestId,
         ConversationMarkReadResponseDto r => r.RequestId,
+        CallCommandResponseDto r => r.RequestId,
         _ => null
     };
 
@@ -311,6 +328,7 @@ public class RequestMatrixTests
         MessageHistoryPageDto r => (r.Succeeded, r.ErrorMessage),
         MessageReceiptAckDto r => (r.Accepted, r.ErrorMessage),
         ConversationMarkReadResponseDto r => (r.Succeeded, r.ErrorMessage),
+        CallCommandResponseDto r => (r.Succeeded, r.ErrorMessage),
         _ => (false, null)
     };
 
@@ -523,6 +541,20 @@ public class RequestMatrixTests
                                     Succeeded = true,
                                     ConversationId = markReadReq.ConversationId,
                                     UnreadCount = 0
+                                });
+                                return;
+                            }
+                        case PacketCommand.CallCommandRequest:
+                            {
+                                var callRequestId = Record<CallCommandRequestDto>(cmd, body, out var callReq);
+                                Respond(PacketCommand.CallCommandResponse, callRequestId, new CallCommandResponseDto
+                                {
+                                    RequestId = callRequestId,
+                                    CallId = callReq.CallId,
+                                    Succeeded = true,
+                                    State = CallStateDto.Ringing,
+                                    EndReason = CallEndReasonDto.None,
+                                    Revision = callReq.Revision
                                 });
                                 return;
                             }

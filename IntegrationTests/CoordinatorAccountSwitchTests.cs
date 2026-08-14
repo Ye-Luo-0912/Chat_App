@@ -156,6 +156,7 @@ public class CoordinatorAccountSwitchTests
         public event EventHandler<MessageHistoryPageDto>? MessageHistoryPageReceived;
         public event EventHandler<ConversationMarkReadResponseDto>? ConversationMarkReadResponse;
         public event EventHandler<UnreadCountChangedDto>? UnreadCountChanged;
+        public event EventHandler<CallSignalDto>? CallSignalReceived;
         public event EventHandler<MemberJoinedUpdateDto>? GroupMemberJoined;
         public event EventHandler<MemberLeftUpdateDto>? GroupMemberLeft;
         public event EventHandler<MemberRemovedUpdateDto>? GroupMemberRemoved;

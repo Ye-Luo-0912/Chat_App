@@ -24,7 +24,8 @@ internal static class TcpHandshakeTestServer
                                  GatewayFeature.MessageMutation |
                                  GatewayFeature.PresenceAndTyping |
                                  GatewayFeature.GroupManagement |
-                                 GatewayFeature.RelationshipRead),
+                                 GatewayFeature.RelationshipRead |
+                                 GatewayFeature.CallSignaling),
             ServerDeviceId = "integration-test-gateway",
             ServerTimeMs = 1_700_000_000_000,
             HeartbeatIntervalMs = 15_000,

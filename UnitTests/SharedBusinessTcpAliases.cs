@@ -1,2 +1,9 @@
 global using ConversationListItemDto = ChatApp.Shared.Protocol.Tcp.TcpConversationListItem;
 global using ConversationTypeDto = ChatApp.Shared.Protocol.Tcp.TcpConversationType;
+global using CallCommandRequestDto = ChatApp.Shared.Protocol.Tcp.TcpCallCommandRequest;
+global using CallCommandResponseDto = ChatApp.Shared.Protocol.Tcp.TcpCallCommandResponse;
+global using CallSignalDto = ChatApp.Shared.Protocol.Tcp.TcpCallSignal;
+global using CallGrantDto = ChatApp.Shared.Protocol.Tcp.TcpCallGrant;
+global using CallCommandTypeDto = ChatApp.Shared.Protocol.Tcp.TcpCallCommandType;
+global using CallStateDto = ChatApp.Shared.Protocol.Tcp.TcpCallState;
+global using CallEndReasonDto = ChatApp.Shared.Protocol.Tcp.TcpCallEndReason;

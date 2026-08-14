@@ -83,6 +83,15 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 
 完成标准：两端在直连、TURN、拒绝、超时、断线重连和网络切换下都得到唯一终态；关闭通话能力不影响消息与同步。
 
+#### 进展（客户端信令控制面 wire 层已闭环）
+
+- `ChatSessionClient` 新增 `SendCallCommandAsync`（call id + command id 幂等、单调 revision；grant 只原样携带）与 `CallSignalReceived` S2C push 事件；`PacketCommand.CallCommandRequest/Response/CallSignal` 走真实编解码与按 RequestId 精确配对。
+- 能力协商：仅当握手服务端回显 `GatewayFeature.CallSignaling` 时 `SupportsCallSignaling=true`，未协商则 fail-closed（`NotSupportedException`）；断线/Error 包按 RequestId 批量失败在途 call 命令并清空 pending。
+- 集成测试：新增 `CallSignalingClientTests`（能力协商 2 + invite wire 往返 1 + push 事件 1 + 参数校验 1 + 断线 fail-closed 1）；`RequestMatrixTests` 扩展 `call` 到成功/业务拒绝/协议拒绝/超时矩阵。
+- 测试：Unit 75 / Protocol 58 / Integration 213 全部通过。
+
+下一步：客户端通话状态机（invite/ringing/accept/reject/cancel/end/timeout/reconnect 与多设备竞争）、WebRTC/SRTP 媒体面（ICE/STUN/TURN）接入，以及与真实 Gateway 的联调。
+
 ### P1：`APP-OPS-1` 客户端完整性
 
 补齐 Push token 注册/轮换/撤销、设备与安全设置、同步失败诊断、附件缓存治理和无障碍体验。仅在关系与语音主链路不被阻塞时并行推进。
