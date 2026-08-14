@@ -51,7 +51,15 @@ NAudio 推式回调经有界队列桥接为拉式 `Read`；DI 在 Windows 用真
 UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`VoicePlaybackStateConverter`（多值转播放图标/进度）
 与 `VoiceDurationConverter`（毫秒→mm:ss/H:mm:ss）。播放单测 17 项覆盖时长格式化与播放器边界。
 
-剩余工作：跨设备端到端联调，以及真实设备上的采集压测/降级策略。
+剩余工作：真实设备上的采集压测与三条降级路径的人工验证（见下节手册）。
+
+**降级策略已完成并自动化验证**：`VoiceRecorderService` 达最大时长自动收尾（复位录音态、产出有效 WAV、
+触发 `AutoCompleted`，超时后可直接重新录音）；`MessageViewModel.PlayVoiceAsync` 下载失败/返回空时停止播放器
+并给出终态提示「语音加载失败」（不进入伪播放）；`SendVoiceRecordingAsync` 上传失败/取消时以生成的
+`clientAttachmentId` 调用 `AbandonAsync` 清理服务端孤儿附件并复位上传状态。自动化覆盖：
+`VoiceRecorderTests` 录音超时/超时后重录 2 项 + 新增 `VoiceDegradationViewModelTests`（最小桩 + 反射驱动
+私有方法，路径 2/3 共 4 项）。根目录 `verify-voice-degradation.ps1` 可一键分组运行三条路径并聚合报告
+（`-SkipBuild` 复用产物），当前全部 PASSED。
 
 完成标准：录制 → 上传 → 发送 → 跨设备接收 → 播放 → 历史/同步恢复形成完整测试链路，扫描拒绝、断网、重启和过期附件均可恢复或给出明确终态。
 
@@ -84,6 +92,10 @@ Server 提供关系权威、附件安全策略和短期 call grant；Realtime �
 聚焦单测/契约测试 → Release 构建 → 5–20 分钟故障与联调短测。当前阶段到功能联调验收为止。
 
 ## 真机人工验证手册：VOICE-MSG-2 三条降级路径
+
+> 三条路径的失败分支已由 `verify-voice-degradation.ps1` 自动化覆盖（路径 1：`VoiceRecorderTests`
+> 录音超时；路径 2/3：`VoiceDegradationViewModelTests` 下载/上传失败，均 PASSED）。
+> 本节人工验证聚焦自动化无法覆盖的真实链路：真实网络断连/恢复、真实麦克风时长触达、真实 UI 表现与日志核对。
 
 环境形态：远程 relgate 主机提供 API(HTTP:8080)/Realtime(:8081/:8082)/TCP Gateway(:8888) 与
 infra(postgres/garnet/nats)；本机 + 另一台真机各跑一个 Avalonia 客户端，互为好友。
