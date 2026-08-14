@@ -16,6 +16,12 @@
 4. 好友、申请和黑名单 mutation 继续走 Server HTTP。TCP 读取结果最终要与同一账户的 HTTP 权威列表逐项一致；差异只修读取投影或映射，不在客户端引入第二权威。
 5. 先完成聚焦 migration/事务/恢复测试，再做 5–20 分钟分页、断线和重连短测。完成后把关系入口从开发开关切换为正常功能路径。
 
+> 状态：聚焦边界测试 14 例（`RelationshipSyncTests`）与 20 分钟分页/断线/重连短测
+> （`RelationshipSoakTests`）均已完成并通过（Unit 75 / Protocol 58 / Integration 201）。
+> 短测以确定性脚本模拟 20 分钟：多页分页重建、断线 fail-closed（投影/水位保持）、
+> 重连续跑、reset 全量重建、重建中断（projection_changed）后恢复；每轮校验投影收敛 +
+> 水位单调不回退。剩余：把关系入口从开发开关切换为正常功能路径。
+
 完成标准：好友、申请、黑名单可首屏加载、增量同步、reset 重建和离线恢复；失败不推进水位、不破坏旧投影，HTTP mutation 与 TCP read 最终一致。
 
 ## 下一阶段功能
