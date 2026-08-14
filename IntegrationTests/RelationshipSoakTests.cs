@@ -148,6 +148,83 @@ public class RelationshipSoakTests : IDisposable
         Assert.Equal(SoakMinutes, succeededRounds + failedRounds);
     }
 
+    /// <summary>
+    /// HTTP mutation 与 TCP read 一致性（NEXT-STAGE 完成标准：同一账户 HTTP 权威列表
+    /// 与 TCP 读取投影逐项一致，客户端不引入第二权威）。
+    /// 假 HTTP 服务（对应 Server FriendshipController）作为权威写/读路径，SoakServer
+    /// 作为同一权威的 TCP producer；每步 HTTP mutation 后跑一轮 TCP 增量同步，断言
+    /// 客户端关系投影与 HTTP 权威列表逐项一致；断线轮 fail-closed 保持旧一致状态，恢复后收敛。
+    /// </summary>
+    [Fact]
+    public async Task Relationship_HttpMutation_TcpRead_Converges_ItemByItem()
+    {
+        var server = new SoakServer();
+        var serializer = new JsonPacketBodySerializer();
+        var tcp = new ScriptedTcpClient();
+        var engine = await BuildSoakEngineAsync(tcp, serializer, server);
+        var http = new FakeHttpFriendshipService(server);
+
+        try
+        {
+            // 首屏：空权威 → 三个列表均空（空页 HasMore=false 路径）。
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 1) peer1 发好友申请 → 权威 FriendRequests += 1；TCP 增量同步后一致。
+            http.SendFriendRequest(PeerBase + 1);
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 2) 接受申请 → 权威 Friends += 1、FriendRequests -= 1。
+            http.AcceptRequest(PeerBase + 1);
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 3) 拉黑 peer2 → BlockedUsers += 1。
+            http.BlockUser(PeerBase + 2);
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 4) 删除好友 peer1 → Friends -= 1。
+            http.DeleteFriend(PeerBase + 1);
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 5) 解除拉黑 peer2 → BlockedUsers -= 1。
+            http.UnblockUser(PeerBase + 2);
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 6) 断线 fail-closed：权威新增申请但 TCP 同步失败 → 投影/水位保持上一一致状态。
+            var lastGood = server.Snapshot();
+            var lastWatermarks = await ReadWatermarksAsync();
+            server.Outage = true;
+            http.SendFriendRequest(PeerBase + 3);
+            var failed = await RunSoakRoundAsync(engine);
+            server.Outage = false;
+            Assert.False(failed.Succeeded, "断线轮应 fail-closed 失败");
+            await AssertConvergedToSnapshotAsync(lastGood);
+            Assert.Equal(lastWatermarks, await ReadWatermarksAsync());
+
+            // 7) 恢复后增量同步 → 收敛到权威（含断线期间的新申请）。
+            await RunSoakRoundAsync(engine);
+            await AssertHttpEqualsTcpAsync(http);
+
+            // 终局：三个列表 TCP 投影与 HTTP 权威逐项一致，水位 = 权威序列。
+            var finalWatermarks = await ReadWatermarksAsync();
+            foreach (var type in SoakServer.AllTypes)
+                Assert.Equal(server.Sequence(type), finalWatermarks[ToDto(type)]);
+        }
+        finally
+        {
+            tcp.Dispose();
+        }
+    }
+
+    /// <summary>TCP 读取投影必须与同一账户的 HTTP 权威列表逐项一致（客户端无第二权威）。</summary>
+    private Task AssertHttpEqualsTcpAsync(FakeHttpFriendshipService http)
+        => AssertConvergedToSnapshotAsync(http.QueryAll());
+
     // ---- 不变量断言 ----
 
     private async Task AssertConvergedToServerAsync(SoakServer server)
@@ -340,6 +417,28 @@ public class RelationshipSoakTests : IDisposable
             }
         }
 
+        /// <summary>按稳定资源键 Upsert 单项（HTTP mutation 落地的目标化写入）。</summary>
+        public void AddItem(ListType type, string resourceId, long userId, string status)
+        {
+            var list = _lists[type];
+            var log = _log[type];
+            var sequence = ++_sequence[type];
+            list[resourceId] = new Entry { ResourceId = resourceId, UserId = userId, Status = status };
+            log.Add((sequence, resourceId, userId, status, false));
+        }
+
+        /// <summary>按稳定资源键删除单项（HTTP mutation 落地的目标化删除；不存在视为无操作）。</summary>
+        public void RemoveItem(ListType type, string resourceId)
+        {
+            var list = _lists[type];
+            if (!list.TryGetValue(resourceId, out var removed))
+                return;
+            var log = _log[type];
+            var sequence = ++_sequence[type];
+            list.Remove(resourceId);
+            log.Add((sequence, resourceId, removed.UserId, null, true));
+        }
+
         public Dictionary<ListType, Item[]> Snapshot()
             => AllTypes.ToDictionary(
                 t => t,
@@ -481,6 +580,46 @@ public class RelationshipSoakTests : IDisposable
 
         private static int ParseCursor(string cursor)
             => int.Parse(cursor.TrimStart('p'));
+    }
+
+    // ---- HTTP 权威写/读路径（模拟 Server FriendshipController 对同一权威的状态变更与查询） ----
+
+    /// <summary>
+    /// 假 HTTP 服务：HTTP mutation 落地到 <see cref="SoakServer"/> 权威（与 TCP producer
+    /// 共享同一底层列表/日志/序列），HTTP 权威读直接以该权威快照返回。用于验证
+    /// 「mutation 走 Server HTTP、TCP 读取结果与同一账户 HTTP 权威列表逐项一致」。
+    /// </summary>
+    private sealed class FakeHttpFriendshipService
+    {
+        private readonly SoakServer _server;
+
+        public FakeHttpFriendshipService(SoakServer server) => _server = server;
+
+        /// <summary>对应 POST api/Friendship/requests：对方发来好友申请。</summary>
+        public void SendFriendRequest(long requesterId)
+            => _server.AddItem(SoakServer.ListType.FriendRequests, $"fr-{requesterId:D6}", requesterId, "Pending");
+
+        /// <summary>对应 PUT api/Friendship/requests/{requesterId}/accept：接受申请并成为好友。</summary>
+        public void AcceptRequest(long requesterId)
+        {
+            _server.RemoveItem(SoakServer.ListType.FriendRequests, $"fr-{requesterId:D6}");
+            _server.AddItem(SoakServer.ListType.Friends, $"f-{requesterId:D6}", requesterId, "Accepted");
+        }
+
+        /// <summary>对应 POST api/Friendship/block：拉黑。</summary>
+        public void BlockUser(long targetUserId)
+            => _server.AddItem(SoakServer.ListType.BlockedUsers, $"blk-{targetUserId:D6}", targetUserId, "Blocked");
+
+        /// <summary>对应 DELETE api/Friendship/{friendId}：删除好友。</summary>
+        public void DeleteFriend(long friendId)
+            => _server.RemoveItem(SoakServer.ListType.Friends, $"f-{friendId:D6}");
+
+        /// <summary>对应 DELETE api/Friendship/block/{blockedUserId}：解除拉黑。</summary>
+        public void UnblockUser(long blockedUserId)
+            => _server.RemoveItem(SoakServer.ListType.BlockedUsers, $"blk-{blockedUserId:D6}");
+
+        /// <summary>HTTP 权威列表（GET api/Friendship/all、requests/incoming、blocked）。</summary>
+        public Dictionary<SoakServer.ListType, SoakServer.Item[]> QueryAll() => _server.Snapshot();
     }
 
     // ---- 通用测试替身 ----
