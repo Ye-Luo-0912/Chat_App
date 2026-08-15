@@ -135,6 +135,16 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
   `.partial` 在途文件豁免、`cache.version` 标记文件保护、哈希校验失败不落盘完整缓存、路径安全与缓存命中；
 - 全量 Unit 150 / Protocol 58 / Integration 217 通过。
 
+#### 进展（同步失败诊断）
+- 新增 `Core/Diagnostics/SyncFailureRecord`：结构化失败记录（机器错误码/信息/发生时间/可重试性）；
+- `ISyncDiagnostics` 扩展 `LastFailure`/`FailCount`/`ConsecutiveFailures`，成功归零连续失败但保留最近失败记录；
+- `SyncEngine.Fail` 按错误码分类可重试性：网络/服务端瞬时（`SYNC_ERROR`/`BOOTSTRAP_FAILED`/
+  `CONVERSATION_LIST_PAGE_FAILED`/`RELATIONSHIP_SYNC_FAILED`/`RELATIONSHIP_SYNC_PROJECTION_UNAVAILABLE`）
+  标记为可自动重试，其余契约违例/会话失效/能力不匹配视为永久失败；
+- 诊断页指标源新增 `sync_fail_count`/`sync_consecutive_failures` 计数；
+- 新增 `UnitTests/SyncDiagnosticsTests.cs`（6 项）：结构化记录、临时/永久分类、连续失败归零、`UNKNOWN` 回退；
+- 全量 Unit 156 / Protocol 58 / Integration 217 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。

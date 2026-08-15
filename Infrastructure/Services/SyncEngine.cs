@@ -53,7 +53,9 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
         ["conversations_synced"] = _diagnostics.ConversationsSynced,
         ["messages_synced"] = _diagnostics.MessagesSynced,
         ["sync_lag_ms"] = SyncLagMs(_diagnostics),
-        ["is_running"] = _diagnostics.IsRunning ? 1 : 0
+        ["is_running"] = _diagnostics.IsRunning ? 1 : 0,
+        ["sync_fail_count"] = _diagnostics.FailCount,
+        ["sync_consecutive_failures"] = _diagnostics.ConsecutiveFailures
     };
 
     public IReadOnlyDictionary<string, HistogramSnapshot> Histograms =>
@@ -422,7 +424,7 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
 
     private void Fail(SessionStamp session, string errorCode, string? errorMessage)
     {
-        _diagnostics.MarkFailed(errorCode, errorMessage);
+        _diagnostics.MarkFailed(errorCode, errorMessage, IsTransientSyncFailure(errorCode));
         Completed?.Invoke(this, new SyncCompletedEventArgs
         {
             Session = session,
@@ -431,6 +433,22 @@ public sealed class SyncEngine : ISyncEngine, IMetricsSource
             ErrorMessage = errorMessage
         });
     }
+
+    /// <summary>
+    /// 同步失败可重试性分类：临时性失败（网络/服务端瞬时或承载能力未就绪）标记为可自动重试，
+    /// 其余契约违例/会话失效/能力不匹配视为永久失败，需引导用户处理而非盲目重试。
+    /// </summary>
+    private static bool IsTransientSyncFailure(string errorCode) => errorCode switch
+    {
+        // 服务端瞬时/网络类：可自动重试。
+        "SYNC_ERROR"
+        or "BOOTSTRAP_FAILED"
+        or "CONVERSATION_LIST_PAGE_FAILED"
+        or "RELATIONSHIP_SYNC_FAILED"
+        or "RELATIONSHIP_SYNC_PROJECTION_UNAVAILABLE" => true,
+        // 契约违例/会话失效/能力不匹配：永久失败，重试无益。
+        _ => false,
+    };
 
     private async Task<(string Code, string Message)?> ApplyRelationshipSyncAsync(
         SessionStamp session,
@@ -852,6 +870,9 @@ public sealed class SyncDiagnostics : ISyncDiagnostics
     private DateTime? _lastSyncUtc;
     private long _lastDurationMs;
     private string? _lastError;
+    private SyncFailureRecord? _lastFailure;
+    private long _failCount;
+    private int _consecutiveFailures;
     private int _syncCount;
     private long _conversationsSynced;
     private long _messagesSynced;
@@ -865,6 +886,12 @@ public sealed class SyncDiagnostics : ISyncDiagnostics
     public long LastDurationMs { get { lock (_lock) return _lastDurationMs; } }
 
     public string? LastError { get { lock (_lock) return _lastError; } }
+
+    public SyncFailureRecord? LastFailure { get { lock (_lock) return _lastFailure; } }
+
+    public long FailCount { get { lock (_lock) return _failCount; } }
+
+    public int ConsecutiveFailures { get { lock (_lock) return _consecutiveFailures; } }
 
     public int SyncCount { get { lock (_lock) return _syncCount; } }
 
@@ -895,15 +922,26 @@ public sealed class SyncDiagnostics : ISyncDiagnostics
             _lastSyncUtc = DateTime.UtcNow;
             _lastDurationMs = durationMs;
             _lastError = null;
+            _consecutiveFailures = 0;
             _syncCount++;
         }
     }
 
-    public void MarkFailed(string? errorCode, string? errorMessage)
+    /// <summary>
+    /// 记录一次同步失败：更新最近失败诊断记录、累计失败计数与连续失败计数。
+    /// <paramref name="transient"/> 标记该错误是否可自动重试。
+    /// </summary>
+    public void MarkFailed(string? errorCode, string? errorMessage, bool transient)
     {
         Volatile.Write(ref _isRunning, 0);
         lock (_lock)
-            _lastError = string.IsNullOrWhiteSpace(errorMessage) ? errorCode : $"{errorCode}: {errorMessage}";
+        {
+            var normalizedCode = string.IsNullOrWhiteSpace(errorCode) ? "UNKNOWN" : errorCode!;
+            _lastError = string.IsNullOrWhiteSpace(errorMessage) ? normalizedCode : $"{normalizedCode}: {errorMessage}";
+            _lastFailure = new SyncFailureRecord(normalizedCode, errorMessage, DateTime.UtcNow, transient);
+            _failCount++;
+            _consecutiveFailures++;
+        }
     }
 
     public void AddConversations(int count) => Interlocked.Add(ref _conversationsSynced, count);
