@@ -92,6 +92,10 @@ namespace Chat_App.Infrastructure.Serialization;
 [JsonSerializable(typeof(CallCommandResponseDto))]
 [JsonSerializable(typeof(CallSignalDto))]
 [JsonSerializable(typeof(CallGrantDto))]
+[JsonSerializable(typeof(RegisterPushTokenRequestDto))]
+[JsonSerializable(typeof(RegisterPushTokenResponseDto))]
+[JsonSerializable(typeof(UnregisterPushTokenRequestDto))]
+[JsonSerializable(typeof(UnregisterPushTokenResponseDto))]
 public partial class ChatJsonContext : JsonSerializerContext
 {
 }

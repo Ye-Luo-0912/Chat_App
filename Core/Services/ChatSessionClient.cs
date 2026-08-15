@@ -56,6 +56,8 @@ namespace Core.Services
         private readonly ConcurrentDictionary<string, TaskCompletionSource<DissolveGroupResponseDto>> _dissolveGroupPending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ChangeMemberRoleResponseDto>> _changeRolePending = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ListGroupMembersResponseDto>> _listGroupMembersPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<RegisterPushTokenResponseDto>> _pushRegisterPending = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<UnregisterPushTokenResponseDto>> _pushUnregisterPending = new(StringComparer.Ordinal);
 
         private long _lastHeartbeatAckTicks;
         private const int HeartbeatTimeoutSeconds = 60;
@@ -125,7 +127,7 @@ namespace Core.Services
         public long CurrentUserId { get; private set; }
 
         /// <summary>
-        /// 当前在途请求总数（15 类 pending 字典之和）。
+        /// 当前在途请求总数（17 类 pending 字典之和）。
         /// 每次请求的 finally 都会回收自身条目，断线时批量失败并清空。
         /// 测试以此断言"每次测试后 pending 字典均为空"，运维可据此观测积压。
         /// </summary>
@@ -136,7 +138,8 @@ namespace Core.Services
             + _markReadPending.Count + _createGroupPending.Count + _addGroupMembersPending.Count
             + _removeGroupMemberPending.Count + _leaveGroupPending.Count + _dissolveGroupPending.Count
             + _changeRolePending.Count
-            + _listGroupMembersPending.Count;
+            + _listGroupMembersPending.Count
+            + _pushRegisterPending.Count + _pushUnregisterPending.Count;
 
         /// <summary>
         /// 请求超时缩放系数（仅测试使用）：乘法缩放全部请求/鉴权超时，
@@ -469,6 +472,12 @@ namespace Core.Services
                 case PacketCommand.CallCommandResponse:
                     FailAll(_callCommandPending, contractException);
                     break;
+                case PacketCommand.RegisterPushTokenResponse:
+                    FailAll(_pushRegisterPending, contractException);
+                    break;
+                case PacketCommand.UnregisterPushTokenResponse:
+                    FailAll(_pushUnregisterPending, contractException);
+                    break;
             }
         }
 
@@ -705,6 +714,44 @@ namespace Core.Services
 
             return SendRequestAsync(_callCommandPending, PacketCommand.CallCommandRequest, request,
                 TimeSpan.FromSeconds(DefaultRequestTimeoutSec), "通话信令命令 Id 冲突", ct);
+        }
+
+        /// <summary>
+        /// 注册当前设备的推送令牌。服务端按 (userId, deviceIdHash) 幂等覆盖，deviceIdHash 取自认证会话。
+        /// token 字符串长度上限由 <see cref="PushTokenLimits"/> 限制。
+        /// </summary>
+        public Task<RegisterPushTokenResponseDto> RegisterPushTokenAsync(
+            RegisterPushTokenRequestDto request,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            ArgumentNullException.ThrowIfNull(request);
+            if (!Enum.IsDefined(request.Platform) || request.Platform == 0)
+                throw new ArgumentException("推送平台无效。", nameof(request));
+            if (string.IsNullOrWhiteSpace(request.Token) || request.Token.Length > PushTokenLimits.MaxTokenLength)
+                throw new ArgumentException($"推送令牌不能为空且长度不能超过 {PushTokenLimits.MaxTokenLength}。", nameof(request));
+            if (request.AppDeviceLabel is { Length: > PushTokenLimits.MaxAppDeviceLabelLength })
+                throw new ArgumentException($"app 设备标识长度不能超过 {PushTokenLimits.MaxAppDeviceLabelLength}。", nameof(request));
+
+            return SendRequestAsync(_pushRegisterPending, PacketCommand.RegisterPushTokenRequest, request,
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec), "推送令牌注册请求 Id 冲突", ct);
+        }
+
+        /// <summary>
+        /// 注销推送令牌。不传 Token 时按当前连接 deviceIdHash 注销该设备全部令牌；
+        /// 传 Token 时按字符串精确注销（可跨设备，适合平台令牌失效场景）。
+        /// </summary>
+        public Task<UnregisterPushTokenResponseDto> UnregisterPushTokenAsync(
+            UnregisterPushTokenRequestDto request,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            ArgumentNullException.ThrowIfNull(request);
+            if (request.Token is { Length: > PushTokenLimits.MaxTokenLength })
+                throw new ArgumentException($"推送令牌长度不能超过 {PushTokenLimits.MaxTokenLength}。", nameof(request));
+
+            return SendRequestAsync(_pushUnregisterPending, PacketCommand.UnregisterPushTokenRequest, request,
+                TimeSpan.FromSeconds(DefaultRequestTimeoutSec), "推送令牌注销请求 Id 冲突", ct);
         }
 
         public Task<ConversationSetPrefsResponseDto> SetConversationPrefsAsync(
@@ -1232,6 +1279,8 @@ namespace Core.Services
             FailAll(_dissolveGroupPending, ex);
             FailAll(_changeRolePending, ex);
             FailAll(_listGroupMembersPending, ex);
+            FailAll(_pushRegisterPending, ex);
+            FailAll(_pushUnregisterPending, ex);
         }
 
 
@@ -1478,6 +1527,24 @@ namespace Core.Services
                     var callSignal = _bodySerializer.Deserialize<CallSignalDto>(packet.Body);
                     if (callSignal is not null)
                         CallSignalReceived?.Invoke(this, callSignal);
+                    return;
+                case PacketCommand.RegisterPushTokenResponse:
+                    var pushRegister = _bodySerializer.Deserialize<RegisterPushTokenResponseDto>(packet.Body);
+                    if (pushRegister is not null
+                        && !string.IsNullOrWhiteSpace(pushRegister.RequestId)
+                        && _pushRegisterPending.TryRemove(pushRegister.RequestId, out var pushRegisterTcs))
+                    {
+                        pushRegisterTcs.TrySetResult(pushRegister);
+                    }
+                    return;
+                case PacketCommand.UnregisterPushTokenResponse:
+                    var pushUnregister = _bodySerializer.Deserialize<UnregisterPushTokenResponseDto>(packet.Body);
+                    if (pushUnregister is not null
+                        && !string.IsNullOrWhiteSpace(pushUnregister.RequestId)
+                        && _pushUnregisterPending.TryRemove(pushUnregister.RequestId, out var pushUnregisterTcs))
+                    {
+                        pushUnregisterTcs.TrySetResult(pushUnregister);
+                    }
                     return;
                 case PacketCommand.CreateGroupResponse:
                     var createGroup = _bodySerializer.Deserialize<CreateGroupResponseDto>(packet.Body);
@@ -1801,6 +1868,16 @@ namespace Core.Services
                 callTcs.TrySetException(new ProtocolRequestException(error));
                 return true;
             }
+            if (_pushRegisterPending.TryRemove(requestId, out var pushRegisterTcs))
+            {
+                pushRegisterTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
+            if (_pushUnregisterPending.TryRemove(requestId, out var pushUnregisterTcs))
+            {
+                pushUnregisterTcs.TrySetException(new ProtocolRequestException(error));
+                return true;
+            }
             return false;
         }
 
@@ -1833,6 +1910,8 @@ namespace Core.Services
                 PacketCommand.LeaveGroupRequest => FailAll(_leaveGroupPending, exception),
                 PacketCommand.ChangeMemberRoleRequest => FailAll(_changeRolePending, exception),
                 PacketCommand.ListGroupMembersRequest => FailAll(_listGroupMembersPending, exception),
+                PacketCommand.RegisterPushTokenRequest => FailAll(_pushRegisterPending, exception),
+                PacketCommand.UnregisterPushTokenRequest => FailAll(_pushUnregisterPending, exception),
                 _ => false
             };
         }

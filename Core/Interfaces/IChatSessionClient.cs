@@ -116,6 +116,24 @@ public interface IChatSessionClient : IDisposable
         string messageId,
         CancellationToken ct = default);
 
+
+    /// <summary>
+    /// 注册当前设备的推送令牌。服务端按 (userId, deviceIdHash) 幂等覆盖，deviceIdHash 取自认证会话。
+    /// </summary>
+    Task<RegisterPushTokenResponseDto> RegisterPushTokenAsync(
+        RegisterPushTokenRequestDto request,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话客户端不支持推送令牌注册。");
+
+    /// <summary>
+    /// 注销推送令牌。不传 Token 时按当前连接 deviceIdHash 注销该设备全部令牌；
+    /// 传 Token 时按字符串精确注销（可跨设备，适合平台令牌失效场景）。
+    /// </summary>
+    Task<UnregisterPushTokenResponseDto> UnregisterPushTokenAsync(
+        UnregisterPushTokenRequestDto request,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话客户端不支持推送令牌注销。");
+
     Task<MessageEditAcknowledgementDto> EditMessageAsync(
         string messageId,
         string content,

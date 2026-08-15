@@ -145,6 +145,24 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 - 新增 `UnitTests/SyncDiagnosticsTests.cs`（6 项）：结构化记录、临时/永久分类、连续失败归零、`UNKNOWN` 回退；
 - 全量 Unit 156 / Protocol 58 / Integration 217 通过。
 
+#### 进展（设备与安全设置）
+- 新增 `Core/Settings/ClientSettings`：类型化设置模型（通知预览、附件自动下载、空闲自动锁定），带默认值与越界归一化；
+- 新增 `ISettingsService`/`SettingsService`：SQLite 键值存储、按账户隔离、透明加/解密数值序列化；
+- `ClientDbContext` 新增 `LocalSetting` 实体（`OwnerUserId`+`Key` 唯一索引），迁移 `AddLocalSettings` 已生成；
+- `SettingsViewModel` 注入设置服务，加载/持久化设置并响应属性变更；
+- 新增 `UnitTests/SettingsServiceTests.cs`（6 项）：默认值、往返一致、账户隔离、越界归一化、幂等更新；
+- 全量 Unit 162 / Protocol 58 / Integration 217 通过。
+
+#### 进展（Push token 管理）
+- 新增 `Core/Models/DTO/PushTokenDtos.cs`：`PushPlatformDto`（Fcm/Apns/WebPush）、注册/注销请求响应 DTO、
+  `PushTokenLimits`（token/label/requestId 长度上限），与 Gateway 侧数值一致；
+- `ChatSessionClient` 新增 `RegisterPushTokenAsync`/`UnregisterPushTokenAsync`：本地参数校验（平台枚举/token 长度/
+  label 长度）、按 RequestId 精确配对响应、断线/Error 包 fail-closed 批量失败在途 push 命令并清空 pending；
+- `ChatJsonContext` 注册 push DTO 的 source-generated 序列化（camelCase wire）；
+- 新增 `IntegrationTests/PushTokenClientTests.cs`（7 项）：注册往返（platform/token/label 字段完整）、业务拒绝传播、
+  按精确 token 注销、按设备注销（wire 省略 token）、本地参数校验、断线 fail-closed 回收；
+- 全量 Unit 162 / Protocol 58 / Integration 224 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。
