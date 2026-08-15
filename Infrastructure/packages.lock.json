@@ -74,6 +74,21 @@
         "resolved": "4.3.1",
         "contentHash": "savYe7h5yRlkqBVOwP8cIRDOdqKiPmYCU4W87JH38sBmcKD5EBoXvQIw6bNEvZ/pTe1gsiye3VFCzBsoppGkXQ=="
       },
+      "SIPSorcery": {
+        "type": "Direct",
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "tGogF/7saIEYgF6lU4YFbzUuLEGsUzqBKwNKtvKhbe8oeR8d9sAsMub9Yz6NKAVNtQ99qN5hauzLv5ljcBweVA==",
+        "dependencies": {
+          "BouncyCastle.Cryptography": "2.6.2",
+          "Concentus": "2.2.2",
+          "DnsClient": "1.8.0",
+          "Makaretu.Dns.Multicast": "0.27.0",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.10",
+          "SIPSorcery.WebSocketSharp": "0.0.1",
+          "SIPSorceryMedia.Abstractions": "10.0.15"
+        }
+      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Direct",
         "requested": "[8.14.0, )",
@@ -96,10 +111,65 @@
         "resolved": "10.0.0",
         "contentHash": "qy6C3gQRTrfhFfuiIYU1jNwWfFdJpBVo1BARW7jgMm1zTEm3LRzLLyOLJGaAuKE+nZCGkEP71y4rj9NWjqLGdQ=="
       },
+      "BouncyCastle.Cryptography": {
+        "type": "Transitive",
+        "resolved": "2.6.2",
+        "contentHash": "7oWOcvnntmMKNzDLsdxAYqApt+AjpRpP2CShjMfIa3umZ42UQMvH0tl1qAliYPNYO6vTdcGMqnRrCPmsfzTI1w=="
+      },
+      "Common.Logging": {
+        "type": "Transitive",
+        "resolved": "3.4.1",
+        "contentHash": "5eZ/vgEOqzLg4PypZqnJ+wMhhgHyckicbZY4iDxqQ4FtOz0CpdYZ0xQ78aszMzeAJZiLLb5VdR9tPfunVQLz6g==",
+        "dependencies": {
+          "Common.Logging.Core": "3.4.1"
+        }
+      },
+      "Common.Logging.Core": {
+        "type": "Transitive",
+        "resolved": "3.4.1",
+        "contentHash": "wLHldZHvxsSD6Ahonfj00/SkfHfKqO+YT6jsUwVm8Rch1REL9IArHAcSLXxYxYfu5/4ydGtmXvOtaH3AkVPu0A=="
+      },
+      "Concentus": {
+        "type": "Transitive",
+        "resolved": "2.2.2",
+        "contentHash": "2B9YmHPKO+k7YpAAnqmiXwiMJnfjfj1C868RszOll2iZWLnGTAiC1q21L/d7CvTan7T+hyqU8dR0Dcy3cpjVfQ=="
+      },
+      "DnsClient": {
+        "type": "Transitive",
+        "resolved": "1.8.0",
+        "contentHash": "RRwtaCXkXWsx0mmsReGDqCbRLtItfUbkRJlet1FpdciVhyMGKcPd57T1+8Jki9ojHlq9fntVhXQroOOgRak8DQ=="
+      },
       "Humanizer.Core": {
         "type": "Transitive",
         "resolved": "2.14.1",
         "contentHash": "lQKvtaTDOXnoVJ20ibTuSIOf2i0uO0MPbDhd1jm238I+U/2ZnRENj0cktKZhtchBMtCUSRQ5v4xBCUbKNmyVMw=="
+      },
+      "IPNetwork2": {
+        "type": "Transitive",
+        "resolved": "2.1.2",
+        "contentHash": "DZF2SbtyqukkLSzyu0KqcXUBdhDXQ/K3QWM27vlvdPo3W+iI81pgUCNTwyynNyVc5Q9AIn0znFVVhHGbhiofUg==",
+        "dependencies": {
+          "NETStandard.Library": "1.6.1"
+        }
+      },
+      "Makaretu.Dns": {
+        "type": "Transitive",
+        "resolved": "2.0.1",
+        "contentHash": "qe/5w5Q/i2Xz2ZnCq3E49kLAtVFRuuBn40C1mQPWbLDwlHM0KVDzCkFqwxDedv7JgQis66Z9AZKyo1zCTRrdYA==",
+        "dependencies": {
+          "SimpleBase": "1.3.1"
+        }
+      },
+      "Makaretu.Dns.Multicast": {
+        "type": "Transitive",
+        "resolved": "0.27.0",
+        "contentHash": "MTMq3vca9yw8sMW0knox/lZcAkDghmH6FVLTRInJZWbuYE99QI/9k9EujsXusWQ8oDySXb/gX92bfZipKehQgw==",
+        "dependencies": {
+          "Common.Logging": "3.4.1",
+          "IPNetwork2": "2.1.2",
+          "Makaretu.Dns": "2.0.1",
+          "Tmds.LibC": "0.2.0"
+        }
       },
       "Microsoft.Build.Framework": {
         "type": "Transitive",
@@ -263,8 +333,8 @@
       },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.7",
-        "contentHash": "Z6mfFEaFcwCfSboxJwOLfu7/31npCY9q70WUamHW/vRQhDvBKOT4Vf9YkZj5J6hLvJpb0oDEYfHunQZj0xxvKw=="
+        "resolved": "10.0.10",
+        "contentHash": "z/2xXlFw2aLGjHyEm6E0tQ+In6VfzQzTrtArbQ2c0TQE16ZbyDCMGPvaUT9I0s8rgy9sRWlU2P9waW37qV04qA=="
       },
       "Microsoft.Extensions.DependencyModel": {
         "type": "Transitive",
@@ -283,10 +353,10 @@
       },
       "Microsoft.Extensions.Logging.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.7",
-        "contentHash": "tIEcQ2gvERrH2KiCjdsVcHGhXt9lIsuDStfOIeZWr7/fP8IXhGiYfx0/80PNI7WPO2IYuFtlZLSlnTS8+/Mchw==",
+        "resolved": "10.0.10",
+        "contentHash": "zkFxGYUvdxAvIKTyXHrmW+Sux53D4SezD9dMyZ6hrwwzPQJNuwCRy1f5W7AvYTqacEGhWF2XderRQG1OvbV8og==",
         "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.7"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.10"
         }
       },
       "Microsoft.Extensions.Options": {
@@ -332,6 +402,11 @@
           "Microsoft.Extensions.Logging.Abstractions": "8.0.0",
           "Microsoft.IdentityModel.Logging": "8.14.0"
         }
+      },
+      "Microsoft.NETCore.Platforms": {
+        "type": "Transitive",
+        "resolved": "1.1.0",
+        "contentHash": "kz0PEW2lhqygehI/d6XsPCQzD7ff7gUJaVGPVETX611eadGsA3A877GdSlU0LRVMCTH/+P3o2iDTak+S08V2+A=="
       },
       "Microsoft.VisualStudio.SolutionPersistence": {
         "type": "Transitive",
@@ -383,10 +458,36 @@
           "NAudio.Core": "2.2.1"
         }
       },
+      "NETStandard.Library": {
+        "type": "Transitive",
+        "resolved": "1.6.1",
+        "contentHash": "WcSp3+vP+yHNgS8EV5J7pZ9IRpeDuARBPN28by8zqff1wJQXm26PVU8L3/fYLBJVU7BtDyqNVWq2KlCVvSSR4A==",
+        "dependencies": {
+          "Microsoft.NETCore.Platforms": "1.1.0"
+        }
+      },
       "Newtonsoft.Json": {
         "type": "Transitive",
         "resolved": "13.0.3",
         "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
+      },
+      "SimpleBase": {
+        "type": "Transitive",
+        "resolved": "1.3.1",
+        "contentHash": "TqqQc+WFg3s10/PdnI2Dio0U7xEmVXhkf+ey4tOGZzjyd054rnNOLNVahJhMYmfBQdS7/jkVqC8xzLm/bkR3EA=="
+      },
+      "SIPSorcery.WebSocketSharp": {
+        "type": "Transitive",
+        "resolved": "0.0.1",
+        "contentHash": "lBlR9rZmMty2v5kPzCseAyuSv95FSoGuYZJgDy6M/qqZ/xq1ejFnOVEpXMDqBIthiTUOH8rvMcpnva7HXK0ZVw=="
+      },
+      "SIPSorceryMedia.Abstractions": {
+        "type": "Transitive",
+        "resolved": "10.0.15",
+        "contentHash": "FhcYh3YZKdkB1Knp+AolYEwK6w1oYV3Y9cLTtE52815xrlYROT1qk8UGceEbjK4WW7+D/0ZcpIvgyAyt5ltQXA==",
+        "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.10"
+        }
       },
       "SQLitePCLRaw.core": {
         "type": "Transitive",
@@ -458,6 +559,11 @@
           "System.Composition.Hosting": "9.0.0",
           "System.Composition.Runtime": "9.0.0"
         }
+      },
+      "Tmds.LibC": {
+        "type": "Transitive",
+        "resolved": "0.2.0",
+        "contentHash": "+RvLuNHOLW7cxzgDe9yHLoayBgjsuH2/gJtJnuVMxweKrxxYT6TwQNAmt06SFWpjwk68aRcwwD4FfMMA6tZvVA=="
       },
       "core": {
         "type": "Project",

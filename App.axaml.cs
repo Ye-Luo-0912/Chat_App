@@ -13,6 +13,7 @@ using Core.Protocol;
 using Core.Services;
 using Core.Services.Voice;
 using Chat_App.Infrastructure.Services.Voice;
+using Chat_App.Infrastructure.Services.Call;
 using Chat_App.Infrastructure.Models.Context;
 using Chat_App.Infrastructure.Networking;
 using Chat_App.Infrastructure.Serialization;
@@ -126,12 +127,13 @@ public partial class App : Application
             .AddSingleton<IAudioPlayer, PcmAudioPlayer>()
             // CALL-E2E-2：通话会话管理器（控制面状态机编排 + 媒体面抽象注入点）。
             // 依赖 IChatSessionClient（wire 信令）与 ICurrentUserContext（当前用户）。
-            // MediaFactory 暂缺省：WebRTC/SRTP 媒体面接入点留给真机联调阶段。
+            // MediaFactory 接入 SIPSorcery/WebRTC 媒体面；创建失败时回退 null（仅控制面），
+            // 保证无音频设备的平台仍可进行信令联调。
             .AddSingleton<ICallSessionManager>(sp => new CallSessionManager(
                 sp.GetRequiredService<IChatSessionClient>(),
                 sp.GetRequiredService<ICurrentUserContext>())
             {
-                MediaFactory = null
+                MediaFactory = callId => CreateCallMedia(callId)
             })
             // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
@@ -200,6 +202,28 @@ public partial class App : Application
     {
         client.DefaultRequestHeaders.TryAddWithoutValidation("X-Device-Id", device.DeviceId);
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", device.UserAgent);
+    }
+
+    /// <summary>
+    /// 为每个通话创建 SIPSorcery/WebRTC 媒体面（CALL-E2E-2）：麦克风上行 + NAudio 播放下行。
+    /// 任一步骤失败（如无音频设备）时回退 null，通话退化为仅控制面信令。
+    /// </summary>
+    private static ICallMediaSession? CreateCallMedia(string callId)
+    {
+        try
+        {
+            var microphone = new MicrophoneSampleSource(sampleRateHz: 16_000, channels: 1);
+            var sink = new WaveOutCallAudioSink();
+            return new SipsorceryCallMediaSession(callId, sink, microphone);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return null; // 非 Windows / 无采集设备：仅控制面。
+        }
+        catch (Exception)
+        {
+            return null; // 媒体面初始化失败：fail-soft，不阻断信令。
+        }
     }
 
     /// <summary>

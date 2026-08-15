@@ -93,9 +93,29 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 - 测试：
   - Unit：`CallSessionStateMachineTests`（状态机迁移表 + 管理器，假客户端 + 手动延迟，34 项）；Unit 合计 114。
   - Integration：新增 `CallSessionManagerE2ETests`（双设备 over 真实 wire：邀请 → 来电 → 应答/拒绝/取消 → Active 媒体面双向 SDP → 挂断终态收敛，3 项）；`CallSignalingClientTests` 与 `RequestMatrixTests` 保持。
-  - 全量 Unit 114 / Protocol 58 / Integration 216 通过。
+  - 全量 Unit 142 / Protocol 58 / Integration 216 通过。
 
-下一步：WebRTC/SRTP 媒体面（ICE/STUN/TURN）接入 `ICallMediaSession` 真实实现，以及与真实 Gateway 的联调。
+#### 进展（WebRTC/SRTP 媒体面真实实现已接入）
+
+- 实时播放 sink `Core/Interfaces/ICallAudioSink.cs` + `Infrastructure/Services/Call/WaveOutCallAudioSink.cs`
+  （NAudio `BufferedWaveProvider`/`WaveOutEvent`，通话缓冲约 300ms、溢出丢弃、未打开静默丢弃、Open/Close/Dispose 线程安全幂等）。
+- 纯编译辅助 `CallMediaCodec`（采样率→`AudioSamplingRatesEnum` 映射、PCM short/byte 小端互转、RTP
+  clock units 计算）与 `CallMediaStateMapper`（ICE 状态 → `CallMediaState`）。
+- 真实媒体会话 `Infrastructure/Services/Call/SipsorceryCallMediaSession.cs`：SIPSorcery
+  `RTCPeerConnection`（默认 STUN，生产可注入 TURN 凭据）、本端 addTrack(Opus/48k)、offer/answer 创建、
+  `setRemoteDescription`/`addIceCandidate`、`restartIce`；上行 `SendLoopAsync` 从 `IWaveSampleSource`
+  拉 20ms 帧经 `AudioEncoder` 编码后 `SendAudio`，下行 `OnAudioFrameReceived` 解码 PCM 直写播放 sink；
+  ICE 状态经 `CallMediaStateMapper` 上报 `StateChanged`，本端 ICE candidate 经 `LocalIceCandidate` 事件暴露。
+- DI 接入：`App.axaml.cs` 注册 `ICallSessionManager` 时经 `MediaFactory` 创建
+  `SipsorceryCallMediaSession`（Windows 走 `MicrophoneSampleSource` + `WaveOutCallAudioSink`）；创建失败
+  fail-soft 回退 null（仅控制面），保证无音频设备平台仍可信令联调。
+- 测试：`UnitTests/CallMediaPlaneTests.cs`（codec 映射/PCM 往返/RTP 单位 + ICE 状态映射 + sink 参数校验/
+  未打开静默/空包/幂等释放）。SIPSorcery 升至 10.0.15（修复两个高危漏洞）。
+- 全量 Unit 142 / Protocol 58 / Integration 216 通过；修复 `RingingTimeout_CalleeMissed` 的并行时序
+  flaky（等待 `IsTerminal && EndReason==Missed` 完整收敛后再断言）。
+
+下一步：跨仓真机联调（Server/Realtime/Gateway 栈）验证 WebRTC 直连/TURN、ICE restart、弱网与通话期间
+降级（拒绝/超时/断线重连/网络切换唯一终态），以及关闭通话能力不影响消息与同步。
 
 ### P1：`APP-OPS-1` 客户端完整性
 

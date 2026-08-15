@@ -25,6 +25,7 @@
       <PackageReference Include="System.IO.Hashing" />
       <PackageReference Include="System.Security.Cryptography.ProtectedData" />
       <PackageReference Include="NAudio" />
+      <PackageReference Include="SIPSorcery" />
     </ItemGroup>
 
     <ItemGroup>

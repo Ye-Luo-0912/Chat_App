@@ -492,7 +492,10 @@ public sealed class CallSessionStateMachineTests
         await delay.WaitPendingAsync();
 
         delay.CompleteAll();
-        await WaitUntilAsync(() => incoming.IsTerminal);
+        // 等待完整收敛：IsTerminal 由 ApplyServerState 先行置位（此刻 EndReason 仍为服务端回显的
+        // HungUp），需待 RunTimeoutLoopAsync 续延执行 OverrideEndReason(Missed) 后再断言，
+        // 避免并行调度下抢先读取中间态。
+        await WaitUntilAsync(() => incoming.IsTerminal && incoming.EndReason == CallEndReasonDto.Missed);
 
         Assert.Equal(CallEndReasonDto.Missed, incoming.EndReason);
         Assert.Same(incoming, ended);
