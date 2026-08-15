@@ -113,6 +113,11 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
   未打开静默/空包/幂等释放）。SIPSorcery 升至 10.0.15（修复两个高危漏洞）。
 - 全量 Unit 142 / Protocol 58 / Integration 216 通过；修复 `RingingTimeout_CalleeMissed` 的并行时序
   flaky（等待 `IsTerminal && EndReason==Missed` 完整收敛后再断言）。
+- 跨仓信令联调（Gateway 测试仓）：`ChatApp.TcpGateway.Tests/Networking/CallSignalingRealtimeIntegrationTests.cs`
+  在生产适配路径上打通两层——两端真实 TCP 连接 → `CallCommandHandler` → `RealtimeCallBackend` → 真实
+  `DefaultCallControlProcessor`（内存仓储 + 默认 grant 校验）。验证 invite→ringing→accept→active→end 终态
+  收敛、offer/answer 经临时信令路径转发、End（不携带 SDP）不转发、grant 过期 fail-closed 返回稳定错误。
+  Gateway 测试仓全量 579 通过（1 Redis 跳过）。
 
 下一步：跨仓真机联调（Server/Realtime/Gateway 栈）验证 WebRTC 直连/TURN、ICE restart、弱网与通话期间
 降级（拒绝/超时/断线重连/网络切换唯一终态），以及关闭通话能力不影响消息与同步。
