@@ -174,6 +174,13 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 - 新增 `UnitTests/AccessibilityOptionsTests.cs`（7 项）+ `SettingsServiceTests` 扩展（无障碍往返/非法档位规整）；
 - 全量 Unit 173 / Protocol 58 / Integration 224 通过。
 
+#### 进展（附件无障碍标签）
+- `MessageView.axaml` 为三类附件交互补无障碍名称（`Avalonia.Automation.AutomationProperties.Name`）：
+  语音播放按钮（随播放状态输出「播放语音/暂停语音」）、附件下载按钮（「下载附件 {文件名}」）、待发送附件移除按钮（「移除附件 {文件名}」）；
+- `VoicePlaybackStateConverter` 新增 `Label` 输出（播放语音/暂停语音），与 Icon 输出保持一致；
+- 新增 `VoicePlaybackTests` 转换器标签测试（4 组状态 + 一致性 + ConvertBack）；
+- 全量 Unit 179 / Protocol 58 / Integration 224 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。

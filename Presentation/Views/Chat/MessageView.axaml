@@ -6,6 +6,7 @@
              xmlns:models="clr-namespace:Chat_App.Models"
              xmlns:wire="clr-namespace:ChatApp.Shared.Protocol.Tcp;assembly=ChatApp.Protocol.Tcp"
              xmlns:conv="clr-namespace:Chat_App.Presentation.Converters"
+             xmlns:auto="using:Avalonia.Automation"
              mc:Ignorable="d"
              d:DesignWidth="600"
              d:DesignHeight="500"
@@ -216,7 +217,15 @@
                                                                 Cursor="Hand"
                                                                 Command="{Binding #Root.((vm:MessageViewModel)DataContext).PlayVoiceCommand}"
                                                                 CommandParameter="{Binding}">
-                                                            <TextBlock FontSize="12"
+                                                        <auto:AutomationProperties.Name>
+                                                            <MultiBinding Converter="{StaticResource VoicePlaybackState}"
+                                                                          ConverterParameter="Label">
+                                                                <Binding Path="#Root.((vm:MessageViewModel)DataContext).IsVoicePlaying"/>
+                                                                <Binding Path="#Root.((vm:MessageViewModel)DataContext).PlayingVoiceAttachmentId"/>
+                                                                <Binding Path="AttachmentId"/>
+                                                            </MultiBinding>
+                                                        </auto:AutomationProperties.Name>
+                                                        <TextBlock FontSize="12"
                                                                        FontWeight="SemiBold"
                                                                        VerticalAlignment="Center">
                                                                 <TextBlock.Text>
@@ -269,6 +278,7 @@
                                                                 Background="Transparent"
                                                                 BorderThickness="0"
                                                                 Cursor="Hand"
+                                                                auto:AutomationProperties.Name="{Binding FileName, StringFormat='下载附件 {0}', TargetNullValue=下载附件}"
                                                                 Command="{Binding #Root.((vm:MessageViewModel)DataContext).DownloadAttachmentCommand}"
                                                                 CommandParameter="{Binding}">
                                                             <TextBlock Text="{Binding FileName, TargetNullValue=附件}"
@@ -374,6 +384,7 @@
                                            VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis"/>
                                 <Button Content="✕"
+                                        auto:AutomationProperties.Name="{Binding FileName, StringFormat='移除附件 {0}', TargetNullValue=移除附件}"
                                         Command="{Binding #Root.((vm:MessageViewModel)DataContext).ClearPendingAttachmentCommand}"
                                         CommandParameter="{Binding}"
                                         Padding="6,2"

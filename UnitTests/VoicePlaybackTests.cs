@@ -53,6 +53,44 @@ public sealed class VoicePlaybackTests
             converter.ConvertBack("0:00", typeof(long), null, CultureInfo.InvariantCulture));
     }
 
+    // ---- VoicePlaybackStateConverter：无障碍标签（"播放语音"/"暂停语音"）----
+
+    [Theory]
+    [InlineData(false, null, "att-1", "播放语音")]
+    [InlineData(true, "att-1", "att-1", "暂停语音")]   // 正在播放当前附件
+    [InlineData(true, "att-2", "att-1", "播放语音")]   // 正在播放其他附件
+    [InlineData(true, null, "att-1", "播放语音")]      // 播放中但无当前附件 Id
+    public void Convert_Label_Reflects_Playback_State(
+        bool isPlaying, string? playingId, string? attachmentId, string expected)
+    {
+        var converter = new VoicePlaybackStateConverter();
+        IList<object?> values = [isPlaying, playingId, attachmentId];
+        var result = converter.Convert(values, typeof(string), "Label", CultureInfo.InvariantCulture);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void Convert_Label_And_Icon_Are_Consistent()
+    {
+        var converter = new VoicePlaybackStateConverter();
+        IList<object?> playing = [true, "att-1", "att-1"];
+        IList<object?> idle = [false, null, "att-1"];
+
+        Assert.Equal("暂停语音", converter.Convert(playing, typeof(string), "Label", CultureInfo.InvariantCulture));
+        Assert.Equal("暂停", converter.Convert(playing, typeof(string), "Icon", CultureInfo.InvariantCulture));
+        Assert.Equal("播放语音", converter.Convert(idle, typeof(string), "Label", CultureInfo.InvariantCulture));
+        Assert.Equal("播放", converter.Convert(idle, typeof(string), "Icon", CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public void ConvertBack_ThrowsNotSupported_For_StateConverter()
+    {
+        var converter = new VoicePlaybackStateConverter();
+        IList<object?> values = ["播放语音"];
+        Assert.Throws<NotSupportedException>(() =>
+            converter.ConvertBack(values, [typeof(string)], "Label", CultureInfo.InvariantCulture));
+    }
+
     // ---- PcmAudioPlayer：不依赖音频设备的边界行为 ----
 
     [Fact]
