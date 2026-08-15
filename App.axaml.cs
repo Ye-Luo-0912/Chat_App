@@ -119,6 +119,7 @@ public partial class App : Application
             .AddSingleton<ISyncEngine, SyncEngine>()
             .AddSingleton<ISettingsService, SettingsService>()
             .AddSingleton<IAccessibilityService, AccessibilityService>()
+            .AddSingleton<AccessibilityThemeApplier>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<IAttachmentThumbnailService, AttachmentThumbnailService>()
@@ -286,10 +287,14 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var mainWindowViewModel = _services.GetRequiredService<MainWindowViewModel>();
-            desktop.MainWindow = new MainWindow
+            var mainWindow = new MainWindow
             {
                 DataContext = mainWindowViewModel
             };
+            // 无障碍渲染应用器挂接到主窗口：字体缩放 / 高对比度 / 减少动效类即时生效，
+            // 并在设置页切换选项时经 OptionsChanged 实时更新。
+            _services.GetRequiredService<AccessibilityThemeApplier>().Attach(mainWindow);
+            desktop.MainWindow = mainWindow;
             _ = mainWindowViewModel.InitializeAsync(CancellationToken.None);
 
             // 统一应用关闭序列：草稿落盘 → 停止同步/Outbox/TCP → 排空数据库写入队列 → 关闭日志。

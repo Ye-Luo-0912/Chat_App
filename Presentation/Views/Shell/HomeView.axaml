@@ -3,9 +3,15 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Shell"
+             xmlns:conv="clr-namespace:Chat_App.Presentation.Converters"
              mc:Ignorable="d"
              x:Class="Chat_App.Presentation.Views.Shell.HomeView"
              x:DataType="vm:HomeViewModel">
+
+    <UserControl.Resources>
+        <!-- 减少动效：true 关停页面切换过渡，false 用默认交叉淡化 -->
+        <conv:MotionTransitionConverter x:Key="MotionTransition"/>
+    </UserControl.Resources>
 
     <Grid ColumnDefinitions="64,*" Background="#F0F2F5">
 
@@ -78,6 +84,7 @@
         <!-- ===== 主内容区域 ===== -->
         <TransitioningContentControl Grid.Column="1"
                         Content="{Binding CurrentPage}"
+                        PageTransition="{Binding ReduceMotion, Converter={StaticResource MotionTransition}}"
                         HorizontalAlignment="Stretch"
                         VerticalAlignment="Stretch"
                         HorizontalContentAlignment="Stretch"

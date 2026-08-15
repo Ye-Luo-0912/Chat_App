@@ -181,6 +181,16 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 - 新增 `VoicePlaybackTests` 转换器标签测试（4 组状态 + 一致性 + ConvertBack）；
 - 全量 Unit 179 / Protocol 58 / Integration 224 通过。
 
+#### 进展（无障碍渲染层应用）
+- 新增 `Presentation/Services/AccessibilityThemeApplier`：订阅 `IAccessibilityService.OptionsChanged`，
+  挂接到主窗口实时应用——根 `FontSize` 缩放（基准 14px × 档位倍率，随继承传播）、高对比度切暗色
+  `ThemeVariant`、减少动效在主窗口挂 `reduce-motion` 类；启动时 `App.OnFrameworkInitializationCompleted` Attach；
+- `HomeViewModel` 注入 `IAccessibilityService`，暴露 `ReduceMotion` 并订阅变更（Dispose 时退订）；
+- `HomeView` 的 `TransitioningContentControl.PageTransition` 绑定 `ReduceMotion`，
+  经新增 `MotionTransitionConverter` 在减少动效时关停页面切换动画（返回 null）；
+- 新增 `UnitTests/AccessibilityRenderingTests.cs`（9 项）：根字号映射、主题变体映射、过渡转换器行为；
+- 全量 Unit 188 / Protocol 58 / Integration 224 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。

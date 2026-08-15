@@ -57,6 +57,7 @@ public class HomeViewModel : ViewModelBase, IDisposable
     private readonly IChatConnectionCoordinator _connectionCoordinator;
     private readonly INotificationService _notifications;
     private readonly UserSessionOrchestrator _sessionOrchestrator;
+    private readonly IAccessibilityService _accessibility;
 
     #endregion
 
@@ -77,6 +78,19 @@ public class HomeViewModel : ViewModelBase, IDisposable
     /// 由 MainWindowViewModel 注入：退出登录后回到登录页。
     /// </summary>
     public Action? NavigateToLogin { get; set; }
+
+    #endregion
+
+    #region 无障碍渲染
+
+    private bool _reduceMotion;
+
+    /// <summary>是否减少动效：关闭页面切换过渡动画（无障碍）。</summary>
+    public bool ReduceMotion
+    {
+        get => _reduceMotion;
+        private set => SetProperty(ref _reduceMotion, value);
+    }
 
     #endregion
 
@@ -137,7 +151,8 @@ public class HomeViewModel : ViewModelBase, IDisposable
         TokenInfo tokenInfo,
         IChatConnectionCoordinator connectionCoordinator,
         INotificationService notifications,
-        UserSessionOrchestrator sessionOrchestrator)
+        UserSessionOrchestrator sessionOrchestrator,
+        IAccessibilityService accessibility)
     {
         _chatViewModel = chatViewModel;
         _friendsViewModel = friendsViewModel;
@@ -148,6 +163,11 @@ public class HomeViewModel : ViewModelBase, IDisposable
         _connectionCoordinator = connectionCoordinator;
         _notifications = notifications;
         _sessionOrchestrator = sessionOrchestrator;
+        _accessibility = accessibility;
+
+        // 无障碍：初始同步当前减少动效状态，并订阅设置页变更实时刷新。
+        ReduceMotion = accessibility.Current.ReduceMotion;
+        accessibility.OptionsChanged += OnAccessibilityOptionsChanged;
 
         NavigateToContactsCommand = new AsyncRelayCommand(NavigateToContacts);
         NavigateToFriendsCommand = new AsyncRelayCommand(() => NavigateToFriends(CancellationToken.None));
@@ -309,8 +329,12 @@ public class HomeViewModel : ViewModelBase, IDisposable
 
     private bool IsCurrentPage(SelectedItem item) => _selectedIndex == item;
 
+    private void OnAccessibilityOptionsChanged(object? sender, Core.Accessibility.AccessibilityOptions options)
+        => ReduceMotion = options.ReduceMotion;
+
     public void Dispose()
     {
+        _accessibility.OptionsChanged -= OnAccessibilityOptionsChanged;
         NavigateToChatEvent.NavigateToChatRequested -= OnNavigateToChatRequested;
         GC.SuppressFinalize(this);
     }
