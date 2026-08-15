@@ -163,6 +163,17 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
   按精确 token 注销、按设备注销（wire 省略 token）、本地参数校验、断线 fail-closed 回收；
 - 全量 Unit 162 / Protocol 58 / Integration 224 通过。
 
+#### 进展（无障碍体验）
+- 新增 `Core/Accessibility/AccessibilityFontSize`（标准/大/特大三档，`ToScale`→1.00/1.15/1.30、`Coerce` 规整非法值）
+  与 `AccessibilityOptions`（从设置解析出渲染选项：字体缩放、减少动效、高对比度，`ScaleFont` 供 UI 缩放）；
+- `ClientSettings` 新增 `FontSize`/`ReduceMotion`/`HighContrast` 及 Normalize 规整；
+- `SettingsService` 持久化/读取新键（`a11y_font_size`/`a11y_reduce_motion`/`a11y_high_contrast`）；
+- 新增 `IAccessibilityService`（选项持有者 + 变更广播）+ `AccessibilityService` 实现并注册 DI；
+- `SettingsViewModel` 暴露响应式属性与字体下拉（`SelectedFontSizeIndex`/`FontSizeOptionsDisplay`），
+  加载/变更时解析并 `Apply` 到无障碍服务；`SettingsView` 新增「无障碍体验」分区（字体下拉 + 动效/高对比度开关）；
+- 新增 `UnitTests/AccessibilityOptionsTests.cs`（7 项）+ `SettingsServiceTests` 扩展（无障碍往返/非法档位规整）；
+- 全量 Unit 173 / Protocol 58 / Integration 224 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。

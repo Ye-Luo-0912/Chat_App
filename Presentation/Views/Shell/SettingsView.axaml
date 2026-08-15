@@ -43,6 +43,65 @@
                 CornerRadius="12"
                 Padding="12"
                 BorderBrush="#E2E8F0"
+                BorderThickness="1"
+                Margin="0 0 0 12">
+            <StackPanel>
+                <TextBlock Text="无障碍体验"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Margin="4 4 4 12"
+                           Foreground="#1E293B"/>
+                <Grid ColumnDefinitions="Auto,*" Margin="4 6">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="字体大小"
+                                   FontWeight="SemiBold"
+                                   Foreground="#0F172A"/>
+                        <TextBlock Text="增大界面字体便于阅读"
+                                   FontSize="12"
+                                   Foreground="#64748B"/>
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding FontSizeOptionsDisplay}"
+                              SelectedIndex="{Binding SelectedFontSizeIndex}"
+                              HorizontalAlignment="Right"
+                              VerticalAlignment="Center"
+                              Width="120"/>
+                </Grid>
+                <Grid ColumnDefinitions="Auto,*" Margin="4 6">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="减少动效"
+                                   FontWeight="SemiBold"
+                                   Foreground="#0F172A"/>
+                        <TextBlock Text="关闭过渡与滚动动画"
+                                   FontSize="12"
+                                   Foreground="#64748B"/>
+                    </StackPanel>
+                    <ToggleSwitch Grid.Column="1"
+                                  IsChecked="{Binding ReduceMotion}"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"/>
+                </Grid>
+                <Grid ColumnDefinitions="Auto,*" Margin="4 6">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="高对比度文本"
+                                   FontWeight="SemiBold"
+                                   Foreground="#0F172A"/>
+                        <TextBlock Text="增强文字与背景对比"
+                                   FontSize="12"
+                                   Foreground="#64748B"/>
+                    </StackPanel>
+                    <ToggleSwitch Grid.Column="1"
+                                  IsChecked="{Binding HighContrast}"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <Border Background="White"
+                CornerRadius="12"
+                Padding="12"
+                BorderBrush="#E2E8F0"
                 BorderThickness="1">
             <DockPanel>
                 <TextBlock DockPanel.Dock="Top"

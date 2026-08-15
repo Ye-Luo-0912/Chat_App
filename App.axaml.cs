@@ -118,6 +118,7 @@ public partial class App : Application
             .AddSingleton<ISyncConflictResolver, SyncConflictResolver>()
             .AddSingleton<ISyncEngine, SyncEngine>()
             .AddSingleton<ISettingsService, SettingsService>()
+            .AddSingleton<IAccessibilityService, AccessibilityService>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<IAttachmentThumbnailService, AttachmentThumbnailService>()

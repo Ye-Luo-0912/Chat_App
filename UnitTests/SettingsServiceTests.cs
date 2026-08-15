@@ -49,6 +49,10 @@ public class SettingsServiceTests : IDisposable
         Assert.True(s.AutoDownloadAttachments);
         Assert.False(s.AutoLockOnIdle);
         Assert.Equal(ClientSettings.DefaultAutoLockIdleMinutes, s.AutoLockIdleMinutes);
+        // 无障碍默认值
+        Assert.Equal(Core.Accessibility.AccessibilityFontSize.Standard, s.FontSize);
+        Assert.False(s.ReduceMotion);
+        Assert.False(s.HighContrast);
     }
 
     /// <summary>Set 后 Get 往返一致，且 4 个键均落盘（键集固定，写入幂等）。</summary>
@@ -72,7 +76,7 @@ public class SettingsServiceTests : IDisposable
 
         using var ctx = _factory.CreateDbContext();
         var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
-        Assert.Equal(4, rows.Count);
+        Assert.Equal(7, rows.Count);
         Assert.Contains(rows, r => r.Key == "auto_download_attachments");
     }
 
@@ -135,7 +139,51 @@ public class SettingsServiceTests : IDisposable
 
         using var ctx = _factory.CreateDbContext();
         var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
-        Assert.Equal(4, rows.Count);
+        Assert.Equal(7, rows.Count);
+    }
+
+    /// <summary>无障碍设置往返一致，且新键落盘。</summary>
+    [Fact]
+    public async Task Accessibility_Settings_RoundTrip_And_Persisted()
+    {
+        var settings = new ClientSettings
+        {
+            FontSize = Core.Accessibility.AccessibilityFontSize.ExtraLarge,
+            ReduceMotion = true,
+            HighContrast = true
+        };
+        await _service.SetAsync(UserA, settings);
+
+        var s = await _service.GetAsync(UserA);
+        Assert.Equal(Core.Accessibility.AccessibilityFontSize.ExtraLarge, s.FontSize);
+        Assert.True(s.ReduceMotion);
+        Assert.True(s.HighContrast);
+
+        using var ctx = _factory.CreateDbContext();
+        var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
+        Assert.Contains(rows, r => r.Key == "a11y_font_size" && r.Value == "2");
+        Assert.Contains(rows, r => r.Key == "a11y_reduce_motion" && r.Value == "true");
+        Assert.Contains(rows, r => r.Key == "a11y_high_contrast" && r.Value == "true");
+    }
+
+    /// <summary>非法持久化字体档位规整回标准档。</summary>
+    [Fact]
+    public async Task Invalid_FontSize_Persisted_Normalized_To_Standard()
+    {
+        using (var ctx = _factory.CreateDbContext())
+        {
+            ctx.Settings.Add(new LocalSetting
+            {
+                OwnerUserId = UserA,
+                Key = "a11y_font_size",
+                Value = "99",
+                UpdatedAtMs = 1
+            });
+            await ctx.SaveChangesAsync();
+        }
+
+        var s = await _service.GetAsync(UserA);
+        Assert.Equal(Core.Accessibility.AccessibilityFontSize.Standard, s.FontSize);
     }
 
     private sealed class DbContextFactoryStub(SqliteConnection connection) : IDbContextFactory<ClientDbContext>

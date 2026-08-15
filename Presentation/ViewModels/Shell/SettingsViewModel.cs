@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
+using Core.Accessibility;
 using Core.Interfaces;
 using Core.Settings;
 using Serilog;
@@ -17,6 +18,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private readonly INotificationService _notifications;
     private readonly ICurrentUserContext _currentUser;
     private readonly ISettingsService _settings;
+    private readonly IAccessibilityService _accessibility;
 
     public ObservableCollection<SessionDeviceListItem> Devices { get; } = [];
 
@@ -63,6 +65,56 @@ public sealed class SettingsViewModel : ViewModelBase
         set { if (SetProperty(ref _autoLockIdleMinutes, value)) _ = PersistSettingsAsync(); }
     }
 
+    // ---- 无障碍体验（设备本地）----
+    private AccessibilityFontSize _fontSize = AccessibilityFontSize.Standard;
+    public AccessibilityFontSize FontSize
+    {
+        get => _fontSize;
+        set { if (SetProperty(ref _fontSize, value)) _ = PersistSettingsAsync(); }
+    }
+
+    /// <summary>字体档位下拉的可显示项（标准/大/特大）。</summary>
+    public IReadOnlyList<string> FontSizeOptionsDisplay { get; } =
+        Enum.GetValues<AccessibilityFontSize>().Select(s => s.ToDisplayName()).ToArray();
+
+    /// <summary>字体档位下拉：以档位数值作为选中索引。</summary>
+    public int SelectedFontSizeIndex
+    {
+        get => (int)_fontSize;
+        set
+        {
+            var coerced = AccessibilityFontSizeExtensions.Coerce(value);
+            if (coerced == _fontSize)
+                return;
+            _fontSize = coerced;
+            OnPropertyChanged(nameof(FontSize));
+            OnPropertyChanged(nameof(SelectedFontSizeIndex));
+            OnPropertyChanged(nameof(FontScalePreview));
+            OnPropertyChanged(nameof(FontSizeDisplay));
+            _ = PersistSettingsAsync();
+        }
+    }
+
+    private bool _reduceMotion;
+    public bool ReduceMotion
+    {
+        get => _reduceMotion;
+        set { if (SetProperty(ref _reduceMotion, value)) _ = PersistSettingsAsync(); }
+    }
+
+    private bool _highContrast;
+    public bool HighContrast
+    {
+        get => _highContrast;
+        set { if (SetProperty(ref _highContrast, value)) _ = PersistSettingsAsync(); }
+    }
+
+    /// <summary>当前字体档位对应的缩放倍率（预览用）。</summary>
+    public double FontScalePreview => _fontSize.ToScale();
+
+    /// <summary>当前字体档位显示名（预览用）。</summary>
+    public string FontSizeDisplay => _fontSize.ToDisplayName();
+
     public string CurrentUserDisplay =>
         _currentUser.UserName is { Length: > 0 } name
             ? $"{name} (#{_currentUser.UserId})"
@@ -76,12 +128,14 @@ public sealed class SettingsViewModel : ViewModelBase
         ISessionApiService sessions,
         INotificationService notifications,
         ICurrentUserContext currentUser,
-        ISettingsService settings)
+        ISettingsService settings,
+        IAccessibilityService accessibility)
     {
         _sessions = sessions;
         _notifications = notifications;
         _currentUser = currentUser;
         _settings = settings;
+        _accessibility = accessibility;
 
         RefreshCommand = new AsyncRelayCommand(LoadAsync, () => !IsLoading);
         RevokeOthersCommand = new AsyncRelayCommand(
@@ -111,10 +165,20 @@ public sealed class SettingsViewModel : ViewModelBase
             _autoDownloadAttachments = s.AutoDownloadAttachments;
             _autoLockOnIdle = s.AutoLockOnIdle;
             _autoLockIdleMinutes = s.AutoLockIdleMinutes;
+            _fontSize = s.FontSize;
+            _reduceMotion = s.ReduceMotion;
+            _highContrast = s.HighContrast;
             OnPropertyChanged(nameof(NotificationPreviewEnabled));
             OnPropertyChanged(nameof(AutoDownloadAttachments));
             OnPropertyChanged(nameof(AutoLockOnIdle));
             OnPropertyChanged(nameof(AutoLockIdleMinutes));
+            OnPropertyChanged(nameof(FontSize));
+            OnPropertyChanged(nameof(SelectedFontSizeIndex));
+            OnPropertyChanged(nameof(ReduceMotion));
+            OnPropertyChanged(nameof(HighContrast));
+            OnPropertyChanged(nameof(FontScalePreview));
+            OnPropertyChanged(nameof(FontSizeDisplay));
+            ApplyAccessibilityToService();
         }
         catch (Exception ex)
         {
@@ -134,13 +198,28 @@ public sealed class SettingsViewModel : ViewModelBase
                 s.AutoDownloadAttachments = _autoDownloadAttachments;
                 s.AutoLockOnIdle = _autoLockOnIdle;
                 s.AutoLockIdleMinutes = _autoLockIdleMinutes;
+                s.FontSize = _fontSize;
+                s.ReduceMotion = _reduceMotion;
+                s.HighContrast = _highContrast;
             }).ConfigureAwait(false);
+            ApplyAccessibilityToService();
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "保存安全设置失败");
             _notifications.ShowError("保存安全设置失败");
         }
+    }
+
+    /// <summary>把当前无障碍设置解析为渲染选项并广播给 UI 消费。</summary>
+    private void ApplyAccessibilityToService()
+    {
+        _accessibility.Apply(new ClientSettings
+        {
+            FontSize = _fontSize,
+            ReduceMotion = _reduceMotion,
+            HighContrast = _highContrast
+        });
     }
 
     private async Task LoadAsync(CancellationToken ct)

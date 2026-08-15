@@ -1,4 +1,5 @@
 using System;
+using Core.Accessibility;
 
 namespace Core.Settings;
 
@@ -21,6 +22,16 @@ public sealed class ClientSettings
     /// <summary>空闲自动锁定阈值（分钟），需 ≥0。</summary>
     public int AutoLockIdleMinutes { get; set; } = DefaultAutoLockIdleMinutes;
 
+    // ---- 无障碍体验 ----
+    /// <summary>界面字体缩放档位。</summary>
+    public AccessibilityFontSize FontSize { get; set; } = AccessibilityFontSize.Standard;
+
+    /// <summary>是否减少动效（禁用过渡/滚动动画）。</summary>
+    public bool ReduceMotion { get; set; }
+
+    /// <summary>是否启用高对比度文本。</summary>
+    public bool HighContrast { get; set; }
+
     /// <summary>默认空闲自动锁定阈值（分钟）。</summary>
     public const int DefaultAutoLockIdleMinutes = 5;
 
@@ -33,6 +44,7 @@ public sealed class ClientSettings
     {
         if (AutoLockIdleMinutes < MinAutoLockIdleMinutes || AutoLockIdleMinutes > MaxAutoLockIdleMinutes)
             AutoLockIdleMinutes = DefaultAutoLockIdleMinutes;
+        FontSize = AccessibilityFontSizeExtensions.Coerce((int)FontSize);
     }
 
     /// <summary>全部采用默认值的设置。</summary>

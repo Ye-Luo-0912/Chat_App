@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Models.Context;
+using Core.Accessibility;
 using Core.Interfaces;
 using Core.Settings;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +23,9 @@ public sealed class SettingsService : ISettingsService
     private const string KeyAutoDownload = "auto_download_attachments";
     private const string KeyAutoLockOnIdle = "auto_lock_on_idle";
     private const string KeyAutoLockIdleMinutes = "auto_lock_idle_minutes";
+    private const string KeyFontSize = "a11y_font_size";
+    private const string KeyReduceMotion = "a11y_reduce_motion";
+    private const string KeyHighContrast = "a11y_high_contrast";
 
     private readonly IDbContextFactory<ClientDbContext> _contextFactory;
 
@@ -50,6 +54,12 @@ public sealed class SettingsService : ISettingsService
             settings.AutoLockOnIdle = autoLock;
         if (TryParseInt(map, KeyAutoLockIdleMinutes, out var idleMinutes))
             settings.AutoLockIdleMinutes = idleMinutes;
+        if (TryParseBool(map, KeyReduceMotion, out var reduceMotion))
+            settings.ReduceMotion = reduceMotion;
+        if (TryParseBool(map, KeyHighContrast, out var highContrast))
+            settings.HighContrast = highContrast;
+        if (TryParseInt(map, KeyFontSize, out var fontSize))
+            settings.FontSize = AccessibilityFontSizeExtensions.Coerce(fontSize);
 
         settings.Normalize();
         return settings;
@@ -63,6 +73,9 @@ public sealed class SettingsService : ISettingsService
         normalized.AutoDownloadAttachments = settings.AutoDownloadAttachments;
         normalized.AutoLockOnIdle = settings.AutoLockOnIdle;
         normalized.AutoLockIdleMinutes = settings.AutoLockIdleMinutes;
+        normalized.FontSize = settings.FontSize;
+        normalized.ReduceMotion = settings.ReduceMotion;
+        normalized.HighContrast = settings.HighContrast;
         normalized.Normalize();
 
         await using var db = await _contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
@@ -80,6 +93,9 @@ public sealed class SettingsService : ISettingsService
             (KeyAutoDownload, FormatBool(normalized.AutoDownloadAttachments)),
             (KeyAutoLockOnIdle, FormatBool(normalized.AutoLockOnIdle)),
             (KeyAutoLockIdleMinutes, normalized.AutoLockIdleMinutes.ToString()),
+            (KeyFontSize, ((int)normalized.FontSize).ToString()),
+            (KeyReduceMotion, FormatBool(normalized.ReduceMotion)),
+            (KeyHighContrast, FormatBool(normalized.HighContrast)),
         };
 
         foreach (var (key, value) in writes)
