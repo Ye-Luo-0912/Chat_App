@@ -118,9 +118,12 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
   `DefaultCallControlProcessor`（内存仓储 + 默认 grant 校验）。验证 invite→ringing→accept→active→end 终态
   收敛、offer/answer 经临时信令路径转发、End（不携带 SDP）不转发、grant 过期 fail-closed 返回稳定错误。
   Gateway 测试仓全量 579 通过（1 Redis 跳过）。
+- 能力隔离（客户端）：`CallSignaling_*` 系列验证未协商 `CallSignaling` 位时命令 fail-closed
+  （`NotSupportedException`），且 `ConversationSync`/`MessageMutation` 能力位与消息发送帧不受影响——
+  关闭通话能力不影响消息与同步。全量 Unit 142 / Protocol 58 / Integration 217 通过。
 
 下一步：跨仓真机联调（Server/Realtime/Gateway 栈）验证 WebRTC 直连/TURN、ICE restart、弱网与通话期间
-降级（拒绝/超时/断线重连/网络切换唯一终态），以及关闭通话能力不影响消息与同步。
+降级（拒绝/超时/断线重连/网络切换唯一终态）。
 
 ### P1：`APP-OPS-1` 客户端完整性
 

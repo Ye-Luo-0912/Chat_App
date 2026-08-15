@@ -46,6 +46,33 @@ public sealed class CallSignalingClientTests
             new CallCommandRequestDto { CommandId = "c", CallId = "call", ActorUserId = OwnerId }));
     }
 
+    [Fact]
+    public async Task Messaging_And_Sync_Unaffected_When_CallSignaling_Not_Negotiated()
+    {
+        var serializer = new JsonPacketBodySerializer();
+        using var tcp = new ScriptedTcpClient();
+        var session = await ConnectAndAuthenticateAsync(tcp, serializer, echoCallSignaling: false);
+
+        // 关闭通话能力：call 命令 fail-closed，CallSignaling 能力位未协商。
+        Assert.Equal(0u, session.NegotiatedFeatureBits & (uint)GatewayFeature.CallSignaling);
+
+        // 消息与同步能力位不受影响。
+        Assert.NotEqual(0u, session.NegotiatedFeatureBits & (uint)GatewayFeature.ConversationSync);
+        Assert.NotEqual(0u, session.NegotiatedFeatureBits & (uint)GatewayFeature.MessageMutation);
+
+        // 非通话路径仍正常工作：消息发送帧照常发出。
+        var chatFrameSeen = false;
+        tcp.OnFrameSent += (cmd, _) =>
+        {
+            if (cmd == PacketCommand.ChatMessage)
+                chatFrameSeen = true;
+        };
+
+        var messageId = await session.SendChatMessageAsync(PeerId, "hello-while-call-disabled");
+        Assert.False(string.IsNullOrEmpty(messageId));
+        Assert.True(chatFrameSeen, "关闭 CallSignaling 能力后消息仍应正常发出");
+    }
+
     // ── 命令请求-响应往返（wire 字段 + camelCase） ──
 
     [Fact]
