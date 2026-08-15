@@ -18,9 +18,10 @@ namespace Core.Services;
 public sealed class AttachmentStorageService : IAttachmentStorageService
 {
     private readonly string _basePath;
+    private readonly long _maxCacheBytes;
 
-    // 下载缓存治理：容量上限与并发下载合并。
-    private const long MaxCacheBytes = 512L * 1024 * 1024; // 512MB
+    // 下载缓存治理：容量上限（默认 512MB，可注入以便测试 LRU 淘汰）与并发下载合并。
+    private const long DefaultMaxCacheBytes = 512L * 1024 * 1024; // 512MB
     private const int CacheVersion = 2;
     private const string CacheVersionFile = "cache.version";
     // 同一 (Owner, AttachmentId, append) 的并发下载合并：key = 合并键, value = 进行中的写入任务。
@@ -28,12 +29,13 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     // 每账户缓存版本只校验一次。
     private readonly ConcurrentDictionary<long, byte> _cacheVersionChecked = new();
 
-    public AttachmentStorageService(ICurrentUserContext currentUserContext, string? basePath = null)
+    public AttachmentStorageService(ICurrentUserContext currentUserContext, string? basePath = null, long? maxCacheBytes = null)
     {
         _basePath = basePath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
             "Attachments");
+        _maxCacheBytes = maxCacheBytes ?? DefaultMaxCacheBytes;
     }
 
     /// <summary>缓存版本失效：版本不匹配时清空下载缓存重建，并清扫崩溃残留的 .partial 半成品。</summary>
@@ -354,9 +356,9 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
                 .OrderByDescending(f => f.LastAccessTimeUtc)
                 .ToList();
             var total = files.Sum(f => f.Length);
-            if (total <= MaxCacheBytes)
+            if (total <= _maxCacheBytes)
                 return;
-            for (var i = files.Count - 1; i >= 0 && total > MaxCacheBytes; i--)
+            for (var i = files.Count - 1; i >= 0 && total > _maxCacheBytes; i--)
             {
                 try
                 {

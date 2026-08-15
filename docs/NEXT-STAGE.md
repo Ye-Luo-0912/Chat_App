@@ -129,6 +129,12 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 
 补齐 Push token 注册/轮换/撤销、设备与安全设置、同步失败诊断、附件缓存治理和无障碍体验。仅在关系与语音主链路不被阻塞时并行推进。
 
+#### 进展（附件缓存治理）
+- `Core/Services/AttachmentStorageService.cs`：缓存容量上限可配置（默认 512MB，可注入小容量驱动 LRU 测试）；
+- 新增 `UnitTests/AttachmentCacheGovernanceTests.cs`（8 项）：LRU 淘汰顺序、每账户容量隔离、
+  `.partial` 在途文件豁免、`cache.version` 标记文件保护、哈希校验失败不落盘完整缓存、路径安全与缓存命中；
+- 全量 Unit 150 / Protocol 58 / Integration 217 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。
