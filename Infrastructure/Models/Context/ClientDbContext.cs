@@ -31,6 +31,9 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
     public DbSet<LocalGroupMember> GroupMembers => Set<LocalGroupMember>();
     public DbSet<LocalGroupState> GroupStates => Set<LocalGroupState>();
 
+    // ---- 设备与安全设置 ----
+    public DbSet<LocalSetting> Settings => Set<LocalSetting>();
+
     // PRAGMA 由 SqlitePragmaInterceptor（EF Core DbConnectionInterceptor，在 AddPooledDbContextFactory
     // 的 options 中注册）在每个连接打开时统一执行，不在此处调用 ExecuteSqlRaw。
     // OnConfiguring 由池化工厂在租用上下文时调用一次，不适合做 PRAGMA。
@@ -180,6 +183,15 @@ public class ClientDbContext(DbContextOptions<ClientDbContext> options) : DbCont
         group.HasIndex(e => new { e.OwnerUserId, e.ConversationId })
             .IsUnique()
             .HasDatabaseName("ix_group_states_owner_conv");
+
+        // ---- 设备与安全设置 ----
+        var setting = modelBuilder.Entity<LocalSetting>();
+        setting.HasKey(e => e.Id);
+        setting.Property(e => e.Key).HasMaxLength(128).IsRequired();
+        setting.Property(e => e.Value).HasMaxLength(1024);
+        setting.HasIndex(e => new { e.OwnerUserId, e.Key })
+            .IsUnique()
+            .HasDatabaseName("ix_settings_owner_key");
 
         base.OnModelCreating(modelBuilder);
     }

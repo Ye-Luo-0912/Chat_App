@@ -117,6 +117,7 @@ public partial class App : Application
             .AddSingleton<ISyncCheckpointStore, SyncCheckpointStore>()
             .AddSingleton<ISyncConflictResolver, SyncConflictResolver>()
             .AddSingleton<ISyncEngine, SyncEngine>()
+            .AddSingleton<ISettingsService, SettingsService>()
             .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<IAttachmentThumbnailService, AttachmentThumbnailService>()

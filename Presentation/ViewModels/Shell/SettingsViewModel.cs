@@ -6,6 +6,7 @@ using Chat_App.Services;
 using Chat_App.Shared.Commands;
 using Chat_App.Shared.Mvvm;
 using Core.Interfaces;
+using Core.Settings;
 using Serilog;
 
 namespace Chat_App.Presentation.ViewModels.Shell;
@@ -15,6 +16,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private readonly ISessionApiService _sessions;
     private readonly INotificationService _notifications;
     private readonly ICurrentUserContext _currentUser;
+    private readonly ISettingsService _settings;
 
     public ObservableCollection<SessionDeviceListItem> Devices { get; } = [];
 
@@ -32,6 +34,35 @@ public sealed class SettingsViewModel : ViewModelBase
         private set => SetProperty(ref _statusText, value);
     }
 
+    // ---- 安全设置（设备本地）----
+    private bool _notificationPreviewEnabled = true;
+    public bool NotificationPreviewEnabled
+    {
+        get => _notificationPreviewEnabled;
+        set { if (SetProperty(ref _notificationPreviewEnabled, value)) _ = PersistSettingsAsync(); }
+    }
+
+    private bool _autoDownloadAttachments = true;
+    public bool AutoDownloadAttachments
+    {
+        get => _autoDownloadAttachments;
+        set { if (SetProperty(ref _autoDownloadAttachments, value)) _ = PersistSettingsAsync(); }
+    }
+
+    private bool _autoLockOnIdle;
+    public bool AutoLockOnIdle
+    {
+        get => _autoLockOnIdle;
+        set { if (SetProperty(ref _autoLockOnIdle, value)) _ = PersistSettingsAsync(); }
+    }
+
+    private int _autoLockIdleMinutes = ClientSettings.DefaultAutoLockIdleMinutes;
+    public int AutoLockIdleMinutes
+    {
+        get => _autoLockIdleMinutes;
+        set { if (SetProperty(ref _autoLockIdleMinutes, value)) _ = PersistSettingsAsync(); }
+    }
+
     public string CurrentUserDisplay =>
         _currentUser.UserName is { Length: > 0 } name
             ? $"{name} (#{_currentUser.UserId})"
@@ -44,11 +75,13 @@ public sealed class SettingsViewModel : ViewModelBase
     public SettingsViewModel(
         ISessionApiService sessions,
         INotificationService notifications,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        ISettingsService settings)
     {
         _sessions = sessions;
         _notifications = notifications;
         _currentUser = currentUser;
+        _settings = settings;
 
         RefreshCommand = new AsyncRelayCommand(LoadAsync, () => !IsLoading);
         RevokeOthersCommand = new AsyncRelayCommand(
@@ -61,8 +94,54 @@ public sealed class SettingsViewModel : ViewModelBase
             ex => _notifications.ShowError($"撤销设备失败: {ex.Message}"));
     }
 
-    public async Task InitAsync(CancellationToken ct = default) =>
+    public async Task InitAsync(CancellationToken ct = default)
+    {
         await LoadAsync(ct).ConfigureAwait(true);
+        await LoadSettingsAsync(ct).ConfigureAwait(true);
+    }
+
+    private async Task LoadSettingsAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (_currentUser.UserId is not { } userId)
+                return;
+            var s = await _settings.GetAsync(userId, ct).ConfigureAwait(true);
+            _notificationPreviewEnabled = s.NotificationPreviewEnabled;
+            _autoDownloadAttachments = s.AutoDownloadAttachments;
+            _autoLockOnIdle = s.AutoLockOnIdle;
+            _autoLockIdleMinutes = s.AutoLockIdleMinutes;
+            OnPropertyChanged(nameof(NotificationPreviewEnabled));
+            OnPropertyChanged(nameof(AutoDownloadAttachments));
+            OnPropertyChanged(nameof(AutoLockOnIdle));
+            OnPropertyChanged(nameof(AutoLockIdleMinutes));
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "加载安全设置失败");
+        }
+    }
+
+    private async Task PersistSettingsAsync()
+    {
+        try
+        {
+            if (_currentUser.UserId is not { } userId)
+                return;
+            await _settings.UpdateAsync(userId, s =>
+            {
+                s.NotificationPreviewEnabled = _notificationPreviewEnabled;
+                s.AutoDownloadAttachments = _autoDownloadAttachments;
+                s.AutoLockOnIdle = _autoLockOnIdle;
+                s.AutoLockIdleMinutes = _autoLockIdleMinutes;
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "保存安全设置失败");
+            _notifications.ShowError("保存安全设置失败");
+        }
+    }
 
     private async Task LoadAsync(CancellationToken ct)
     {
