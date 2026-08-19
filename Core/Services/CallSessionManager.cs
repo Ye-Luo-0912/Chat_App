@@ -21,6 +21,7 @@ public sealed class CallSessionManager : ICallSessionManager
     private readonly ConcurrentDictionary<string, CallSession> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ICallMediaSession> _media = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _startedMedia = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _appliedRemote = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _timeouts = new(StringComparer.Ordinal);
     private bool _disposed;
 
@@ -94,7 +95,11 @@ public sealed class CallSessionManager : ICallSessionManager
     {
         EnsureUsable();
         var session = RequireSession(callId);
-        var answer = sdpAnswer ?? GetMedia(callId)?.CreateAnswer();
+        var media = GetMedia(callId);
+        // 生成 answer 前必须先应用对端 offer（WebRTC 协商顺序）。仅应用一次，避免与 StartMedia 重复。
+        if (media is not null && !string.IsNullOrWhiteSpace(session.RemoteSdp) && _appliedRemote.TryAdd(callId, true))
+            media.SetRemoteDescription(session.RemoteSdp);
+        var answer = sdpAnswer ?? media?.CreateAnswer();
         CancelTimeout(callId);
         await SendCommandAsync(session, CallCommandTypeDto.Accept, sdp: answer, ct: ct);
     }
@@ -145,6 +150,7 @@ public sealed class CallSessionManager : ICallSessionManager
         _media.Clear();
         _sessions.Clear();
         _startedMedia.Clear();
+        _appliedRemote.Clear();
     }
 
     // ── 内部 ──
@@ -327,7 +333,7 @@ public sealed class CallSessionManager : ICallSessionManager
         var media = GetMedia(session.CallId);
         if (media is null)
             return;
-        if (!string.IsNullOrWhiteSpace(session.RemoteSdp))
+        if (!string.IsNullOrWhiteSpace(session.RemoteSdp) && !_appliedRemote.ContainsKey(session.CallId))
             media.SetRemoteDescription(session.RemoteSdp);
         media.Start();
         _startedMedia[session.CallId] = true;
@@ -351,6 +357,7 @@ public sealed class CallSessionManager : ICallSessionManager
         CallEnded?.Invoke(this, session);
         _sessions.TryRemove(session.CallId, out _);
         _startedMedia.TryRemove(session.CallId, out _);
+        _appliedRemote.TryRemove(session.CallId, out _);
         if (_media.TryRemove(session.CallId, out var media))
         {
             media.Stop();

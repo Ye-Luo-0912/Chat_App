@@ -136,7 +136,7 @@ public partial class App : Application
                 sp.GetRequiredService<IChatSessionClient>(),
                 sp.GetRequiredService<ICurrentUserContext>())
             {
-                MediaFactory = callId => CreateCallMedia(callId)
+                MediaFactory = callId => CreateCallMedia(callId, configuration)
             })
             // VOICE-MSG-2：录音源注入（Windows 真实麦克风，其他平台回退正弦波）。
             .AddSingleton<IVoiceRecorder>(_ =>
@@ -194,6 +194,14 @@ public partial class App : Application
             })
             .AddHttpMessageHandler<AuthInterceptor>();
 
+        // CALL-E2E-2：通话授权 HTTP 服务（POST /api/calls/grants），签发短期 call grant。
+        services.AddHttpClient<ICallApiService, CallApiService>((sp, client) =>
+            {
+                client.BaseAddress = new Uri(baseUrl);
+                ApplyDeviceHeaders(client, sp.GetRequiredService<ILocalDeviceIdentity>());
+            })
+            .AddHttpMessageHandler<AuthInterceptor>();
+
         _services = services.BuildServiceProvider(new ServiceProviderOptions
         {
             ValidateScopes = true,
@@ -209,15 +217,17 @@ public partial class App : Application
 
     /// <summary>
     /// 为每个通话创建 SIPSorcery/WebRTC 媒体面（CALL-E2E-2）：麦克风上行 + NAudio 播放下行。
+    /// ICE 服务器（STUN/TURN）从 <c>Call:Media</c> 配置注入，未配置时回退默认公共 STUN；
     /// 任一步骤失败（如无音频设备）时回退 null，通话退化为仅控制面信令。
     /// </summary>
-    private static ICallMediaSession? CreateCallMedia(string callId)
+    private static ICallMediaSession? CreateCallMedia(string callId, IConfiguration configuration)
     {
         try
         {
             var microphone = new MicrophoneSampleSource(sampleRateHz: 16_000, channels: 1);
             var sink = new WaveOutCallAudioSink();
-            return new SipsorceryCallMediaSession(callId, sink, microphone);
+            var iceConfig = CallRtcConfigurationFactory.FromConfig(configuration);
+            return new SipsorceryCallMediaSession(callId, sink, microphone, iceConfig);
         }
         catch (PlatformNotSupportedException)
         {

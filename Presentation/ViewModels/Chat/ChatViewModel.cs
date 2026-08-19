@@ -6,6 +6,7 @@ using Chat_App.Shared.Commands;
 using Core.Helpers;
 using Core.Interfaces;
 using Core.Models.DTO;
+using Core.Models;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Infrastructure.Services;
@@ -31,6 +32,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IFriendStore _friendStore;
     private readonly ChatFriendListState _friendListState;
+    private readonly ICallSessionManager _callSessionManager;
+    private readonly ICallApiService _callApiService;
+    private CallSession? _currentCall;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private IReadOnlyList<ConversationListItemDto>? _lastConversations;
     private bool _disposed;
@@ -268,6 +272,41 @@ public class ChatViewModel : ViewModelBase, IDisposable
     public AsyncRelayCommand ToggleAddGroupMembersCommand { get; }
     public AsyncRelayCommand AddGroupMembersCommand { get; }
 
+    // ── 1:1 语音通话 UI 状态与命令（CALL-E2E-2） ──
+
+    public AsyncRelayCommand<LocalConversation> StartCallCommand { get; }
+    public AsyncRelayCommand AcceptCallCommand { get; }
+    public AsyncRelayCommand RejectCallCommand { get; }
+    public AsyncRelayCommand EndCallCommand { get; }
+
+    private bool _isIncomingCall;
+    public bool IsIncomingCall
+    {
+        get => _isIncomingCall;
+        private set => SetProperty(ref _isIncomingCall, value);
+    }
+
+    private string _incomingCallerName = string.Empty;
+    public string IncomingCallerName
+    {
+        get => _incomingCallerName;
+        private set => SetProperty(ref _incomingCallerName, value);
+    }
+
+    private bool _isCallActive;
+    public bool IsCallActive
+    {
+        get => _isCallActive;
+        private set => SetProperty(ref _isCallActive, value);
+    }
+
+    private string _callStatusText = string.Empty;
+    public string CallStatusText
+    {
+        get => _callStatusText;
+        private set => SetProperty(ref _callStatusText, value);
+    }
+
 #pragma warning disable CS8618
     public ChatViewModel()
     {
@@ -322,6 +361,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
             ToggleGroupMemberRoleCommand = new AsyncRelayCommand<GroupMemberUiItem>(_ => Task.CompletedTask);
             ToggleAddGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
             AddGroupMembersCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            StartCallCommand = new AsyncRelayCommand<LocalConversation>(_ => Task.CompletedTask);
+            AcceptCallCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            RejectCallCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
+            EndCallCommand = new AsyncRelayCommand(_ => Task.CompletedTask);
         }
     }
 #pragma warning restore CS8618
@@ -336,7 +379,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
         IDatabaseService dbService,
         ICurrentUserContext currentUserContext,
         IFriendStore friendStore,
-        Core.Interfaces.IEventBus eventBus)
+        Core.Interfaces.IEventBus eventBus,
+        Core.Interfaces.ICallSessionManager callSessionManager,
+        Core.Interfaces.ICallApiService callApiService)
     {
         _notificationService = notificationService;
         _messageViewModel = messageViewModel;
@@ -348,6 +393,8 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _currentUserContext = currentUserContext;
         _friendStore = friendStore;
         _eventBus = eventBus;
+        _callSessionManager = callSessionManager;
+        _callApiService = callApiService;
         _friendListState = new ChatFriendListState(Conversations, FilteredConversations);
 
         PinConversationCommand = new AsyncRelayCommand<LocalConversation>(
@@ -558,6 +605,72 @@ public class ChatViewModel : ViewModelBase, IDisposable
             () => IsAddingGroupMembers,
             ex => _notificationService.ShowError($"添加成员失败: {ex.Message}"));
 
+        // ── 1:1 语音通话命令（CALL-E2E-2） ──
+
+        StartCallCommand = new AsyncRelayCommand<LocalConversation>(
+            StartCallAsync,
+            conversation => conversation is not null
+                && !conversation.IsGroup
+                && conversation.PeerUserId is > 0
+                && _chatSession.IsAuthenticated
+                && _chatSession.SupportsCallSignaling,
+            ex => _notificationService.ShowError($"发起通话失败: {ex.Message}"));
+
+        AcceptCallCommand = new AsyncRelayCommand(
+            async _ =>
+            {
+                if (_currentCall is not { IsTerminal: false } call)
+                    return;
+                try
+                {
+                    await _callSessionManager.AcceptAsync(call.CallId).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "接听通话失败");
+                    _notificationService.ShowError($"接听失败: {ex.Message}");
+                }
+            },
+            () => _currentCall is { IsTerminal: false, Role: CallRole.Callee, State: CallStateDto.Ringing },
+            ex => _notificationService.ShowError($"接听失败: {ex.Message}"));
+
+        RejectCallCommand = new AsyncRelayCommand(
+            async _ =>
+            {
+                if (_currentCall is not { IsTerminal: false } call)
+                    return;
+                try
+                {
+                    await _callSessionManager.RejectAsync(call.CallId).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "拒绝通话失败");
+                    _notificationService.ShowError($"拒绝失败: {ex.Message}");
+                }
+            },
+            () => _currentCall is { IsTerminal: false, Role: CallRole.Callee, State: CallStateDto.Ringing },
+            ex => _notificationService.ShowError($"拒绝失败: {ex.Message}"));
+
+        EndCallCommand = new AsyncRelayCommand(
+            async _ =>
+            {
+                if (_currentCall is not { IsTerminal: false } call)
+                    return;
+                try
+                {
+                    await _callSessionManager.EndAsync(call.CallId).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "挂断通话失败");
+                    _notificationService.ShowError($"挂断失败: {ex.Message}");
+                }
+            },
+            () => _currentCall is { IsTerminal: false } &&
+                _currentCall.State is CallStateDto.Ringing or CallStateDto.Active,
+            ex => _notificationService.ShowError($"挂断失败: {ex.Message}"));
+
         _messageViewModel.ForwardRequested = BeginForwardSelection;
 
         _connectionCoordinator.RegisterEventHandlers();
@@ -580,6 +693,111 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _friendStore.FriendsChanged += OnFriendsChanged;
         _chatSession.PresenceChanged += OnPresenceChanged;
         _syncEngine.Completed += OnSyncCompleted;
+        _callSessionManager.IncomingCall += OnIncomingCall;
+        _callSessionManager.CallStateChanged += OnCallStateChanged;
+        _callSessionManager.CallEnded += OnCallEnded;
+    }
+
+    // ── 1:1 语音通话（CALL-E2E-2） ──
+
+    /// <summary>主叫发起 1:1 语音通话：先请求 Server 签发 call grant，再交给会话管理器上行 invite。</summary>
+    private async Task StartCallAsync(LocalConversation? conversation, CancellationToken ct = default)
+    {
+        if (conversation is null || conversation.IsGroup || conversation.PeerUserId is not long peerId || peerId <= 0)
+            return;
+        if (!_chatSession.IsAuthenticated || !_chatSession.SupportsCallSignaling)
+        {
+            _notificationService.ShowError("当前连接不支持语音通话。");
+            return;
+        }
+
+        CallGrantDto? grant;
+        try
+        {
+            grant = await _callApiService.RequestGrantAsync(peerId, ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "获取通话授权失败");
+            grant = null;
+        }
+        if (grant is null)
+        {
+            _notificationService.ShowError("无法发起通话：获取通话授权失败。");
+            return;
+        }
+
+        try
+        {
+            CallSession session = await _callSessionManager.StartCallAsync(peerId, grant: grant, ct: ct).ConfigureAwait(true);
+            TrackCall(session);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "发起通话失败");
+            _notificationService.ShowError($"无法发起通话: {ex.Message}");
+        }
+    }
+
+    private void OnIncomingCall(object? sender, CallSession session)
+    {
+        TrackCall(session);
+    }
+
+    private void OnCallStateChanged(object? sender, CallSession session)
+    {
+        TrackCall(session);
+    }
+
+    private void OnCallEnded(object? sender, CallSession session)
+    {
+        if (_currentCall?.CallId == session.CallId)
+            _currentCall = null;
+        // 若还有其他未终态通话，聚焦最近的一个。
+        _currentCall = _callSessionManager.ActiveCalls
+            .Where(c => !c.IsTerminal)
+            .OrderByDescending(c => c.Revision)
+            .FirstOrDefault();
+        RefreshCallState();
+    }
+
+    /// <summary>聚焦单个通话：当前会话为空/已终态或为同一会话时更新焦点，否则保持当前。</summary>
+    private void TrackCall(CallSession session)
+    {
+        if (_currentCall is null || _currentCall.IsTerminal || _currentCall.CallId == session.CallId)
+            _currentCall = session;
+        RefreshCallState();
+    }
+
+    /// <summary>由当前焦点会话投影通话 UI 状态，并刷新各通话命令的可执行性。</summary>
+    private void RefreshCallState()
+    {
+        var call = _currentCall;
+        bool hasActive = call is { IsTerminal: false };
+        bool incoming = hasActive && call!.Role == CallRole.Callee && call.State == CallStateDto.Ringing;
+
+        IsIncomingCall = incoming;
+        IsCallActive = hasActive && call!.State == CallStateDto.Active;
+        IncomingCallerName = incoming ? PeerNameOf(call.PeerUserId) : string.Empty;
+        CallStatusText = hasActive
+            ? (call!.State == CallStateDto.Active ? "通话中…" : "呼叫中…")
+            : string.Empty;
+
+        StartCallCommand.RaiseCanExecuteChanged();
+        AcceptCallCommand.RaiseCanExecuteChanged();
+        RejectCallCommand.RaiseCanExecuteChanged();
+        EndCallCommand.RaiseCanExecuteChanged();
+    }
+
+    /// <summary>对端显示名：优先所选会话的好友名，否则回退 "用户 {id}"。</summary>
+    private string PeerNameOf(long peerUserId)
+    {
+        var conv = SelectedConversation;
+        if (conv is not null
+            && conv.PeerUserId == peerUserId
+            && !string.IsNullOrWhiteSpace(conv.PeerDisplayName))
+            return conv.PeerDisplayName!;
+        return $"用户 {peerUserId}";
     }
 
     private void OnFriendsChanged(object? sender, EventArgs e)
@@ -1322,6 +1540,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
         _messageViewModel.Clear();
         SelectedConversation = null;
         CurrentMessage = null;
+
+        // 通话状态随会话重置清空。
+        _currentCall = null;
+        RefreshCallState();
     }
     public void Dispose()
     {
@@ -1334,6 +1556,9 @@ public class ChatViewModel : ViewModelBase, IDisposable
             sub.Dispose();
         _chatSession.PresenceChanged -= OnPresenceChanged;
         _connectionCoordinator.StatusChanged -= OnConnectionStatusChanged;
+        _callSessionManager.IncomingCall -= OnIncomingCall;
+        _callSessionManager.CallStateChanged -= OnCallStateChanged;
+        _callSessionManager.CallEnded -= OnCallEnded;
         _ = UnwatchPresenceSubscriptionsAsync();
         _ = _connectionCoordinator.StopAsync();
         _connectionCoordinator.UnregisterEventHandlers();

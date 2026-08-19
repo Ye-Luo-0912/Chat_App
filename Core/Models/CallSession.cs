@@ -73,23 +73,35 @@ public sealed class CallSession
     /// <summary>对端最近一次送达的 SDP（offer 或 answer）。</summary>
     public string? RemoteSdp { get; private set; }
 
-    /// <summary>下一条本地命令幂等键（同一 call 内唯一、单调递增）。</summary>
+    /// <summary>
+    /// 下一条本地命令幂等键（同一 call 内唯一、单调递增）。
+    /// 以本端角色作前缀，保证主叫/被叫两端的命令 id 不互相碰撞——否则被叫首条 Accept 的
+    /// <c>{CallId}:c1</c> 会与主叫 Invite 的 <c>{CallId}:c1</c> 相同，被 Realtime 误判为幂等重放
+    /// 而返回当前状态（Ringing）。角色在 1:1 通话内唯一标识参与方。
+    /// </summary>
     public string NextCommandId()
     {
         lock (_gate)
         {
             _commandSeq++;
-            return $"{CallId}:c{_commandSeq}";
+            var roleTag = Role == CallRole.Caller ? "A" : "B";
+            return $"{CallId}:{roleTag}:c{_commandSeq}";
         }
     }
 
-    /// <summary>下一条本地命令 revision（单调递增，供服务端乱序/过期判定）。</summary>
+    /// <summary>
+    /// 下一条本地命令 revision（单调递增，供服务端乱序/过期判定）。
+    /// 以当前已确认的服务端权威 revision 为底（max(本地, 服务端) + 1），避免主叫/被叫各自的
+    /// 本地计数器从同一起点起步而撞上服务端全局 revision——否则被叫首条 Accept、以及主叫在对方
+    /// Accept/Reject 之后发出的命令会被服务端判为 RevisionStale（command.Revision &lt;= snapshot.Revision）。
+    /// </summary>
     public long NextRevision()
     {
         lock (_gate)
         {
-            _localRevision++;
-            return _localRevision;
+            var next = Math.Max(_localRevision, _serverRevision) + 1;
+            _localRevision = next;
+            return next;
         }
     }
 
@@ -184,6 +196,10 @@ public sealed class CallSession
             EnqueueSignalId(signal.SignalId);
             if (IsTerminal)
                 return false;
+
+            // 对端信令携带服务端权威 revision：本端据此推进基准，
+            // 使后续命令 revision 严格大于服务端全局 revision（见 NextRevision）。
+            _serverRevision = Math.Max(_serverRevision, signal.Revision);
 
             if (!string.IsNullOrWhiteSpace(signal.Sdp))
                 RemoteSdp = signal.Sdp;

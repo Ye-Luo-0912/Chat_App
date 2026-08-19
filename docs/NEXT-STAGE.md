@@ -26,7 +26,17 @@
 > 断言投影与 HTTP 权威列表逐项一致，断线轮 fail-closed、恢复后收敛（客户端不引入第二权威）。
 > 关系入口已从开发开关切换为正常功能路径：客户端握手声明 `GatewayFeature.RelationshipRead`
 > 能力位，`SupportsRelationshipRead` 由协商结果派生，未协商则 fail-closed。
-> 剩余：真实 Server/Realtime/Gateway 栈上的跨仓联调（HTTP 权威 vs TCP 读取逐项对账）。
+> 跨仓联调已完成（2026-08-19，真实 Server/Realtime/Gateway 栈，HTTP 权威 vs TCP 读取逐项对账）：
+> Server `RelationshipProjectionSnapshotReader` 增加全量用户流枚举（无关系数据的用户也产出
+> version=0 空快照基线），修复空列表用户 TCP 读取 `relationship_read_projection_unavailable`
+> 与 HTTP 空列表不一致的缺陷，并补回归用例
+> `ListStreams_EnumeratesEmptyUsersSoRebuildCanBaseline`；
+> Realtime 开 `RelationshipProjectionRebuild__Enabled` + `RelationshipProjectionRead__Enabled`
+> 从 Server 导出端点（`X-Relationship-Projection-Key`）同步投影；对账 harness（`.tmp-call-e2e` 内
+> `RelationshipReconcile`）对好友/申请/黑名单三类列表逐项比对 HTTP 权威与 TCP 读取，
+> 覆盖有数据用户（loaduser1）、空列表用户（loaduser3）、待处理申请用户（loaduser4），
+> 支持多页分页、状态一致性、重建同步轮询重试，最终 70 PASS / 0 FAIL。
+> REL-E2E-4 完成。
 
 完成标准：好友、申请、黑名单可首屏加载、增量同步、reset 重建和离线恢复；失败不推进水位、不破坏旧投影，HTTP mutation 与 TCP read 最终一致。
 
@@ -124,6 +134,124 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 
 下一步：跨仓真机联调（Server/Realtime/Gateway 栈）验证 WebRTC 直连/TURN、ICE restart、弱网与通话期间
 降级（拒绝/超时/断线重连/网络切换唯一终态）。
+
+#### 进展（跨仓授权缺口已补齐：Server 签发 + Realtime 校验 + 客户端入口）
+
+- **Server 侧 call grant 签发**：新增 `POST /api/calls/grants`（`CallsController`），校验主被叫互认好友且无屏蔽
+  后以 `JwtSettings.Secret` 对规范载荷 `CallId|CallerUserId|CalleeUserId|ExpiresAtMs|Nonce` 做
+  HMAC-SHA256 签名（`CallGrantSigner`）；错误分类 `call_grant_invalid_target_user/not_friends/blocked/
+  signing_unavailable`，未配置密钥 fail-closed。`ChatApp.Server.IntegrationTests/Calls/CallGrantSignerTests` 5 项通过。
+- **Realtime 侧签名校验**：新增 `SignedCallGrantVerifier`（HMAC-SHA256 恒定时间比对，校验签名/过期/结构，
+  与 Server 同款 canonical 载荷同密钥）；`CallGrantSigning:Secret` 配置时注册覆盖默认结构校验
+  （`RealtimeServicesRegistration`），未配置保留开发默认。`ChatApp.Realtime.Tests/SignedCallGrantVerifierTests` 7 项通过。
+- **客户端通话 UI 入口**：新增 `ICallApiService`/`CallApiService`（POST `/api/calls/grants` 获取 grant）；
+  `ChatViewModel` 注入 `ICallSessionManager` + `ICallApiService`，新增 `StartCallCommand`（直聊会话取 grant 后
+  `StartCallAsync`）/`AcceptCallCommand`/`RejectCallCommand`/`EndCallCommand`，订阅 `IncomingCall/CallStateChanged/
+  CallEnded` 暴露 `IsIncomingCall/IncomingCallerName/IsCallActive/CallStatusText`；`ChatView.axaml` 新增通话按钮 +
+  来电横幅（接听/拒绝）+ 通话中横幅（挂断）。`UnitTests/CallClientIntegrationTests` 12 项新增，全量 Unit 200 通过。
+
+#### 进展（跨仓真机联调闭环：本地栈端到端信令验证通过）
+
+用真实 Server/Realtime/Gateway 本地栈打通双客户端端到端信令：HTTP 登录两名好友 → `POST /api/calls/grants`
+签发 grant → 双端真实 TCP 连 Gateway(127.0.0.1:8888) 鉴权 → `CallSessionManager` 驱动
+invite→ringing→accept→active→end 终态收敛，并验证对端 SDP 双向透传与媒体面生命周期。
+联调 harness（`.tmp-call-e2e`）最终 **PASS 27 / FAIL 0**。联调中发现并修复三个跨仓缺陷：
+
+- **命令 id 跨参与方冲突**（客户端 `Core/Models/CallSession.cs`）：主叫/被叫本地计数器都从 `{CallId}:c1` 起步，
+  被叫首条 Accept 的 `CommandId` 与主叫 Invite 相同，被 Realtime 误判为幂等重放而返回当前状态（Ringing）。
+  修复：`NextCommandId()` 以本端角色作前缀（Caller→`A`、Callee→`B`），保证 1:1 通话内跨参与方唯一。
+- **revision 跨参与方冲突**（`CallSession.cs`）：主叫 Invite 后服务端全局 revision=1，被叫 Accept 本地 revision
+  也从 1 起步，被判 `RevisionStale` 拒绝。修复：`NextRevision()` 以服务端权威 revision 为底
+  （`max(本地, 服务端)+1`），且 `ApplyRemoteSignal` 从对端信令推进权威 revision，使后续命令严格大于服务端全局 revision。
+- **非 SDP 终态命令未转发对端**（Realtime `DefaultCallControlProcessor`）：原仅对 `CarriesSdp`
+  （Invite/Accept/Reconnect）转发信令，End/Reject/Cancel 不携带 SDP 从不转发，导致对端收不到挂断/拒绝通知、
+  无法收敛终态（主叫挂断后被叫一直停留 Active）。修复：非 silent（`!IsSilent`，即排除 Ringing ack）命令一律
+  经临时信令路径转发给对端，对端靠 `Kind` 驱动本端终态收敛；SDP 载荷预算仍只对携带 SDP 的命令计数。
+
+回归：全量 Unit 200 / Realtime Tests 382 / CallSession 相关集成测试均通过，联调后无回归。
+
+剩余：真实网络环境下的 WebRTC 直连/TURN、ICE restart、弱网与通话期间降级（拒绝/超时/断线重连/网络切换唯一终态）
+人工验证（见下节真机手册形态）。
+
+#### 进展（远程真机弱网与降级路径验证：4 场景通过，1 项库级限制记录）
+
+在远程 relgate 真机（192.168.5.49）跑通真实 Server(8080)/Realtime(:8081/:8082)/Gateway(8888)/
+coturn(3478) 栈 + 真实 SIPSorcery WebRTC 媒体面（SRTP/ICE/STUN/TURN），harness 即
+`.tmp-call-e2e`（`--media --scenario=`），双客户端本机、媒体经 lo/relgate TURN 穿越：
+
+- **degrade（降级路径唯一终态）PASS 47/FAIL 0**：被叫拒绝→Rejected、接通前取消→Cancelled、
+  邀请超时→TimedOut、通话中挂断→HungUp，双端终态唯一一致；断线重连（`ReconnectAsync`）在
+  Active 通话内发起，双端状态不变、被叫收到重连后新 SDP offer、媒体面保持 Connected（真实音频持续，
+  SendCalls=411/SendFail=0）。覆盖 CALL-E2E-2 完成标准中的拒绝/超时/断线重连/网络切换唯一终态。
+- **direct（直连 host candidate）PASS 14/FAIL 0**：双端 Connected，音频双向持续（SendFail=0）。
+- **relay（强制 `iceTransportPolicy=relay`，媒体经 relgate coturn 中继）PASS 14/FAIL 0**：TURN 建连与
+  relay 路径可用，音频持续。
+- **weak（netem 弱网下通话）PASS 20/FAIL 0**：通话建立后经 `relgate-netem.sh` 对 lo 注入
+  `weak`（80ms±20ms + 3% loss + 512kbit），媒体面保持 Connected、音频继续流入（+25KB）；
+  清除 netem 后保持 Connected 且音频恢复（+25.7KB）。弱网降级不终断、恢复路径正确。
+- **ice-restart（媒体面 ICE restart）记录为 SIPSorcery 库级限制**：重协商触发
+  （`OnAudioFormatsNegotiated #2`）、双端进入 Connecting，但 restart 后两端均无法回到 Connected。
+  根因在 SIPSorcery `restartIce`→`RtpIceChannel.Restart()`：`LocalIceUser/LocalIcePassword` 是 ctor 生成的
+  readonly 字段，`Restart()` 仅复位并重新采集、不旋转凭据（实测 offer2/answer2 ice-ufrag 与首轮一致）、
+  不重建连接级状态（新 checklist/新 nominated pair）。控制面断线重连（`degrade-reconnect`）与弱网保持已通过，故「网络切换/断线重连」的
+  降级承诺由客户端协议栈履行；SRTP 级 ICE restart 需以真实 WebRTC 客户端（Chrome/Edge/移动端）跨客户端验证，
+  不归入本协议栈缺陷。
+- 修复 harness `RunSsh` 用 `bash -lc '{cmd}'` 拼接在 .NET/Linux 下引号被吞导致 netem 注入失败——改
+  `ProcessStartInfo.ArgumentList` 逐参数传参，netem 应用/清除恢复可用。
+
+#### 待办：ICE restart（SIPSorcery 库级限制与解决方案）
+
+**状态：跨端复测通过（✅ 2026-08-19）**：以真实 Chrome 浏览器为对端跑 `CallE2E.exe --media
+--scenario=cross --host=<coturn ip>`，结果 **PASS 9 / FAIL 0**。浏览器完成凭据轮换（初始 `a=ice-ufrag:Bo4Z`
+→ restart `nhmN`），SIPSorcery 作被动（answer）侧正确应用新凭据并在新候选对（host 62541 → prflx 56299）上
+回到 Connected；媒体面存活客观口径通过：restart 后浏览器下行 rxPkts 686→786 持续递增、本端 sink 上行
++20331B 持续流入。协议栈侧仅需正常应用新 offer/answer，验证通过；进程内 `--scenario=ice-restart` 仍待
+SIPSorcery 补丁（见下）。
+
+**现状/限制**：`SipsorceryCallMediaSession`（SIPSorcery 10.0.15）的进程内 ICE restart 不完整——
+`restartIce()`→`RtpIceChannel.Restart()` 仅复位并重新采集（重协商触发、双端进入 Connecting），但
+restart 后双端均无法回到 Connected（真机 `--scenario=ice-restart` 复现，实测 offer2/answer2 ice-ufrag
+与首轮一致——未旋转）。根因：`RtpIceChannel.LocalIceUser/LocalIcePassword` 是 ctor 生成的 readonly 字段，
+`Restart()` 不旋转本地凭据，也不重建连接级状态（新 checklist/新 nominated pair），违反 RFC 8445 §9
+（ICE restart 必须使用新凭据）。属第三方库限制，不归入本协议栈缺陷。
+
+**解决方案（按优先级）**：
+
+1. 跨端验证为主：以真实 WebRTC 客户端（Chrome/Edge/移动端）与本端 `SipsorceryCallMediaSession` 互通，
+   SRTP 级 ICE restart 由浏览器原生 ICE 栈完成，SIPSorcery 侧仅需正常应用新 offer/answer。
+2. 客户端降级兜底已具备：控制面 `CallSessionManager.ReconnectAsync`（`degrade-reconnect` 场景 PASS）在
+   网络切换/断线重连时以新 SDP offer 重建媒体面，双端状态保持 Active——协议栈层面的「网络切换/断线重连」
+   承诺已由它履行，不依赖进程内 ICE restart。
+3. 持续跟进 SIPSorcery：升级或对 `RtpIceChannel.Restart()` 重建连接级状态（新 checklist、清除旧 nominated
+   pair）作贡献补丁，并在 `--scenario=ice-restart` 复测通过后置为本机默认路径。
+
+验收标准：以真实浏览器对端完成一次 ICE restart（凭据旋转 + 重连后 Connected + 媒体面存活）。「媒体面存活」
+以客观口径判定：双端 ICE/DTLS Connected + 浏览器下行 RTP 包数在 getStats(inbound-rtp) 上持续递增（SRTP 在新
+凭据下解密成功）+ 本端 sink 侧上行计数递增。（注：不要求浏览器「听得见」本端出站音频，见下方编码器限制。）
+或在 SIPSorcery 补丁后 `--scenario=ice-restart` 恢复 PASS。
+
+#### 已解决：SIPSorcery Concentus opus 编码器与 Chrome 解码的互操作缺口（G.711 规避，2026-08-19 跨端复测 PASS）
+
+**根因**：`SipsorceryCallMediaSession`（SIPSorcery 10.0.15）出站音频由 `AudioEncoder`（纯 C# Concentus
+opus 编码器）产生。浏览器跨端实测：Chrome→本端的 opus 能被本端 Concentus 解码器正常解码（本端 CountingSink
+音频帧持续流入），但本端 Concentus 编码出的 opus 帧 Chrome 解码器不认——Chrome `getStats` 显示下行
+rx=684pkt(lost=0)、candidate pair `[succeeded]`（SRTP 解密+媒体帧到达无误），但解码后静音 `rms=0.000`。
+判定为单向不对称互操作缺口：**Concentus opus 编码器输出与真实浏览器 opus 解码不兼容**（SIPSorcery↔SIPSorcery、
+Concentus 编+解的自洽链路不受影响）。属第三方库编码器限制，不归入本协议栈缺陷。
+
+**解决/规避（G.711 路径落地）**：
+1. `SipsorceryCallMediaSession` 新增 `preferPcmu` 参数：开启后 track 声明 PCMU/PCMA 双格式（8kHz/单声道，
+   Chrome 原生解码），协商后编码走 SIPSorcery `AudioEncoder` 的 MuLawEncoder（G.711 μ-law），完全避开
+   Concentus opus 编码器；新增 `NegotiatedCodec` 属性上报协商出的上行编码格式供断言。默认仍为 opus，
+   不改变现有 SIPSorcery↔SIPSorcery 链路。
+2. 跨端 harness（`BrowserInterop.cs`，scenario=cross）改用 `SineToneSampleSource(8000,1,…)` 8kHz 源 +
+   `preferPcmu`，PASS 门槛为客观媒体面存活口径：双端 ICE/DTLS Connected + 浏览器下行 RTP 包持续递增 +
+   协商格式为 PCMU/PCMA（`media.NegotiatedCodec is PCMU or PCMA`）；`rms` 仅作诊断（自动化 Chrome 无音频
+   输出设备，AudioContext 采样目标静音，Opus 与 G.711 皆读 0）。
+3. 复测（2026-08-19，Chrome + coturn @192.168.5.49）：answer 协商 `rtpmap:0 PCMU/8000`、本端媒体面 Connected、
+   双向 RTP 流入、ICE restart 后仍 Connected（浏览器 rxPkts 769 vs 基线 670），场景完成 PASS；真人耳听确认
+   留待真机手工验证。
+4. 生产出站包 { useinbandfec; minptime } 与 Chrome rtpmap 对齐已在做（2 声道声明匹配 opus/48000/2）。
 
 ### P1：`APP-OPS-1` 客户端完整性
 

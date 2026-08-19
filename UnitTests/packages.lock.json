@@ -640,6 +640,7 @@
         "dependencies": {
           "Core": "[1.0.0, )",
           "Microsoft.EntityFrameworkCore.Sqlite": "[10.0.7, )",
+          "Microsoft.Extensions.Configuration.Binder": "[10.0.7, )",
           "NAudio": "[2.2.1, )",
           "SIPSorcery": "[10.0.15, )",
           "Serilog": "[4.3.1, )",
@@ -730,6 +731,16 @@
         "dependencies": {
           "Microsoft.Extensions.Configuration.Abstractions": "10.0.7",
           "Microsoft.Extensions.Primitives": "10.0.7"
+        }
+      },
+      "Microsoft.Extensions.Configuration.Binder": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.7, )",
+        "resolved": "10.0.7",
+        "contentHash": "8bS1qIaRivny+WX+49pmeJ6iAylbtX8C0DLEcCQWZjdxQvLqaMssXiGD9P/6pYElrHbK5/nAHmjbQ8STqdMYeg==",
+        "dependencies": {
+          "Microsoft.Extensions.Configuration": "10.0.7",
+          "Microsoft.Extensions.Configuration.Abstractions": "10.0.7"
         }
       },
       "Microsoft.Extensions.Configuration.FileExtensions": {

@@ -41,6 +41,15 @@
                                         Foreground="White"
                                         CornerRadius="6"
                                         VerticalAlignment="Center"/>
+                                <Button Content="通话"
+                                        Command="{Binding StartCallCommand}"
+                                        CommandParameter="{Binding SelectedConversation}"
+                                        Padding="8 4"
+                                        FontSize="12"
+                                        Background="#3B82F6"
+                                        Foreground="White"
+                                        CornerRadius="6"
+                                        VerticalAlignment="Center"/>
                                 <Ellipse Width="8" Height="8"
                                          Fill="{Binding ConnectionIndicatorBrush}"
                                          VerticalAlignment="Center"/>
@@ -218,6 +227,78 @@
         <!-- ===== 右侧：消息区域 + 群成员面板 ===== -->
         <Grid Grid.Column="1" ColumnDefinitions="*,300">
             <Panel Grid.Column="0">
+                <!-- 来电横幅（被叫侧收到 invite） -->
+                <Border Margin="12 12 12 0"
+                        Padding="12 10"
+                        VerticalAlignment="Top"
+                        Background="#EEF2FF"
+                        BorderBrush="#C7D2FE"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        IsVisible="{Binding IsIncomingCall}">
+                    <Grid ColumnDefinitions="*,Auto,Auto">
+                        <StackPanel Grid.Column="0"
+                                    VerticalAlignment="Center"
+                                    Spacing="2">
+                            <TextBlock Text="来电"
+                                       FontSize="12"
+                                       Foreground="#1E3A8A"/>
+                            <TextBlock Text="{Binding IncomingCallerName}"
+                                       FontSize="14"
+                                       FontWeight="SemiBold"
+                                       Foreground="#111827"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Content="接听"
+                                Command="{Binding AcceptCallCommand}"
+                                Margin="8 0 8 0"
+                                Padding="14 4"
+                                FontSize="12"
+                                Background="#3B82F6"
+                                Foreground="White"
+                                CornerRadius="6"
+                                VerticalAlignment="Center"/>
+                        <Button Grid.Column="2"
+                                Content="拒绝"
+                                Command="{Binding RejectCallCommand}"
+                                Padding="14 4"
+                                FontSize="12"
+                                Background="#DC2626"
+                                Foreground="White"
+                                CornerRadius="6"
+                                VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+
+                <!-- 通话中横幅 -->
+                <Border Margin="12 12 12 0"
+                        Padding="12 10"
+                        VerticalAlignment="Top"
+                        Background="#EFF6FF"
+                        BorderBrush="#3B82F6"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        IsVisible="{Binding IsCallActive}">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding CallStatusText}"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   Foreground="#1D4ED8"
+                                   VerticalAlignment="Center"/>
+                        <Button Grid.Column="1"
+                                Content="挂断"
+                                Command="{Binding EndCallCommand}"
+                                Padding="14 4"
+                                FontSize="12"
+                                Background="#DC2626"
+                                Foreground="White"
+                                CornerRadius="6"
+                                VerticalAlignment="Center"/>
+                    </Grid>
+                </Border>
+
                 <!-- 未选中好友时的空状态提示 -->
                 <StackPanel VerticalAlignment="Center"
                             HorizontalAlignment="Center"

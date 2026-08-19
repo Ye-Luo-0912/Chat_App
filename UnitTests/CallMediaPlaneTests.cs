@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using Chat_App.Infrastructure.Services.Call;
 using Core.Interfaces;
+using Microsoft.Extensions.Configuration;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using Xunit;
@@ -148,5 +149,101 @@ public class WaveOutCallAudioSinkTests
         sink.Dispose();
         // 二次释放不抛。
         sink.Dispose();
+    }
+}
+
+/// <summary>
+/// CALL-E2E-2 <see cref="CallRtcConfigurationFactory"/> 单测：从 <c>Call:Media</c> 配置节
+/// 解析 STUN/TURN 为 <see cref="RTCConfiguration"/>，无配置时回退 null（由媒体面兜底公共 STUN）。
+/// </summary>
+public class CallRtcConfigurationFactoryTests
+{
+    private static IConfiguration Build(params (string Key, string? Value)[] kv)
+    {
+        var data = new Dictionary<string, string?>();
+        foreach (var (key, value) in kv)
+            data[key] = value;
+        return new ConfigurationBuilder().AddInMemoryCollection(data).Build();
+    }
+
+    [Fact]
+    public void FromConfig_NullConfig_Throws()
+        => Assert.Throws<ArgumentNullException>(() => CallRtcConfigurationFactory.FromConfig(null!));
+
+    [Fact]
+    public void FromConfig_EmptySection_ReturnsNull()
+    {
+        var config = Build();
+        Assert.Null(CallRtcConfigurationFactory.FromConfig(config));
+    }
+
+    [Fact]
+    public void FromConfig_WhitespaceOnlyUrls_ReturnsNull()
+    {
+        var config = Build(
+            ("Call:Media:StunServers:0", "   "),
+            ("Call:Media:TurnServers:0:Urls", " "));
+        Assert.Null(CallRtcConfigurationFactory.FromConfig(config));
+    }
+
+    [Fact]
+    public void FromConfig_StunOnly_AddsStunServer()
+    {
+        var config = Build(("Call:Media:StunServers:0", "stun:stun.relgate.example:3478"));
+
+        var rtc = CallRtcConfigurationFactory.FromConfig(config);
+
+        Assert.NotNull(rtc);
+        var server = Assert.Single(rtc!.iceServers);
+        Assert.Equal("stun:stun.relgate.example:3478", server.urls);
+        Assert.Null(server.username);
+        Assert.Null(server.credential);
+    }
+
+    [Fact]
+    public void FromConfig_TurnWithCredentials_AddsTurnServer()
+    {
+        var config = Build(
+            ("Call:Media:TurnServers:0:Urls", "turn:turn.relgate.example:3478?transport=udp"),
+            ("Call:Media:TurnServers:0:Username", "caller"),
+            ("Call:Media:TurnServers:0:Credential", "secret"));
+
+        var rtc = CallRtcConfigurationFactory.FromConfig(config);
+
+        Assert.NotNull(rtc);
+        var server = Assert.Single(rtc!.iceServers);
+        Assert.Equal("turn:turn.relgate.example:3478?transport=udp", server.urls);
+        Assert.Equal("caller", server.username);
+        Assert.Equal("secret", server.credential);
+    }
+
+    [Fact]
+    public void FromConfig_TurnWithoutCredentials_AddsTurnServer()
+    {
+        var config = Build(("Call:Media:TurnServers:0:Urls", "turn:turn.relgate.example:3478"));
+
+        var rtc = CallRtcConfigurationFactory.FromConfig(config);
+
+        Assert.NotNull(rtc);
+        var server = Assert.Single(rtc!.iceServers);
+        Assert.Equal("turn:turn.relgate.example:3478", server.urls);
+        Assert.Null(server.username);
+        Assert.Null(server.credential);
+    }
+
+    [Fact]
+    public void FromConfig_MixedServers_PreservesOrderAndTrims()
+    {
+        var config = Build(
+            ("Call:Media:StunServers:0", " stun:stun.relgate.example:3478 "),
+            ("Call:Media:TurnServers:0:Urls", "turn:turn.relgate.example:3478"),
+            ("Call:Media:TurnServers:1:Urls", "  "));
+
+        var rtc = CallRtcConfigurationFactory.FromConfig(config);
+
+        Assert.NotNull(rtc);
+        Assert.Equal(2, rtc!.iceServers.Count);
+        Assert.Equal("stun:stun.relgate.example:3478", rtc.iceServers[0].urls); // trim
+        Assert.Equal("turn:turn.relgate.example:3478", rtc.iceServers[1].urls);
     }
 }

@@ -17,3 +17,6 @@ riderModule.iml
 
 # BenchmarkDotNet generated output (keep BenchmarkResults.md)
 BenchmarkDotNet.Artifacts/
+
+# Local probe / diagnostic output
+.probe/
