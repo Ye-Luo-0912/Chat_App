@@ -248,23 +248,33 @@ public class TcpClientExample : ITcpClient, IDisposable, IAsyncDisposable
         {
             while (true)
             {
-                // 高优优先：先排空高优通道，再取普通通道（阻塞等待新帧）。
-                while (session.PriorityChannel.Reader.TryRead(out var priorityFrame))
+                // 高优优先：每发一帧前先挑高优，再挑普通，确保高优帧能压过已积压的普通帧。
+                // 不能让循环先整段排空普通通道，否则普通通道的持续积压会把高优帧挤到
+                // 所有排队普通帧之后，违背"插队先发"语义。
+                if (session.PriorityChannel.Reader.TryRead(out var priorityFrame))
                 {
                     if (!await SendFrameAsync(session, priorityFrame, token).ConfigureAwait(false))
                         return;
+                    continue;
                 }
-
-                if (session.SendChannel.Reader.TryRead(out var frame))
+                if (session.SendChannel.Reader.TryRead(out var normalFrame))
                 {
-                    if (!await SendFrameAsync(session, frame, token).ConfigureAwait(false))
+                    if (!await SendFrameAsync(session, normalFrame, token).ConfigureAwait(false))
                         return;
                     continue;
                 }
 
-                var ready = await session.SendChannel.Reader.WaitToReadAsync(token).ConfigureAwait(false);
-                if (!ready)
-                    break; // 通道已 Complete（断连），正常退出
+                // 两通道都空：同时等待任一出现新帧或 Complete。
+                // 仅等待普通通道会漏掉只入队到高优通道的帧：连接后第一帧 ClientHello
+                // 走高优通道，若循环阻塞在普通通道上则永不唤醒，导致帧不发送、服务端握手超时断连。
+                var sendWait = session.SendChannel.Reader.WaitToReadAsync(token).AsTask();
+                var prioWait = session.PriorityChannel.Reader.WaitToReadAsync(token).AsTask();
+                var done = await Task.WhenAny(sendWait, prioWait).ConfigureAwait(false);
+                if (done == sendWait && !await sendWait.ConfigureAwait(false))
+                    break; // 普通通道已 Complete（断连），正常退出
+                if (done == prioWait && !await prioWait.ConfigureAwait(false))
+                    break; // 高优通道已 Complete（断连），正常退出
+                // 任一通道有新帧：回到循环顶部，优先挑高优。
             }
         }
         catch (OperationCanceledException)
