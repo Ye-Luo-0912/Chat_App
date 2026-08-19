@@ -38,6 +38,14 @@
 > 支持多页分页、状态一致性、重建同步轮询重试，最终 70 PASS / 0 FAIL。
 > REL-E2E-4 完成。
 
+> 阶段收口扫描（2026-08-19）：服务端各仓非 Docker 测试全绿。修复两处陈旧断言回归——
+> Shared `ContractBoundaryTests` `VersionPrefix` 断言由 `0.5.1` 更新为当前 `0.5.3`；
+> TCP `CallSignalingRealtimeIntegrationTests.FullLifecycle` 转发计数由 2 更新为 3 并断言 End
+> 信令转发（`DefaultCallControlProcessor` 非 silent 命令一律转发的既定行为），Shared 110/110、
+> TCP 579/579 通过。Realtime.Tests 109 例失败全部为 `Failed to connect to Docker endpoint`
+> （Testcontainers 依赖，Docker 守护进程不可用），Server.IntegrationTests 同样依赖 Docker——
+> 属环境性失败，非代码回归；Docker 恢复后需重跑这两套以闭环。
+
 完成标准：好友、申请、黑名单可首屏加载、增量同步、reset 重建和离线恢复；失败不推进水位、不破坏旧投影，HTTP mutation 与 TCP read 最终一致。
 
 ## 下一阶段功能
