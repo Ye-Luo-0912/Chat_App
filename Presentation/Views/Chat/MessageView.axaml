@@ -30,6 +30,7 @@
         <conv:PathToBitmapConverter x:Key="PathToBitmap"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmapPreview" MaxCacheEntries="4"/>
         <conv:VoicePlaybackStateConverter x:Key="VoicePlaybackState"/>
+        <conv:VoiceWaveformConverter x:Key="VoiceWaveform"/>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*,Auto">
@@ -244,10 +245,35 @@
                                                             </TextBlock>
                                                         </Button>
                                                         <StackPanel Spacing="3" VerticalAlignment="Center">
+                                                            <!-- 波形柱状图（VOICE-MSG-2）：peaks 非空时渲染（降采样 24 柱，
+                                                                 柱高 = peak/255 × MaxBarHeight，语义色 TextSecondaryBrush）；
+                                                                 peaks 缺省/空时隐藏，降级为下方进度条。 -->
+                                                            <ItemsControl Width="130"
+                                                                          Height="24"
+                                                                          HorizontalAlignment="Left"
+                                                                          IsVisible="{Binding VoiceWaveformPeaks, Converter={StaticResource VoiceWaveform}, ConverterParameter=HasPeaks}"
+                                                                          ItemsSource="{Binding VoiceWaveformPeaks, Converter={StaticResource VoiceWaveform}}">
+                                                                <ItemsControl.ItemsPanel>
+                                                                    <ItemsPanelTemplate>
+                                                                        <StackPanel Orientation="Horizontal" Spacing="2"/>
+                                                                    </ItemsPanelTemplate>
+                                                                </ItemsControl.ItemsPanel>
+                                                                <ItemsControl.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <Border Width="3"
+                                                                                CornerRadius="1.5"
+                                                                                VerticalAlignment="Center"
+                                                                                Background="{DynamicResource TextSecondaryBrush}"
+                                                                                Height="{Binding}"/>
+                                                                    </DataTemplate>
+                                                                </ItemsControl.ItemTemplate>
+                                                            </ItemsControl>
+                                                            <!-- 播放进度条：无波形时为唯一进度反馈；有波形时隐藏（保留绑定不破坏）。 -->
                                                             <ProgressBar Width="130"
                                                                          Height="4"
                                                                          Maximum="1"
-                                                                         Minimum="0">
+                                                                         Minimum="0"
+                                                                         IsVisible="{Binding VoiceWaveformPeaks, Converter={StaticResource VoiceWaveform}, ConverterParameter=LacksPeaks}">
                                                                 <ProgressBar.Value>
                                                                     <MultiBinding Converter="{StaticResource VoicePlaybackState}"
                                                                                   ConverterParameter="Progress">

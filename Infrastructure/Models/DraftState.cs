@@ -32,6 +32,9 @@ public sealed class DraftAttachment
     public long? VoiceDurationMs { get; init; }
     public int? VoiceSampleRateHz { get; init; }
     public short? VoiceChannels { get; init; }
+
+    /// <summary>语音波形峰值包络（0–255，可空，JSON 为 base64）。缺省/空 = 无波形。</summary>
+    public byte[]? VoiceWaveformPeaks { get; init; }
 }
 
 /// <summary>

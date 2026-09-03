@@ -107,7 +107,8 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
                 DurationMs: Math.Max(1, elapsedMs),
                 SampleRateHz: Options.SampleRateHz,
                 Channels: Options.Channels,
-                SizeBytes: stream.Length);
+                SizeBytes: stream.Length,
+                VoiceWaveformPeaks: ComputeWaveformPeaks(stream, dataBytes));
             return new VoiceRecording(stream, metadata);
         }
     }
@@ -218,7 +219,8 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
                 DurationMs: Math.Max(1, elapsedMs),
                 SampleRateHz: Options.SampleRateHz,
                 Channels: Options.Channels,
-                SizeBytes: stream.Length);
+                SizeBytes: stream.Length,
+                VoiceWaveformPeaks: ComputeWaveformPeaks(stream, dataBytes));
             var recording = new VoiceRecording(stream, metadata);
             AutoCompleted?.Invoke(recording);
         }
@@ -235,6 +237,21 @@ public sealed class VoiceRecorderService : IVoiceRecorder, IDisposable
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(chunk, (int)dataBytes);
         stream.Write(chunk);
         stream.Position = stream.Length;
+    }
+
+    /// <summary>
+    /// 从已收尾的 WAV 内存流中提取 data 段并计算峰值包络（无有效 PCM 时返回 null，降级为无波形）。
+    /// 使用 <see cref="MemoryStream.GetBuffer"/> 避免整段拷贝；桶数固定 48，包络 48 字节。
+    /// </summary>
+    private static byte[]? ComputeWaveformPeaks(MemoryStream wavStream, long dataBytes)
+    {
+        if (dataBytes < 2)
+            return null;
+        var buffer = wavStream.GetBuffer();
+        var dataStart = WavPcmEncoder.HeaderLength;
+        if (buffer.Length < dataStart + dataBytes)
+            return null;
+        return WavPcmEncoder.ComputePeakEnvelope(buffer.AsSpan(dataStart, (int)dataBytes));
     }
 
     public void Dispose()

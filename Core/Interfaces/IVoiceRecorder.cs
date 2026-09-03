@@ -12,8 +12,10 @@ public sealed record VoiceRecorderOptions(
     short Channels = 1);
 
 /// <summary>
-/// 语音附件元数据（与 Shared TCP 契约的 5 个语音字段一一对应，外加大小）。
+/// 语音附件元数据（与 Shared TCP 契约的 5 个语音字段一一对应，外加大小与波形包络）。
 /// 仅当 IsVoice=true 时 Codec/Container/DurationMs/SampleRateHz/Channels 有值。
+/// <see cref="VoiceWaveformPeaks"/> 为 0–255 归一化峰值包络（WavPcmEncoder.ComputePeakEnvelope 产出），
+/// 可空——缺省/空表示无波形，接收端降级渲染。
 /// </summary>
 public sealed record VoiceMetadata(
     string Codec,
@@ -21,7 +23,8 @@ public sealed record VoiceMetadata(
     long DurationMs,
     int SampleRateHz,
     short Channels,
-    long SizeBytes);
+    long SizeBytes,
+    byte[]? VoiceWaveformPeaks = null);
 
 /// <summary>录音过程中的进度（当前已录时长）。</summary>
 public readonly record struct VoiceRecordingProgress(TimeSpan Elapsed);

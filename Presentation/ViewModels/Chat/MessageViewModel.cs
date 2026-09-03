@@ -1097,7 +1097,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     VoiceContainer = a.VoiceContainer,
                     VoiceDurationMs = a.VoiceDurationMs,
                     VoiceSampleRateHz = a.VoiceSampleRateHz,
-                    VoiceChannels = a.VoiceChannels
+                    VoiceChannels = a.VoiceChannels,
+                    VoiceWaveformPeaks = a.VoiceWaveformPeaks
                 });
         }
 
@@ -1203,7 +1204,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 VoiceContainer = a.VoiceContainer,
                 VoiceDurationMs = a.VoiceDurationMs,
                 VoiceSampleRateHz = a.VoiceSampleRateHz,
-                VoiceChannels = a.VoiceChannels
+                VoiceChannels = a.VoiceChannels,
+                VoiceWaveformPeaks = a.VoiceWaveformPeaks
             })];
         }
 
@@ -1703,7 +1705,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
                 VoiceContainer = a.IsVoice ? a.VoiceContainer : null,
                 VoiceDurationMs = a.IsVoice ? a.VoiceDurationMs : null,
                 VoiceSampleRateHz = a.IsVoice ? a.VoiceSampleRateHz : null,
-                VoiceChannels = a.IsVoice ? a.VoiceChannels : null
+                VoiceChannels = a.IsVoice ? a.VoiceChannels : null,
+                // 波形峰值包络（0–255）：48 字节，STJ 自动 base64；缺省/空 = 接收端降级渲染。
+                VoiceWaveformPeaks = a.IsVoice ? a.VoiceWaveformPeaks : null
             }).ToList();
         }
 
@@ -2186,7 +2190,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
                     VoiceContainer = recording.Metadata.Container,
                     VoiceDurationMs = recording.Metadata.DurationMs,
                     VoiceSampleRateHz = recording.Metadata.SampleRateHz,
-                    VoiceChannels = recording.Metadata.Channels
+                    VoiceChannels = recording.Metadata.Channels,
+                    VoiceWaveformPeaks = recording.Metadata.VoiceWaveformPeaks
                 });
                 UploadProgress = 100;
             }
@@ -2785,5 +2790,8 @@ public sealed class PendingAttachment
 
     /// <summary>声道数。仅语音附件有值。</summary>
     public short? VoiceChannels { get; init; }
+
+    /// <summary>语音波形峰值包络（0–255，可空）。仅语音附件有值；缺省/空 = 无波形，渲染降级。</summary>
+    public byte[]? VoiceWaveformPeaks { get; init; }
 }
 

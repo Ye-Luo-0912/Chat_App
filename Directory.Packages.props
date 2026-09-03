@@ -31,11 +31,12 @@
     <PackageVersion Include="Serilog.Sinks.Async" Version="2.0.0" />
     <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.14.0" />
     <!-- 0.5.4：补齐 0.5.3 缺失的 P6/P7 等契约类型（TcpTypingNotify/Tcp*Group*/Authentication* 等），
-         Schemas 0.5.3 的 TypeRef 依赖这些类型，否则二进制 codec 首次 JIT 即 TypeLoadException。 -->
-    <PackageVersion Include="ChatApp.Protocol.Tcp" Version="0.5.4" />
-    <PackageVersion Include="ChatApp.Binary.Core" Version="0.5.4" />
-    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary" Version="0.5.4" />
-    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary.Schemas" Version="0.5.4" />
+         Schemas 0.5.3 的 TypeRef 依赖这些类型，否则二进制 codec 首次 JIT 即 TypeLoadException。
+         0.5.6：TcpAttachmentRef.VoiceWaveformPeaks（byte[]?，0–255 归一化峰值包络，可空——缺省降级渲染）。 -->
+    <PackageVersion Include="ChatApp.Protocol.Tcp" Version="0.5.6" />
+    <PackageVersion Include="ChatApp.Binary.Core" Version="0.5.6" />
+    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary" Version="0.5.6" />
+    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary.Schemas" Version="0.5.6" />
     <!-- 0.5.5：ENDPOINT-TLS-1 端点安全契约（EndpointDescriptor/EndpointPolicy + LoginResponse.Server 加性字段）。 -->
     <PackageVersion Include="ChatApp.Contracts.Http" Version="0.5.5" />
     <PackageVersion Include="NAudio" Version="2.2.1" />

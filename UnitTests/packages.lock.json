@@ -632,8 +632,8 @@
         "type": "Project",
         "dependencies": {
           "ChatApp.Contracts.Http": "[0.5.5, )",
-          "ChatApp.Protocol.Tcp": "[0.5.4, )",
-          "ChatApp.Protocol.Tcp.Binary.Schemas": "[0.5.4, )"
+          "ChatApp.Protocol.Tcp": "[0.5.6, )",
+          "ChatApp.Protocol.Tcp.Binary.Schemas": "[0.5.6, )"
         }
       },
       "infrastructure": {
@@ -695,9 +695,9 @@
       },
       "ChatApp.Binary.Core": {
         "type": "CentralTransitive",
-        "requested": "[0.5.4, )",
-        "resolved": "0.5.4",
-        "contentHash": "s1aMf9iRz5OCV2DR1ih0902vuHk4ir+hk0PlJx65EPiNhd2DO37voRTEMzAEMH5Ff7kWKkGMqPPxb5sd7QhZJQ=="
+        "requested": "[0.5.6, )",
+        "resolved": "0.5.6",
+        "contentHash": "JBITj5Fd5DcZtK2XCG0I/7kkrGACorDKjbImnIsi/5iTwUlsAyIOxk53YG+l9+p66y4PieQlJPelqVoDITkogA=="
       },
       "ChatApp.Contracts.Http": {
         "type": "CentralTransitive",
@@ -707,28 +707,28 @@
       },
       "ChatApp.Protocol.Tcp": {
         "type": "CentralTransitive",
-        "requested": "[0.5.4, )",
-        "resolved": "0.5.4",
-        "contentHash": "zipP+w1vQfNkj5k1vAmFBVhAQN6I/CCoLEiDgOYfhoQ6smO6PRuFo9bVQVcAUmUNlJYMjdNdecPkeqXzVttknQ=="
+        "requested": "[0.5.6, )",
+        "resolved": "0.5.6",
+        "contentHash": "0YAJbmvm+olh2QLYW6JcEqsd4UMSZX0VuN0sohJRmOGzuNoinH3Pi8H+Oy9iqGO7rrCxra/t8lVR1fo8kRVkNQ=="
       },
       "ChatApp.Protocol.Tcp.Binary": {
         "type": "CentralTransitive",
-        "requested": "[0.5.4, )",
-        "resolved": "0.5.4",
-        "contentHash": "gbgPt3GqOhW3hAoZnHVgI6NrITI4D/BVVJMQ503o/3Or1tiRxrmW3Fst6/J1rno8x59Gnku4VCuIWxVWiCM26A==",
+        "requested": "[0.5.6, )",
+        "resolved": "0.5.6",
+        "contentHash": "WqOusj7IO/TRfdt1Z0Y6VZfk1y8fahHTd4lhc1mSaXFE//bqvHn+hn6vcn74B+V0WbQ0FIPf0kM30YppxzyFcg==",
         "dependencies": {
-          "ChatApp.Binary.Core": "0.5.4"
+          "ChatApp.Binary.Core": "0.5.6"
         }
       },
       "ChatApp.Protocol.Tcp.Binary.Schemas": {
         "type": "CentralTransitive",
-        "requested": "[0.5.4, )",
-        "resolved": "0.5.4",
-        "contentHash": "wj3AiKeM7Ptwcq/xhR/HzTt6vJ5j0cgbrtN8I63FrzfsvyFK2/kTo34lmDCCy9XXzGvlfy56U4i3qu62MsASLw==",
+        "requested": "[0.5.6, )",
+        "resolved": "0.5.6",
+        "contentHash": "KkAxQBxsslqdf1ByySIGXFpsbUVAxlaUUg5hbe9s3FmcwPDQxANtq3adyf9cTwEMIdIN7xMHfBSuQXOVA4ROlA==",
         "dependencies": {
-          "ChatApp.Binary.Core": "0.5.4",
-          "ChatApp.Protocol.Tcp": "0.5.4",
-          "ChatApp.Protocol.Tcp.Binary": "0.5.4"
+          "ChatApp.Binary.Core": "0.5.6",
+          "ChatApp.Protocol.Tcp": "0.5.6",
+          "ChatApp.Protocol.Tcp.Binary": "0.5.6"
         }
       },
       "Material.Icons.Avalonia": {

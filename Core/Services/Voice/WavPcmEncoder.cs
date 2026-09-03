@@ -17,6 +17,56 @@ public static class WavPcmEncoder
     /// <summary>一次写入 data 的最小块大小（字节）；不足则按实际长度回填。</summary>
     private const int MinBlockBytes = 1024 * 64;
 
+    /// <summary>语音波形峰值包络的默认桶数（每桶 1 字节，包络天然上限 48 字节）。</summary>
+    public const int WaveformPeakBucketCount = 48;
+
+    /// <summary>16-bit PCM 满幅绝对值（|short.MinValue|）。</summary>
+    private const int FullScaleAmplitude = 32_768;
+
+    /// <summary>
+    /// 计算 16-bit LE PCM 的峰值包络（VOICE-MSG-2 波形）：
+    /// 将样本序列按固定桶数等分，取每桶内样本绝对值的最大值，再线性归一化到 0–255
+    /// （0 = 数字静音，255 = 满幅 -32768/32767）。纯函数、字节级确定：同输入同输出。
+    /// 多声道交错样本按样本序号一并分桶（声道间并入同一桶取最大）。
+    /// 返回长度恒为 <paramref name="bucketCount"/>（样本数为 0 时返回空数组）。
+    /// </summary>
+    public static byte[] ComputePeakEnvelope(ReadOnlySpan<byte> pcm16, int bucketCount = WaveformPeakBucketCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bucketCount);
+
+        var totalSamples = pcm16.Length / 2; // 不足 2 字节的尾部截断
+        if (totalSamples == 0)
+            return [];
+
+        var peaks = new byte[bucketCount];
+        // 单趟扫描：桶边界由样本序号线性映射确定，桶内只保留绝对值最大者。
+        // 使用 long 乘法避免 (i * bucketCount) 在长录音下溢出 int。
+        var maxAbs = 0;
+        var currentBucket = 0;
+        for (var i = 0; i < totalSamples; i++)
+        {
+            var bucket = (int)((long)i * bucketCount / totalSamples);
+            if (bucket != currentBucket)
+            {
+                peaks[currentBucket] = NormalizePeak(maxAbs);
+                currentBucket = bucket;
+                maxAbs = 0;
+            }
+
+            var sample = BinaryPrimitives.ReadInt16LittleEndian(pcm16[(i * 2)..]);
+            var abs = sample < 0 ? -sample : sample; // -32768 → 32768，int 域内安全
+            if (abs > maxAbs)
+                maxAbs = abs;
+        }
+
+        peaks[currentBucket] = NormalizePeak(maxAbs);
+        return peaks;
+    }
+
+    /// <summary>满幅归一化：abs ∈ [0, 32768] → [0, 255]，四舍五入（half-up）整数运算，无浮点误差。</summary>
+    private static byte NormalizePeak(int abs)
+        => (byte)Math.Min(byte.MaxValue, (abs * 255 + FullScaleAmplitude / 2) / FullScaleAmplitude);
+
     /// <summary>
     /// 将 PCM 帧流写入目标流，并返回已写入的 data 字节数。
     /// 先写带占位长度的头部，随后逐块写入 PCM 数据，最后回填 data 长度与 RIFF 大小。
