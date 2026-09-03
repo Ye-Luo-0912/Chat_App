@@ -296,14 +296,26 @@ public class LoginViewModel : ViewModelBase
         ServerEndpoint? endpoint = null;
         if (loginResult.Server is { } server)
         {
-            endpoint = new ServerEndpoint
+            if (ServerEndpointImport.TryMapFromWire(server, _useTls, out var mapped, out var violation))
             {
-                ServerPort = server.Port,
-                ServerIpAddress = server.Host,
-                ServerName = server.Name,
-                // TCP 传输默认启用 TLS（appsettings Tcp:UseTls）；明文端口需显式关闭。
-                UseTls = _useTls
-            };
+                endpoint = mapped;
+            }
+            else
+            {
+                // fail-closed：未知枚举/非法组合不得解释成任何"安全默认"，也不中断登录；
+                // 端点按旧形状缺省处理（UseTls 沿用既有默认），违规细节进日志。
+                Log.Warning(
+                    "登录响应端点元数据未通过校验 Violation={Violation} Host={Host} Port={Port}",
+                    violation, server.Host, server.Port);
+                endpoint = new ServerEndpoint
+                {
+                    ServerPort = server.Port,
+                    ServerIpAddress = server.Host,
+                    ServerName = server.Name,
+                    // TCP 传输默认启用 TLS（appsettings Tcp:UseTls）；明文端口需显式关闭。
+                    UseTls = _useTls
+                };
+            }
         }
 
         // 原子持久化：Token + 用户画像 + 服务器端点单事务提交；
