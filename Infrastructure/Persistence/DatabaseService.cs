@@ -326,6 +326,61 @@ public class DatabaseService(
         await db.Tokens.ExecuteDeleteAsync(None);
     }
 
+    // ---- ResumeToken（TCP 断线重连）----
+
+    /// <inheritdoc />
+    public TimeSpan ResumeTokenMaxAge { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <inheritdoc />
+    public async Task<string?> GetResumeTokenAsync()
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var stored = await db.Tokens.AsNoTracking().FirstOrDefaultAsync(None);
+        if (string.IsNullOrEmpty(stored?.ResumeToken))
+            return null;
+
+        // 本地新鲜度仅作保守过滤（真实 TTL 由网关裁决）：超过窗口视为明显陈旧，
+        // 直接走完整认证路径，不浪费一次注定失败的 Resume 握手。
+        if (stored.ResumeTokenUpdatedAtMs is { } savedAt
+            && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - savedAt > ResumeTokenMaxAge.TotalMilliseconds)
+            return null;
+
+        return SecretProtector.Unprotect(stored.ResumeToken);
+    }
+
+    /// <inheritdoc />
+    public async Task SaveResumeTokenAsync(string resumeToken)
+    {
+        if (string.IsNullOrWhiteSpace(resumeToken))
+            return;
+
+        // 与其他令牌同惯例：DPAPI 密文落库，明文不出现在 SQLite 文件中。
+        var protectedToken = SecretProtector.Protect(resumeToken);
+        if (string.IsNullOrEmpty(protectedToken))
+            return;
+
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        var stored = await db.Tokens.FirstOrDefaultAsync(None);
+        // 无 token 行说明尚未完整登录过，ResumeToken 缺少归属的会话上下文（UserId/SessionId），忽略。
+        if (stored is null)
+            return;
+
+        stored.ResumeToken = protectedToken;
+        stored.ResumeTokenUpdatedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await db.SaveChangesAsync(None);
+    }
+
+    /// <inheritdoc />
+    public async Task ClearResumeTokenAsync()
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        await db.Tokens
+            .Where(t => t.ResumeToken != null)
+            .ExecuteUpdateAsync(t
+                => t.SetProperty(x => x.ResumeToken, (string?)null)
+                    .SetProperty(x => x.ResumeTokenUpdatedAtMs, (long?)null), None);
+    }
+
     // ---- 服务器信息 ----
 
     /// <summary>
@@ -397,6 +452,10 @@ public class DatabaseService(
             oldToken.SessionId = secret.SessionId;
             oldToken.DeviceIdHash = secret.DeviceIdHash;
             oldToken.DeviceCredential = secret.DeviceCredential;
+            // 新登录会话尚未持有本账户的 ResumeToken（它由 TCP 认证后颁发）；
+            // 残留上一账户的 token 会被网关设备围栏拒绝，直接清零避免一次注定失败的 Resume。
+            oldToken.ResumeToken = null;
+            oldToken.ResumeTokenUpdatedAtMs = null;
         }
         else
         {

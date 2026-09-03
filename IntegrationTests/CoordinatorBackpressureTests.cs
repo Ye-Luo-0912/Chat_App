@@ -167,7 +167,10 @@ public class CoordinatorBackpressureTests
         public void RaiseMessageReceipt(MessageReceiptDto dto) => MessageReceiptReceived?.Invoke(this, dto);
         public void RaiseUnreadCountChanged(UnreadCountChangedDto dto) => UnreadCountChanged?.Invoke(this, dto);
 
-        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default)
+        public ResumeAttemptResult? LastResumeResult => null;
+        public string? LastIssuedResumeToken => null;
+
+        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default, string? resumeToken = null)
         {
             IsConnected = true;
             return Task.CompletedTask;

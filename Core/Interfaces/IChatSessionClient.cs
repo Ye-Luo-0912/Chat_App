@@ -34,8 +34,26 @@ public interface IChatSessionClient : IDisposable
     /// </summary>
     SessionStamp CurrentSession { get; }
 
-    /// <summary>连接到指定服务器端点。成功后需调用 <see cref="AuthenticateAsync"/>。</summary>
-    Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default);
+    /// <summary>
+    /// 连接到指定服务器端点。成功后需调用 <see cref="AuthenticateAsync"/>。
+    /// 传入 <paramref name="resumeToken"/> 时在 ClientHello 携带断线重连 token：
+    /// 网关恢复成功则连接直接进入已认证状态（不发 ServerHello，改发 ResumeResponse），
+    /// 恢复失败仍完成常规握手，可继续调用 <see cref="AuthenticateAsync"/> 回退。
+    /// 本次尝试的结果通过 <see cref="LastResumeResult"/> 读取。
+    /// </summary>
+    Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default, string? resumeToken = null);
+
+    /// <summary>
+    /// 最近一次带 resumeToken 连接的 Resume 结果；未发起 Resume 时为 null。
+    /// 成功与否同时反映在 <see cref="IsAuthenticated"/>；此属性供调用方读取轮换 token 与失败分类。
+    /// </summary>
+    ResumeAttemptResult? LastResumeResult { get; }
+
+    /// <summary>
+    /// 最近一次完整认证响应中网关颁发的 ResumeToken（网关可能每次轮换）；
+    /// 认证响应未携带时为 null。连接协调器负责持久化。
+    /// </summary>
+    string? LastIssuedResumeToken { get; }
 
     /// <summary>
     /// 发送鉴权请求并等待服务端确认（超时 5 秒）。

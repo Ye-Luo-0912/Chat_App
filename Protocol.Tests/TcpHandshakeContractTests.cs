@@ -8,6 +8,7 @@ using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
 using Core.Protocol;
+using Core.Protocol.Binary;
 using Core.Services;
 using Xunit;
 
@@ -244,6 +245,190 @@ public sealed class TcpHandshakeContractTests
         Assert.Equal(nameof(ProtocolErrorCode.ProtocolViolation), observed.ErrorCode);
     }
 
+    // ── Resume 成功路径：ClientHello 携带 token，网关只回 ResumeResponse（无 ServerHello）──
+
+    [Fact]
+    public async Task ResumeConnect_Success_AuthenticatesWithoutAuthenticationRequest()
+    {
+        using var tcp = new ContractTcpClient { AutoReplyServerHello = false };
+        using var session = CreateSession(tcp);
+        tcp.ClientHelloReceived = hello =>
+        {
+            // 网关契约：携带 token 且已协商 SessionResume 时尝试恢复，成功只回 ResumeResponse。
+            if (!string.IsNullOrEmpty(hello.ResumeToken))
+            {
+                tcp.Inject(Frame(PacketCommand.ResumeResponse, new ResumeResponse
+                {
+                    Success = true,
+                    UserId = 42,
+                    SessionId = "session-1",
+                    DeviceId = "device-1",
+                    ResumeToken = "rotated-token",
+                    LastConversationSequence = 7
+                }));
+            }
+        };
+
+        await session.ConnectAsync(Endpoint(), default, "valid-token");
+
+        Assert.True(session.HasCompletedHandshake);
+        Assert.True(session.IsAuthenticated);
+        Assert.Equal(42, session.CurrentUserId);
+        Assert.Equal(SessionPayloadFormat.Json, session.NegotiatedPayloadFormat);
+        // Resume 路径连接恒 JSON：网关剥离 BinaryPayload 协商位，客户端同步收敛。
+        Assert.True((session.NegotiatedFeatureBits & (uint)GatewayFeature.BinaryPayload) == 0);
+        Assert.True((session.NegotiatedFeatureBits & (uint)GatewayFeature.SessionResume) != 0);
+
+        var result = session.LastResumeResult;
+        Assert.NotNull(result);
+        Assert.True(result!.Success);
+        Assert.Equal("rotated-token", result.ResumeToken);
+        Assert.Equal(7, result.LastConversationSequence);
+
+        // 全程只有 ClientHello：未再发 AuthenticationRequest。
+        Assert.Equal(
+            [PacketCommand.ClientHello],
+            Decode(tcp.GetSentBytes()).Select(static f => f.Command).ToArray());
+    }
+
+    [Fact]
+    public async Task ResumeConnect_ClientHello_CarriesTokenAndSessionResumeBit()
+    {
+        using var tcp = new ContractTcpClient { AutoReplyServerHello = false };
+        using var session = CreateSession(tcp);
+        tcp.ClientHelloReceived = hello => tcp.Inject(Frame(PacketCommand.ResumeResponse,
+            new ResumeResponse { Success = true, UserId = 42, ResumeToken = "rotated" }));
+
+        await session.ConnectAsync(Endpoint(), default, "stored-token");
+
+        var hello = new JsonPacketBodySerializer().Deserialize<ClientHello>(
+            Assert.Single(Decode(tcp.GetSentBytes())).Body);
+        Assert.NotNull(hello);
+        Assert.Equal("stored-token", hello.ResumeToken);
+        Assert.True((hello.FeatureBits & (uint)GatewayFeature.SessionResume) != 0);
+    }
+
+    // ── Resume 失败回退：Error(ResumeFailed 等) + ServerHello → 完整认证 ──
+
+    [Fact]
+    public async Task ResumeConnect_ResumeFailed_FallsBackToHandshakeForFullAuth()
+    {
+        using var tcp = new ContractTcpClient { AutoReplyServerHello = false };
+        using var session = CreateSession(tcp);
+        tcp.ClientHelloReceived = _ =>
+        {
+            // 网关语义：Resume 失败先发 Error 再照常发 ServerHello，客户端可回退完整认证。
+            tcp.Inject(Frame(PacketCommand.Error, new ProtocolErrorFrame
+            {
+                Code = ProtocolErrorCode.ResumeFailed,
+                Message = "resume token invalid or expired"
+            }));
+            tcp.Inject(Frame(PacketCommand.ServerHello, ContractTcpClient.CreateDefaultServerHello()));
+        };
+
+        await session.ConnectAsync(Endpoint(), default, "expired-token");
+
+        // 握手完成但未认证：协调器据 LastResumeResult 清 token 后走 AuthenticateAsync。
+        Assert.True(session.HasCompletedHandshake);
+        Assert.False(session.IsAuthenticated);
+        Assert.NotNull(session.LastResumeResult);
+        Assert.False(session.LastResumeResult!.Success);
+        Assert.Equal(ResumeFailureKind.InvalidToken, session.LastResumeResult.FailureKind);
+
+        tcp.FrameSent = command =>
+        {
+            if (command == PacketCommand.AuthenticationRequest)
+            {
+                tcp.Inject(Frame(PacketCommand.AuthenticationResponse, new AuthResponseDto
+                {
+                    Success = true,
+                    UserId = 42,
+                    ResumeToken = "fresh-token"
+                }));
+            }
+        };
+        await session.AuthenticateAsync("access-token", 42, null, null);
+        Assert.True(session.IsAuthenticated);
+        Assert.Equal("fresh-token", session.LastIssuedResumeToken);
+    }
+
+    [Fact]
+    public async Task ResumeConnect_DependencyUnavailable_ReportsRetryableFailure()
+    {
+        using var tcp = new ContractTcpClient { AutoReplyServerHello = false };
+        using var session = CreateSession(tcp);
+        tcp.ClientHelloReceived = _ =>
+        {
+            tcp.Inject(Frame(PacketCommand.Error, new ProtocolErrorFrame
+            {
+                Code = ProtocolErrorCode.DependencyUnavailable,
+                Message = "resume dependency unavailable, retry after backoff",
+                RetryAfterMs = 1_000
+            }));
+            tcp.Inject(Frame(PacketCommand.ServerHello, ContractTcpClient.CreateDefaultServerHello()));
+        };
+
+        await session.ConnectAsync(Endpoint(), default, "token");
+
+        Assert.True(session.HasCompletedHandshake);
+        Assert.False(session.IsAuthenticated);
+        Assert.Equal(ResumeFailureKind.DependencyUnavailable, session.LastResumeResult!.FailureKind);
+    }
+
+    [Fact]
+    public async Task ResumeConnect_SuccessFalseResponse_IsTreatedAsFailureNotViolation()
+    {
+        using var tcp = new ContractTcpClient { AutoReplyServerHello = false };
+        using var session = CreateSession(tcp);
+        tcp.ClientHelloReceived = _ =>
+        {
+            // 协议防御分支：带内拒绝（Success=false）同样走失败回退，而非协议违例。
+            tcp.Inject(Frame(PacketCommand.ResumeResponse,
+                new ResumeResponse { Success = false, FailureKind = ResumeFailureKind.InvalidToken }));
+            tcp.Inject(Frame(PacketCommand.ServerHello, ContractTcpClient.CreateDefaultServerHello()));
+        };
+
+        await session.ConnectAsync(Endpoint(), default, "token");
+
+        Assert.True(session.HasCompletedHandshake);
+        Assert.False(session.IsAuthenticated);
+        Assert.False(session.LastResumeResult!.Success);
+        Assert.True(session.IsConnected);
+    }
+
+    [Fact]
+    public async Task ResumeConnect_ServerIgnoresToken_HandshakeCompletesForFullAuth()
+    {
+        // 未启用 Resume 的网关：忽略 token，直接回 ServerHello。
+        using var tcp = new ContractTcpClient();
+        using var session = CreateSession(tcp);
+
+        await session.ConnectAsync(Endpoint(), default, "token");
+
+        Assert.True(session.HasCompletedHandshake);
+        Assert.False(session.IsAuthenticated);
+        Assert.Null(session.LastResumeResult);
+    }
+
+    [Fact]
+    public async Task AdvertiseSessionResume_Disabled_OmitsCapabilityBit()
+    {
+        using var tcp = new ContractTcpClient();
+        using var session = new ChatSessionClient(
+            tcp, new MessagePacketCodec(), new JsonPacketBodySerializer())
+        {
+            AdvertiseSessionResume = false
+        };
+
+        await session.ConnectAsync(Endpoint(), default, "token-must-not-be-sent");
+
+        var hello = new JsonPacketBodySerializer().Deserialize<ClientHello>(
+            Assert.Single(Decode(tcp.GetSentBytes())).Body);
+        Assert.NotNull(hello);
+        Assert.Null(hello.ResumeToken);
+        Assert.True((hello.FeatureBits & (uint)GatewayFeature.SessionResume) == 0);
+    }
+
     [Fact]
     public async Task PersistentDeviceIdentity_ProducesStableInstallationId()
     {
@@ -347,6 +532,7 @@ public sealed class TcpHandshakeContractTests
         public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStatusChanged;
         public event EventHandler<ReadOnlyMemory<byte>>? OnDataChunkReceived;
         public Action<PacketCommand>? FrameSent { get; set; }
+        public Action<ClientHello>? ClientHelloReceived { get; set; }
         public bool AutoReplyServerHello { get; set; } = true;
         public ServerHello ServerHelloResponse { get; set; } = CreateDefaultServerHello();
         public TaskCompletionSource<bool> ClientHelloSent { get; } =
@@ -390,6 +576,9 @@ public sealed class TcpHandshakeContractTests
                 if (packet.Command == PacketCommand.ClientHello)
                 {
                     ClientHelloSent.TrySetResult(true);
+                    // 握手段恒 JSON：反序列化后交给测试脚本决定服务端应答（ServerHello/ResumeResponse/Error）。
+                    ClientHelloReceived?.Invoke(
+                        new JsonPacketBodySerializer().Deserialize<ClientHello>(packet.Body)!);
                     if (AutoReplyServerHello)
                         Inject(Frame(PacketCommand.ServerHello, ServerHelloResponse));
                 }

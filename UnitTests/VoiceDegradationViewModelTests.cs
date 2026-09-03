@@ -294,7 +294,10 @@ public sealed class VoiceDegradationViewModelTests
         public event EventHandler<MembersAddedUpdateDto>? GroupMembersAdded;
         public event EventHandler<ConversationDissolvedUpdateDto>? GroupConversationDissolved;
 
-        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default) => Task.CompletedTask;
+        public ResumeAttemptResult? LastResumeResult => null;
+        public string? LastIssuedResumeToken => null;
+
+        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default, string? resumeToken = null) => Task.CompletedTask;
         public Task AuthenticateAsync(string accessToken, long userId, string? sessionId, ulong? deviceIdHash, CancellationToken ct = default)
             => Task.CompletedTask;
         public Task DisconnectAsync(string? reason = null, CancellationToken ct = default) => Task.CompletedTask;

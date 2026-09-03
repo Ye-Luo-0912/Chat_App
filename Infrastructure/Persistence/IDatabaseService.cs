@@ -2,6 +2,7 @@ using Core.Contracts.Auth;
 using Core.Models;
 using Core.Models.DTO;
 using Chat_App.Infrastructure.Models;
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -29,6 +30,22 @@ public interface IDatabaseService
     Task<Token?> GetAccessTokenAsync();
     Task<int> UpdateTokenAsync(AuthToken token);
     Task DeleteTokenAsync();
+
+    /// <summary>
+    /// 读取解密后的 TCP 断线重连 ResumeToken（DPAPI 密文落库）。
+    /// 无 token 行、未保存或超过本地新鲜度窗口（<see cref="ResumeTokenMaxAge"/>）时返回 null。
+    /// </summary>
+    Task<string?> GetResumeTokenAsync();
+
+    /// <summary>持久化 ResumeToken（网关认证成功颁发或 Resume 成功轮换后调用）；须已有 token 行。</summary>
+    Task SaveResumeTokenAsync(string resumeToken);
+
+    /// <summary>清除 ResumeToken（Resume 失败/显式登出后调用，避免再携带注定失败的 token）。</summary>
+    Task ClearResumeTokenAsync();
+
+    /// <summary>ResumeToken 本地新鲜度上限。真实有效期由网关控制；本地仅过滤"明显陈旧"的 token，
+    /// 避免离线很久后仍浪费一次注定失败的 Resume 握手。测试可调小。</summary>
+    TimeSpan ResumeTokenMaxAge { get; set; }
 
     // 服务器信息相关
     Task SaveServerInfoAsync(ServerEndpoint serverInfo);

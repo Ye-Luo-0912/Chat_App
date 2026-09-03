@@ -595,7 +595,10 @@ public sealed class CallClientIntegrationTests
         public event EventHandler<MembersAddedUpdateDto>? GroupMembersAdded;
         public event EventHandler<ConversationDissolvedUpdateDto>? GroupConversationDissolved;
 
-        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default) => Task.CompletedTask;
+        public ResumeAttemptResult? LastResumeResult => null;
+        public string? LastIssuedResumeToken => null;
+
+        public Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default, string? resumeToken = null) => Task.CompletedTask;
         public Task AuthenticateAsync(string accessToken, long userId, string? sessionId, ulong? deviceIdHash, CancellationToken ct = default) => Task.CompletedTask;
         public Task DisconnectAsync(string? reason = null, CancellationToken ct = default) => Task.CompletedTask;
         public Task<string> SendChatMessageAsync(long targetUserId, string? content, IReadOnlyList<string>? attachmentIds = null, string? replyToMessageId = null, long? replyToSenderUserId = null, string? replyToPreview = null, string? forwardedFromMessageId = null, long? forwardedFromSenderUserId = null, string? forwardedFromPreview = null, string? clientMessageId = null, string? conversationId = null, IReadOnlyList<long>? mentionedUserIds = null, IReadOnlyList<global::ChatApp.Shared.Protocol.Tcp.TcpAttachmentRef>? attachments = null, CancellationToken ct = default) => throw new System.NotSupportedException();

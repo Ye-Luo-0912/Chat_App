@@ -22,6 +22,7 @@ using TcpProtocolErrorCode = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCode;
 using TcpProtocolErrorCodeExtensions = ChatApp.Shared.Protocol.Tcp.ProtocolErrorCodeExtensions;
 using TcpProtocolErrorFrame = ChatApp.Shared.Protocol.Tcp.ProtocolErrorFrame;
 using TcpResumeResponse = ChatApp.Shared.Protocol.Tcp.ResumeResponse;
+using TcpResumeFailureKind = ChatApp.Shared.Protocol.Tcp.ResumeFailureKind;
 using TcpServerHello = ChatApp.Shared.Protocol.Tcp.ServerHello;
 using TcpFrameConstants = ChatApp.Shared.Protocol.Tcp.TcpFrameConstants;
 using TcpBinaryPayloadFormat = ChatApp.Shared.Protocol.Tcp.Binary.BinaryPayloadFormat;
@@ -38,6 +39,7 @@ namespace Core.Services
         private readonly string _installationId;
         private readonly SemaphoreSlim _connectGate = new(1, 1);
         private HandshakeState? _handshakeState;
+        private ResumeRequestState? _resumeState;
         private long _helloSentGeneration;
         private long _handshakeGeneration;
         private int _negotiatedProtocolVersion;
@@ -90,8 +92,9 @@ namespace Core.Services
         private const int HistoryFetchTimeoutSec = 15;
         private const int ReceiptTimeoutSec = 10;
 
-        // 仅声明客户端已经实现并在本类公开 API 中使用的能力。暂不声明 SessionResume：
-        // 当前连接协调器仍固定执行完整鉴权，启用 Resume 前需先让它消费 ResumeResponse。
+        // 仅声明客户端已经实现并在本类公开 API 中使用的能力。
+        // SessionResume 由 AdvertiseSessionResume 开关单独控制（与 BinaryPayload 同模式），
+        // 仅在连接协调器传入 ResumeToken 时才会真正走 Resume 路径。
         private const TcpGatewayFeature AdvertisedFeatures =
             TcpGatewayFeature.CommandCapabilities |
             TcpGatewayFeature.ConversationSync |
@@ -103,17 +106,30 @@ namespace Core.Services
             TcpGatewayFeature.CallSignaling;
 
         /// <summary>
+        /// 是否在 ClientHello.FeatureBits 中声明 <see cref="TcpGatewayFeature.SessionResume"/>
+        /// 断线重连能力。默认开启；网关仅在 ClientHello.ResumeToken 非空时尝试恢复会话，
+        /// Resume 路径连接恒为 JSON（网关会剥离 BinaryPayload 协商位）。
+        /// 关闭后 ClientHello 不再声明该位，ResumeToken 也不会被网关接受。
+        /// </summary>
+        public bool AdvertiseSessionResume { get; set; } = true;
+
+        /// <summary>
         /// 是否在 ClientHello.FeatureBits 中声明 <see cref="TcpGatewayFeature.BinaryPayload"/>
         /// 二进制载荷能力。默认开启；服务端在 ServerHello.PayloadFormat 回应 json 时整个连接
         /// 回退为 JSON（老服务端兼容）。关闭后 ClientHello 不再声明该位。
         /// </summary>
         public bool AdvertiseBinaryPayload { get; set; } = true;
 
-        /// <summary>本次握手实际上报的能力位（含/不含 BinaryPayload 取决于 <see cref="AdvertiseBinaryPayload"/>）。</summary>
-        private TcpGatewayFeature GetAdvertisedFeatures() =>
-            AdvertiseBinaryPayload
-                ? AdvertisedFeatures | TcpGatewayFeature.BinaryPayload
-                : AdvertisedFeatures;
+        /// <summary>本次握手实际上报的能力位（含/不含 BinaryPayload、SessionResume 取决于对应开关）。</summary>
+        private TcpGatewayFeature GetAdvertisedFeatures()
+        {
+            var features = AdvertisedFeatures;
+            if (AdvertiseSessionResume)
+                features |= TcpGatewayFeature.SessionResume;
+            if (AdvertiseBinaryPayload)
+                features |= TcpGatewayFeature.BinaryPayload;
+            return features;
+        }
 
         /// <summary>
         /// 关系只读能力是否已协商启用：仅当握手中服务端回显 <see cref="TcpGatewayFeature.RelationshipRead"/>
@@ -185,6 +201,16 @@ namespace Core.Services
         public bool HasCompletedHandshake =>
             ConnectionGeneration != 0 &&
             Volatile.Read(ref _handshakeGeneration) == ConnectionGeneration;
+
+        /// <inheritdoc />
+        public ResumeAttemptResult? LastResumeResult => Volatile.Read(ref _lastResumeResult);
+
+        /// <inheritdoc />
+        public string? LastIssuedResumeToken => Volatile.Read(ref _lastIssuedResumeToken);
+
+        // Resume 结果跨线程发布：ConnectAsync 返回后由连接协调器线程读取。
+        private ResumeAttemptResult? _lastResumeResult;
+        private string? _lastIssuedResumeToken;
 
         public ushort NegotiatedProtocolVersion =>
             (ushort)Volatile.Read(ref _negotiatedProtocolVersion);
@@ -399,10 +425,14 @@ namespace Core.Services
             }
         }
 
-        public async Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default)
+        public async Task ConnectAsync(ServerEndpoint endpoint, CancellationToken ct = default, string? resumeToken = null)
         {
+            // Resume 需要客户端已声明 SessionResume 能力位；未声明时不携带 token，
+            // 避免"发了 token 却未协商能力"被网关按 FeatureNotNegotiated 拒绝。
+            var resumeRequested = !string.IsNullOrWhiteSpace(resumeToken) && AdvertiseSessionResume;
             await _connectGate.WaitAsync(ct).ConfigureAwait(false);
             HandshakeState? state = null;
+            ResumeRequestState? resumeState = null;
             try
             {
                 // 整个 TCP 建连 + 协议握手串行化，避免并发重连覆盖代次或让旧握手完成新连接。
@@ -419,6 +449,18 @@ namespace Core.Services
                 var previousState = Interlocked.Exchange(ref _handshakeState, state);
                 previousState?.Tcs.TrySetException(new IOException("连接已被新的握手替换"));
 
+                Volatile.Write(ref _lastResumeResult, null);
+                if (resumeRequested)
+                {
+                    resumeState = new ResumeRequestState
+                    {
+                        Generation = generation,
+                        Tcs = new TaskCompletionSource<ResumeAttemptResult>(TaskCreationOptions.RunContinuationsAsynchronously)
+                    };
+                    var previousResume = Interlocked.Exchange(ref _resumeState, resumeState);
+                    previousResume?.Tcs.TrySetException(new IOException("连接已被新的握手替换"));
+                }
+
                 Volatile.Write(ref _helloSentGeneration, 0);
                 Volatile.Write(ref _handshakeGeneration, 0);
                 Volatile.Write(ref _negotiatedProtocolVersion, 0);
@@ -433,7 +475,7 @@ namespace Core.Services
                     FeatureBits = (uint)GetAdvertisedFeatures(),
                     InstallationId = _installationId,
                     ClientTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    ResumeToken = null,
+                    ResumeToken = resumeRequested ? resumeToken : null,
                     MaxPayloadBytes = MessagePacket.MaxBodySize
                 };
 
@@ -446,11 +488,20 @@ namespace Core.Services
                 timeoutCts.CancelAfter(ScaleTimeout(TimeSpan.FromSeconds(HandshakeTimeoutSec)));
                 try
                 {
-                    await state.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                    if (!resumeRequested)
+                    {
+                        await state.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // resumeRequested 为真时 resumeState 必已创建（同代握手内赋值）。
+                        await WaitForResumeAwareHandshakeAsync(state, resumeState!, timeoutCts)
+                            .ConfigureAwait(false);
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    await DisconnectAfterFailedHandshakeAsync("TCP 协议握手已取消").ConfigureAwait(false);
+                    // 外部取消：静默重抛，不触发事件。
                     throw;
                 }
                 catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
@@ -469,8 +520,64 @@ namespace Core.Services
             {
                 if (state is not null)
                     Interlocked.CompareExchange(ref _handshakeState, null, state);
+                if (resumeState is not null)
+                    Interlocked.CompareExchange(ref _resumeState, null, resumeState);
                 _connectGate.Release();
             }
+        }
+
+        /// <summary>
+        /// Resume 感知的握手等待：网关 Resume 成功时只回 ResumeResponse（不发 ServerHello），
+        /// 失败/忽略 token 时仍发 ServerHello。任意一个先到即推进：
+        /// Resume 成功 → 本地补齐协商状态并结束；Resume 失败 → 继续等 ServerHello 完成常规握手
+        /// （调用方随后回退完整认证）；ServerHello 先到 → 网关未处理 Resume，按常规握手结束。
+        /// </summary>
+        private async Task WaitForResumeAwareHandshakeAsync(
+            HandshakeState handshake,
+            ResumeRequestState resume,
+            CancellationTokenSource timeoutCts)
+        {
+            var completed = await Task.WhenAny(handshake.Tcs.Task, resume.Tcs.Task)
+                .WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+
+            if (completed == resume.Tcs.Task)
+            {
+                var outcome = await resume.Tcs.Task.ConfigureAwait(false);
+                if (outcome.Success)
+                {
+                    CompleteHandshakeForResumedSession();
+                    return;
+                }
+
+                // 失败分类留给协调器（LastResumeResult）：决定清 token 还是退避重试。
+                // 网关在失败后仍会发 ServerHello，等常规握手完成以便回退完整认证；
+                // 若连接在此期间断开，handshake TCS 会以 IOException 失败并向上传播。
+                await handshake.Tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                return;
+            }
+
+            // ServerHello 先完成：Resume 结果可能仍会以 Response 形式到达（异常网关），
+            // 也可能永远不来（未启用 Resume 的网关）。不等待，直接进入常规认证路径；
+            // 迟到的 ResumeResponse 由 HandleResumeResponse 按"无本代在途 Resume 请求"拒绝。
+            await completed.ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Resume 成功路径没有 ServerHello：协商结果由网关契约决定——协议版本不变、
+        /// 连接恒为 JSON、BinaryPayload 协商位被网关剥离；其余能力位按客户端自身广告
+        /// 回显近似处理（与全功能网关的交集一致）。心跳/载荷上限不可知，沿用客户端上限，
+        /// 出站裁剪因此偏保守而非偏越界。
+        /// </summary>
+        private void CompleteHandshakeForResumedSession()
+        {
+            var generation = Volatile.Read(ref _connectionGeneration);
+            Volatile.Write(ref _negotiatedProtocolVersion, TcpFrameConstants.CurrentProtocolVersion);
+            Volatile.Write(ref _negotiatedFeatureBits,
+                (uint)(GetAdvertisedFeatures() & ~TcpGatewayFeature.BinaryPayload));
+            Volatile.Write(ref _negotiatedPayloadFormat, (int)SessionPayloadFormat.Json);
+            Volatile.Write(ref _serverHeartbeatIntervalMs, 0);
+            Volatile.Write(ref _serverMaxPayloadBytes, MessagePacket.MaxBodySize);
+            Volatile.Write(ref _handshakeGeneration, generation);
         }
 
         private void HandleRouteFailure(PacketCommand command, Exception exception)
@@ -1791,6 +1898,24 @@ namespace Core.Services
             _ = DisconnectAsync(message, CancellationToken.None);
         }
 
+        /// <summary>
+        /// 网关 Resume 失败错误码 → 客户端失败分类（网关侧 ResumeFailureKind.ToErrorCode 的逆映射）：
+        /// ResumeFailed→InvalidToken（token 无效/过期，须完整认证）、
+        /// DependencyUnavailable→DependencyUnavailable（可退避后重试 Resume）、
+        /// AccountSuspended→UserFrozen（账号冻结，不可重试）。
+        /// </summary>
+        private static bool TryMapResumeFailureCode(string? errorCode, out TcpResumeFailureKind kind)
+        {
+            kind = errorCode switch
+            {
+                nameof(TcpProtocolErrorCode.ResumeFailed) => TcpResumeFailureKind.InvalidToken,
+                nameof(TcpProtocolErrorCode.DependencyUnavailable) => TcpResumeFailureKind.DependencyUnavailable,
+                nameof(TcpProtocolErrorCode.AccountSuspended) => TcpResumeFailureKind.UserFrozen,
+                _ => TcpResumeFailureKind.None
+            };
+            return kind != TcpResumeFailureKind.None;
+        }
+
         private void HandleServerHello(TcpServerHello? hello)
         {
             var generation = Volatile.Read(ref _connectionGeneration);
@@ -1871,22 +1996,59 @@ namespace Core.Services
 
         private void HandleResumeResponse(TcpResumeResponse? response)
         {
-            // 本客户端尚未声明 SessionResume，也从未发送 ResumeRequest。
-            // 任何 ResumeResponse 都是未请求的状态推进尝试，必须按协议违规关闭连接。
-            var error = new ProtocolErrorDto
-            {
-                Command = PacketCommand.ResumeResponse,
-                ErrorCode = TcpProtocolErrorCode.ProtocolViolation.ToString(),
-                ErrorMessage = "收到未请求的 ResumeResponse",
-                IsFatal = true,
-                RetryAfterMs = response?.RetryAfterMs
-            };
-            ProtocolError?.Invoke(this, error);
+            var generation = Volatile.Read(ref _connectionGeneration);
+            var state = Volatile.Read(ref _resumeState);
 
-            var exception = new ProtocolRequestException(error);
-            Volatile.Read(ref _handshakeState)?.Tcs.TrySetException(exception);
-            Volatile.Read(ref _authState)?.Tcs.TrySetException(exception);
-            _ = DisconnectAsync(error.ErrorMessage, CancellationToken.None);
+            // 本代连接未发起 Resume（无在途请求或代际不符）：任何 ResumeResponse 都是
+            // 未请求的状态推进尝试，必须按协议违规关闭连接（fail-closed 不变）。
+            if (state is null || state.Generation != generation)
+            {
+                var error = new ProtocolErrorDto
+                {
+                    Command = PacketCommand.ResumeResponse,
+                    ErrorCode = TcpProtocolErrorCode.ProtocolViolation.ToString(),
+                    ErrorMessage = "收到未请求的 ResumeResponse",
+                    IsFatal = true,
+                    RetryAfterMs = response?.RetryAfterMs
+                };
+                ProtocolError?.Invoke(this, error);
+
+                var exception = new ProtocolRequestException(error);
+                Volatile.Read(ref _handshakeState)?.Tcs.TrySetException(exception);
+                Volatile.Read(ref _authState)?.Tcs.TrySetException(exception);
+                _ = DisconnectAsync(error.ErrorMessage, CancellationToken.None);
+                return;
+            }
+
+            if (response is null)
+            {
+                FailWithProtocolViolation(
+                    PacketCommand.ResumeResponse,
+                    "ResumeResponse 载荷无法解析，按协议违例关闭连接。");
+                return;
+            }
+
+            if (response.Success && response.UserId > 0)
+            {
+                var result = ResumeAttemptResult.FromSuccess(response);
+                Volatile.Write(ref _lastResumeResult, result);
+                // 首次完成本代 TCS 才推进状态；重复响应不重复触发（与鉴权路径一致）。
+                if (!state.Tcs.TrySetResult(result))
+                    return;
+
+                IsAuthenticated = true;
+                CurrentUserId = response.UserId;
+                Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
+                Authenticated?.Invoke(this, CurrentUserId);
+                return;
+            }
+
+            // Success=false：网关显式拒绝。当前网关实际以 Error 帧表达失败
+            // （见 HandleResolvedError 的映射），此分支为协议防御，同样交给
+            // 协调器按"清 token 回退完整认证"处理。
+            var failure = ResumeAttemptResult.FromFailure(response.FailureKind, response.ResumeToken);
+            Volatile.Write(ref _lastResumeResult, failure);
+            state.Tcs.TrySetResult(failure);
         }
 
         /// <summary>
@@ -1978,6 +2140,27 @@ namespace Core.Services
             // 关联在途请求：完成对应 TCS，调用方自行处理，不弹全局错误。
             if (FailByRequestId(error) || FailByOriginCommand(error))
                 return;
+
+            // Resume 等待阶段：网关以 Error 帧表达 Resume 失败（无 RequestId/OriginCommand）。
+            // 该错误由 ConnectAsync 消费并回退完整认证，不广播 ProtocolError——
+            // 自动回退是预期路径，弹全局错误提示只会制造噪音。
+            var resumeState = Volatile.Read(ref _resumeState);
+            if (resumeState is not null && resumeState.Generation == Volatile.Read(ref _connectionGeneration))
+            {
+                if (TryMapResumeFailureCode(error.ErrorCode, out var kind))
+                {
+                    var failure = ResumeAttemptResult.FromFailure(kind);
+                    Volatile.Write(ref _lastResumeResult, failure);
+                    resumeState.Tcs.TrySetResult(failure);
+                    return;
+                }
+
+                if (error.IsFatal)
+                {
+                    // 致命错误不等握手超时兜底：立即结束本代 Resume 等待并向上传播。
+                    resumeState.Tcs.TrySetException(new ProtocolRequestException(error));
+                }
+            }
 
             // 鉴权阶段：仅连接级/致命错误显式结束鉴权。
             // 普通业务错误与鉴权请求无关，只广播 ProtocolError，继续等待鉴权响应（超时兜底）。
@@ -2127,12 +2310,15 @@ namespace Core.Services
 
             if (response.Success is true && response.UserId.HasValue)
             {
-                // 首次完成本次 TCS 才允许推进状态；重复响应不重复触发。
+                // 状态先行发布、TCS 后完成：TCS 以 RunContinuationsAsynchronously 完成，
+                // 等待方的续延与本线程并发，不得依赖完成顺序观察已认证状态。
+                Volatile.Write(ref _lastIssuedResumeToken, response.ResumeToken);
+                IsAuthenticated = true;
+                CurrentUserId = response.UserId.Value;
+                // 首次完成本次 TCS 才允许推进事件；重复响应不重复触发。
                 if (!state.Tcs.TrySetResult(response))
                     return;
 
-                IsAuthenticated = true;
-                CurrentUserId = response.UserId.Value;
                 Interlocked.Exchange(ref _lastHeartbeatAckTicks, DateTime.UtcNow.Ticks);
                 Authenticated?.Invoke(this, CurrentUserId);
             }
@@ -2164,6 +2350,13 @@ namespace Core.Services
         {
             public required long Generation { get; init; }
             public required TaskCompletionSource<TcpServerHello> Tcs { get; init; }
+        }
+
+        /// <summary>一次带 ResumeToken 的 ClientHello 对应的 ResumeResponse 等待状态。</summary>
+        private sealed class ResumeRequestState
+        {
+            public required long Generation { get; init; }
+            public required TaskCompletionSource<ResumeAttemptResult> Tcs { get; init; }
         }
 
         public string Name => "network";

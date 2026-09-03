@@ -20,5 +20,11 @@ namespace Chat_App.Infrastructure.Models
         /// 读取时用 unchecked((ulong)value) 转回 ulong。
         /// </summary>
         public long? DeviceIdHash { get; set; }
+
+        /// <summary>DPAPI-protected TCP 断线重连 ResumeToken（网关单次使用语义，认证/恢复时轮换）。</summary>
+        public string? ResumeToken { get; set; }
+
+        /// <summary>ResumeToken 颁发/轮换时间（Unix ms）。真实有效期由网关控制，本地只做明显陈旧过滤。</summary>
+        public long? ResumeTokenUpdatedAtMs { get; set; }
     }
 }

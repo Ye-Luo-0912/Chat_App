@@ -331,6 +331,32 @@ Concentus 编+解的自洽链路不受影响）。属第三方库编码器限制
 - 新增 `UnitTests/AccessibilityRenderingTests.cs`（9 项）：根字号映射、主题变体映射、过渡转换器行为；
 - 全量 Unit 188 / Protocol 58 / Integration 224 通过。
 
+#### 进展（断线 Resume：客户端接入，2026-09-04）
+- 旧表述「暂不声明 SessionResume」已作废：客户端 Resume 全链路接入完成（网关侧事务化 Resume 此前已就绪）。
+- `ChatSessionClient`：ClientHello 声明 `GatewayFeature.SessionResume`（`AdvertiseSessionResume` 可关，默认开，
+  与 `AdvertiseBinaryPayload` 同模式）；`ConnectAsync` 新增可选 `resumeToken` 参数并写入 `ClientHello.ResumeToken`；
+  `HandleResumeResponse` 按新语义处理——本代已发起 Resume 时消费响应（成功 → 直接进入已认证状态，
+  失败 → 交协调器回退），未请求 Resume 收到 ResumeResponse 仍按协议违例断连（fail-closed 不变）。
+- 网关契约落地：Resume 成功只回 `ResumeResponse`（无 ServerHello，连接恒 JSON、BinaryPayload 协商位被剥离，
+  客户端同步收敛协商状态）；失败先回 `Error(ResumeFailed/DependencyUnavailable/AccountSuspended)` 再照常发
+  ServerHello，客户端可回退完整认证。
+- 重连状态机（`ChatConnectionCoordinator.ConnectOnceAsync`）：连接后本地有未过期 ResumeToken → 先 Resume；
+  成功 → 跳过 `AuthenticateAsync` 并持久化网关轮换的新 token；`ResumeFailed`/超时 → 清 token 回退完整认证；
+  `DependencyUnavailable` → 保留 token 退避重试；单纯断线（IOException）→ 保留 token 供 TTL 内重连 Resume。
+- Token 持久化：`AuthToken` 表新增 `ResumeToken`（DPAPI 密文落库，与其他令牌同惯例）+ `ResumeTokenUpdatedAtMs`
+  两列（迁移 `20260904090000_AddResumeTokenColumns`），`IDatabaseService` 新增
+  `GetResumeTokenAsync`/`SaveResumeTokenAsync`/`ClearResumeTokenAsync`（本地新鲜度窗口 2 分钟，真实 TTL 由网关裁决）；
+  认证成功颁发/轮换的 token 自动落库，重启后仍可 Resume；显式登出（`DeleteTokenAsync` 清行）与
+  新登录会话（`PersistLoginSessionAsync` 清零残留，防跨账户携带）覆盖生命周期。
+- 新增 `Core/Models/ResumeAttemptResult`（结果快照：Success/FailureKind/轮换 token/SessionId/水位）。
+- 测试：`Protocol.Tests/TcpHandshakeContractTests` 扩展 7 项（成功路径不发 AuthenticationRequest、ClientHello
+  携带 token 与能力位、ResumeFailed/DependencyUnavailable 回退、带内 Success=false、网关忽略 token、
+  关闭开关不声明、未请求 ResumeResponse 仍 ProtocolViolation）；`IntegrationTests/SessionResumeTests` 3 项 +
+  `TcpHandshakeTestServer` Resume 场景帧变体（成功帧 / 失败 Error 帧）；`UnitTests/CoordinatorSessionResumeTests`
+  4 项（协调器状态机 + 真实 SQLite：轮换保存 / 清除回退 / 依赖不可用保留 / 无 token 认证后落库）；
+  `UnitTests/ResumeTokenPersistenceTests` 6 项（保存读取/密文落库/清除/过期过滤/无行忽略/新登录清零/迁移可发现）。
+- 全量 Unit 250 / Protocol 103 / Integration 233 通过。
+
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。

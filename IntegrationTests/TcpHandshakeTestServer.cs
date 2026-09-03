@@ -56,12 +56,65 @@ internal static class TcpHandshakeTestServer
             PayloadFormat = payloadFormat
         });
 
+        return WriteFrame(PacketCommand.ServerHello, body);
+    }
+
+    /// <summary>
+    /// Resume 场景变体：恢复成功帧。网关契约——携带 ResumeToken 的 ClientHello 恢复成功时
+    /// 只发 ResumeResponse（不发 ServerHello），会话直接进入已认证状态。
+    /// </summary>
+    public static byte[] CreateResumeSuccessFrame(
+        long userId,
+        string rotatedToken,
+        string? sessionId = "resume-session",
+        long? lastConversationSequence = 42)
+    {
+        var serializer = new Chat_App.Infrastructure.Serialization.JsonPacketBodySerializer();
+        var body = new ArrayBufferWriter<byte>();
+        serializer.Serialize(body, new ResumeResponse
+        {
+            Success = true,
+            ResumeToken = rotatedToken,
+            UserId = userId,
+            SessionId = sessionId,
+            DeviceId = "integration-test-device",
+            LastConversationSequence = lastConversationSequence
+        });
+
+        return WriteFrame(PacketCommand.ResumeResponse, body);
+    }
+
+    /// <summary>
+    /// Resume 场景变体：恢复失败帧。网关以 Error 表达失败（ResumeFailed/DependencyUnavailable/
+    /// AccountSuspended），随后仍会发 ServerHello，客户端可回退完整认证。
+    /// </summary>
+    public static byte[] CreateResumeFailureErrorFrame(
+        ProtocolErrorCode code = ProtocolErrorCode.ResumeFailed,
+        string message = "resume token invalid or expired",
+        int? retryAfterMs = null)
+    {
+        var serializer = new Chat_App.Infrastructure.Serialization.JsonPacketBodySerializer();
+        var body = new ArrayBufferWriter<byte>();
+        serializer.Serialize(body, new ProtocolErrorFrame
+        {
+            Code = code,
+            Message = message,
+            RetryAfterMs = retryAfterMs
+        });
+
+        return WriteFrame(PacketCommand.Error, body);
+    }
+
+    private static byte[] WriteFrame(PacketCommand command, ArrayBufferWriter<byte> body)
+    {
         var frame = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + body.WrittenCount);
         var packet = new MessagePacket(
-            PacketCommand.ServerHello,
-            new ReadOnlySequence<byte>(body.WrittenMemory));
+            command,
+            body.WrittenCount == 0
+                ? ReadOnlySequence<byte>.Empty
+                : new ReadOnlySequence<byte>(body.WrittenMemory));
         if (!new MessagePacketCodec().TryWrite(packet, frame, out _))
-            throw new InvalidOperationException("无法构造集成测试 ServerHello 帧");
+            throw new InvalidOperationException($"无法构造集成测试帧 {command}");
         return frame.WrittenSpan.ToArray();
     }
 

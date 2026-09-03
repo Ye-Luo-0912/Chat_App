@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Avalonia.Threading;
 using Chat_App.Infrastructure.Persistence;
 using Chat_App.Services;
+using ChatApp.Shared.Protocol.Tcp;
 using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models.DTO;
@@ -143,10 +144,12 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
 
         var serverInfoTask = _databaseService.GetServerInfoAsync();
         var authTokenTask = _databaseService.GetTokenAsync();
-        await Task.WhenAll(serverInfoTask, authTokenTask).ConfigureAwait(false);
+        var resumeTokenTask = _databaseService.GetResumeTokenAsync();
+        await Task.WhenAll(serverInfoTask, authTokenTask, resumeTokenTask).ConfigureAwait(false);
 
         var serverInfo = await serverInfoTask.ConfigureAwait(false);
         var authToken = await authTokenTask.ConfigureAwait(false);
+        var resumeToken = await resumeTokenTask.ConfigureAwait(false);
 
         if (serverInfo is null || authToken is null || string.IsNullOrWhiteSpace(authToken.AccessToken))
         {
@@ -168,21 +171,49 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
             ? unchecked((ulong?)authToken.DeviceIdHash.Value)
             : null;
 
+        // 本次连接是否携带了 ResumeToken（用于异常路径决定是否清理本地 token）。
+        var resumeAttempted = resumeToken is not null;
+
         Interlocked.Increment(ref _connectAttempts);
         var sw = Stopwatch.StartNew();
         try
         {
             Log.Information(
-                "正在连接 TCP 服务器: {Server}:{Port} (attempt={Attempt})...",
+                "正在连接 TCP 服务器: {Server}:{Port} (attempt={Attempt}, resume={Resume})...",
                 serverInfo.ServerIpAddress,
                 serverInfo.ServerPort,
-                _attempt + 1);
+                _attempt + 1,
+                resumeAttempted);
 
-            await _chatSessionClient.ConnectAsync(serverInfo, ct).ConfigureAwait(false);
-
-            Status = ChatConnectionStatus.Authenticating;
+            // 会话凭据先行暂存：Resume 成功时 Authenticated 事件在 ConnectAsync 内同步触发，
+            // OnAuthenticated 依赖这两个字段（与完整认证路径同一约定）。
             _pendingSessionId = authToken.SessionId;
             _pendingDeviceIdHash = deviceIdHash;
+
+            // 本地有未过期 token 时走 Resume 优先；无 token（或被 AdvertiseSessionResume 关闭）
+            // 时 ConnectAsync 退化为普通握手，随后完整认证。
+            await _chatSessionClient.ConnectAsync(serverInfo, ct, resumeToken).ConfigureAwait(false);
+
+            if (resumeAttempted)
+            {
+                if (_chatSessionClient.IsAuthenticated)
+                {
+                    // Resume 成功：Authenticated 事件链已建立状态（Connected/心跳/会话戳），
+                    // 跳过 AuthenticateAsync，只做收尾（持久化轮换 token + 指标）。
+                    await FinalizeResumeAsync(userId, authToken.SessionId, sw.Elapsed).ConfigureAwait(false);
+                    return;
+                }
+
+                // 未恢复（网关忽略 token 或明确拒绝）：默认清除本地 token，回退完整认证；
+                // DependencyUnavailable 除外——网关语义为依赖暂不可用，保留 token 退避后重试。
+                var failureKind = _chatSessionClient.LastResumeResult?.FailureKind;
+                if (failureKind != ResumeFailureKind.DependencyUnavailable)
+                    await _databaseService.ClearResumeTokenAsync().ConfigureAwait(false);
+                Log.Information("Resume 未成功（kind={Kind}），回退完整认证",
+                    failureKind?.ToString() ?? "NotAttempted");
+            }
+
+            Status = ChatConnectionStatus.Authenticating;
             await _chatSessionClient.AuthenticateAsync(
                     authToken.AccessToken,
                     userId,
@@ -190,15 +221,60 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
                     deviceIdHash,
                     ct)
                 .ConfigureAwait(false);
+
+            // 认证成功：持久化网关颁发的 ResumeToken（可能轮换）。网关未颁发说明 Resume
+            // 未启用或不可用，清除残留 token，避免下次重连携带注定失败的旧值。
+            var issuedResumeToken = _chatSessionClient.LastIssuedResumeToken;
+            if (string.IsNullOrWhiteSpace(issuedResumeToken))
+                await _databaseService.ClearResumeTokenAsync().ConfigureAwait(false);
+            else
+                await _databaseService.SaveResumeTokenAsync(issuedResumeToken).ConfigureAwait(false);
+
             // 会话代数：每次成功鉴权 +1（跨连接误关闭诊断：新代会话的迟到异常必须忽略）
             Interlocked.Increment(ref _sessionGeneration);
             _connectLatency.Add(sw.Elapsed);
         }
-        catch
+        catch (Exception ex)
         {
+            // Resume 尝试失败且连接不可用（无法在本连接回退认证）：仅明确拒绝
+            // （token 无效/账号冻结）或网关应答超时时清理本地 token；
+            // 单纯断线（IOException 等）保留 token，供下次重连在 TTL 内重试 Resume。
+            if (resumeAttempted
+                && (ex is TimeoutException
+                    || _chatSessionClient.LastResumeResult is { Success: false, FailureKind: ResumeFailureKind.InvalidToken or ResumeFailureKind.UserFrozen }))
+            {
+                await _databaseService.ClearResumeTokenAsync().ConfigureAwait(false);
+            }
+
             Interlocked.Increment(ref _connectFailures);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Resume 成功收尾：持久化网关轮换的新 token（单次使用语义，旧 token 已失效），
+    /// 并以服务端返回的会话 Id 校正会话戳（OnAuthenticated 已用本地暂存值先行建立）。
+    /// </summary>
+    private async Task FinalizeResumeAsync(long userId, string? localSessionId, TimeSpan elapsed)
+    {
+        var result = _chatSessionClient.LastResumeResult;
+        if (result is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(result.ResumeToken))
+                await _databaseService.SaveResumeTokenAsync(result.ResumeToken).ConfigureAwait(false);
+
+            if (!string.IsNullOrEmpty(result.SessionId) && result.SessionId != localSessionId)
+            {
+                _pendingSessionId = result.SessionId;
+                _currentUserState.SetAuthenticatedSession(
+                    userId, _currentUserState.UserName, _pendingSessionId, _pendingDeviceIdHash,
+                    _chatSessionClient.ConnectionGeneration);
+            }
+        }
+
+        // 会话代数：恢复出的会话同样推进连接代际计数（语义与完整鉴权一致）。
+        Interlocked.Increment(ref _sessionGeneration);
+        _connectLatency.Add(elapsed);
     }
 
     private void OnAuthenticated(object? sender, long userId)
