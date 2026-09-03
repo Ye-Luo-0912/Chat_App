@@ -57,6 +57,10 @@
 3. 发送前确认附件为 `Available`，使用 client message id 与 attachment id 幂等合并本地消息、ACK 和服务端回声；应用重启后不得重复上传或重复发送。
 4. 指标只记录低基数的录音/上传/播放结果、duration 与错误分类，不记录音频内容、对象地址、token 或联系人隐私。
 
+> 端到端联调二轮（2026-08-30）：历史侧语音元数据已修复（Realtime 附件绑定链路写入语音 6 列 + Enrich 回查带出，VoiceE2E 41/0，BinE2E 12/12，CallE2E 27/27 全绿，已部署 relgate）。**客户端跟进项已完成（2026-08-31）**：`SendChatMessageAsync` 增加可选 `attachments`（AttachmentRefDto）参数；outbox 上行时按 ClientMessageId 回查 LocalMessage.AttachmentsJson 携带 refs（仅带附件消息触发回查，文本消息零开销），录音/普通附件消息的 wire 上行即携带语音元数据——网关写入附件注册表，历史重建即有来源。UnitTests 233 / Protocol.Tests 96 全绿。
+
+端到端联调（2026-08-30，relgate 真栈 + `.tmp-voice-e2e`）：实时路径语音元数据双格式存活一致；发现并修复服务端 presign 缺 audio/wav；剩余缺口为历史路径语音元数据丢失（Server/Realtime 落库侧），详见 Shared docs/NEXT-STAGE.md 的 VOICE-MSG-2 节。
+
 **Client consumer fixture 已完成**：协议包升至 `ChatApp.Protocol.Tcp 0.5.3`（含语音元数据字段），
 源生成 `ChatJsonContext` 自动获得语音字段支持；新增 `VoiceAttachmentConsumerFixtureTests` 覆盖
 语音附件经 `AttachmentJson` 的序列化往返、旧客户端（无语音字段）载荷反序列化与未知字段容忍。
@@ -330,6 +334,7 @@ Concentus 编+解的自洽链路不受影响）。属第三方库编码器限制
 ## 支撑项
 
 - `BIN-INTEGRATION-3`：Shared 完成所需真实 schema 后，Client 只接入共享 encoder/decoder。握手保持 JSON，协商后连接级固定格式；不得在 Client 复制 schema、持有公共 pointer 实现或让 borrowed view 跨 `await`。
+  > 状态（2026-08-30）：**已完成接入**。`ChatSessionClient` 在 ClientHello 声明 `GatewayFeature.BinaryPayload`（`AdvertiseBinaryPayload` 可关，默认开），按 `ServerHello.PayloadFormat` 精确匹配 `json`/`chatapp-bin-v1` 固定连接格式（未知值协议违例断连）；`SendPacketAsync`/`RoutePacket` 按协商格式分流，握手与 ServerHello 恒 JSON；新增 `Core/Protocol/Binary/BinaryPayloadMapper`（54 对客户端 DTO ↔ 共享规范 DTO 双向映射 + 11 个共享类型直通命令，DateTime↔Unix ms、枚举按数值核对），JSON 主链路零改动。消费共享包 `ChatApp.Protocol.Tcp.Binary.Schemas` 0.5.4（本地 feed 的 Protocol.Tcp 0.5.3 为残缺旧构建，已弃用）。测试：Protocol 96 / Unit 207 / Integration 228 全绿（含协商/回退/双向 codec/RequestId 路由二进制端到端）。JSON fallback 必须保持可用：服务端回应 json 时行为与旧版完全一致。
 - QUIC：不在本阶段实现。裸 UDP 不会减少仍然保留的 TCP session 状态；语音媒体由 WebRTC 媒体面承担，控制面继续保留 TCP 回退。
 - 性能：先用 profiler 或分配数据证明功能链路存在热点，再做微基准和 5–20 分钟同构短测；不为理论收益重写稳定路径。
 
