@@ -578,21 +578,48 @@
       "core": {
         "type": "Project",
         "dependencies": {
-          "ChatApp.Contracts.Http": "[0.3.0, )",
-          "ChatApp.Protocol.Tcp": "[0.5.3, )"
+          "ChatApp.Contracts.Http": "[0.5.5, )",
+          "ChatApp.Protocol.Tcp": "[0.5.4, )",
+          "ChatApp.Protocol.Tcp.Binary.Schemas": "[0.5.4, )"
         }
+      },
+      "ChatApp.Binary.Core": {
+        "type": "CentralTransitive",
+        "requested": "[0.5.4, )",
+        "resolved": "0.5.4",
+        "contentHash": "s1aMf9iRz5OCV2DR1ih0902vuHk4ir+hk0PlJx65EPiNhd2DO37voRTEMzAEMH5Ff7kWKkGMqPPxb5sd7QhZJQ=="
       },
       "ChatApp.Contracts.Http": {
         "type": "CentralTransitive",
-        "requested": "[0.3.0, )",
-        "resolved": "0.3.0",
-        "contentHash": "vycL6+N0x/BDaja1O9RA697CNR5CtTMDqNZB9W8PobIC3azZdnqYq8ocMG8Gxzkhmkdv20sYB98nxAVf6dNKhA=="
+        "requested": "[0.5.5, )",
+        "resolved": "0.5.5",
+        "contentHash": "dll0UBe/rMWLTr2yL9xBCvvwhLt3bDQfEJgF40tvvxM7esSNgrYZ7Du0FaZe81UWtTGzr5KMWkmrFamGGi6w2w=="
       },
       "ChatApp.Protocol.Tcp": {
         "type": "CentralTransitive",
-        "requested": "[0.5.3, )",
-        "resolved": "0.5.3",
-        "contentHash": "uxcuHMPGhBrqilqGOrpXC8YQk7JJu4uYXHddsL+uNXPawhu7+8DPrPi6RdvIFYiSm5VA5jptuQmFMmsXh2sQ3g=="
+        "requested": "[0.5.4, )",
+        "resolved": "0.5.4",
+        "contentHash": "zipP+w1vQfNkj5k1vAmFBVhAQN6I/CCoLEiDgOYfhoQ6smO6PRuFo9bVQVcAUmUNlJYMjdNdecPkeqXzVttknQ=="
+      },
+      "ChatApp.Protocol.Tcp.Binary": {
+        "type": "CentralTransitive",
+        "requested": "[0.5.4, )",
+        "resolved": "0.5.4",
+        "contentHash": "gbgPt3GqOhW3hAoZnHVgI6NrITI4D/BVVJMQ503o/3Or1tiRxrmW3Fst6/J1rno8x59Gnku4VCuIWxVWiCM26A==",
+        "dependencies": {
+          "ChatApp.Binary.Core": "0.5.4"
+        }
+      },
+      "ChatApp.Protocol.Tcp.Binary.Schemas": {
+        "type": "CentralTransitive",
+        "requested": "[0.5.4, )",
+        "resolved": "0.5.4",
+        "contentHash": "wj3AiKeM7Ptwcq/xhR/HzTt6vJ5j0cgbrtN8I63FrzfsvyFK2/kTo34lmDCCy9XXzGvlfy56U4i3qu62MsASLw==",
+        "dependencies": {
+          "ChatApp.Binary.Core": "0.5.4",
+          "ChatApp.Protocol.Tcp": "0.5.4",
+          "ChatApp.Protocol.Tcp.Binary": "0.5.4"
+        }
       },
       "Microsoft.Extensions.Configuration": {
         "type": "CentralTransitive",

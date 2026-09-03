@@ -307,6 +307,16 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                         var sw = Stopwatch.StartNew();
                         try
                         {
+                            // VOICE-MSG-2：带附件的消息回查本地消息行的附件 ref（含语音元数据）随 wire 上行，
+                            // 网关据此写入附件注册表供历史重建；文本消息零额外查询。
+                            IReadOnlyList<AttachmentRefDto>? uplinkRefs = null;
+                            if (!string.IsNullOrWhiteSpace(entry.AttachmentIdsJson))
+                            {
+                                var refsJson = await _db.GetLocalMessageAttachmentsJsonAsync(
+                                    entry.OwnerUserId, entry.ClientMessageId).ConfigureAwait(false);
+                                uplinkRefs = AttachmentJson.Deserialize(refsJson);
+                            }
+
                             await _chatSession.SendChatMessageAsync(
                                 entry.TargetUserId ?? 0,
                                 entry.Content,
@@ -319,6 +329,7 @@ public sealed class OutboxProcessor : IDisposable, IMetricsSource
                                 entry.ForwardedFromPreview,
                                 entry.ClientMessageId,
                                 conversationId: entry.ConversationId,
+                                attachments: uplinkRefs,
                                 ct: _cts.Token).ConfigureAwait(false);
 
                             // 已上行成功（transport 写入）：保持 Sending，等待 MessageAck 推进 Sent（acked 计数）。

@@ -60,6 +60,20 @@ public class DatabaseService(
         return false;
     }
 
+    /// <summary>
+    /// VOICE-MSG-2：按 ClientMessageId 回查本地消息的附件 ref JSON（含语音元数据），
+    /// 供 outbox 上行时携带到 wire；仅带附件的消息才会被调用。
+    /// </summary>
+    public async Task<string?> GetLocalMessageAttachmentsJsonAsync(long ownerUserId, string clientMessageId)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(None);
+        return await db.Messages
+            .AsNoTracking()
+            .Where(m => m.OwnerUserId == ownerUserId && m.ClientMessageId == clientMessageId)
+            .Select(m => m.AttachmentsJson)
+            .FirstOrDefaultAsync(None);
+    }
+
     public async Task<List<LocalFriend>> GetFriendsAsync(long ownerUserId)
     {
         await using var db = await contextFactory.CreateDbContextAsync(None);

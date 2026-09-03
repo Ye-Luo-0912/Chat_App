@@ -119,6 +119,9 @@ public interface IDatabaseService
     /// </summary>
     Task EnqueueOutboxWithMessageAsync(LocalOutboxMessage outbox, LocalMessage message);
 
+    /// <summary>VOICE-MSG-2：按 ClientMessageId 回查本地消息附件 ref JSON（含语音元数据），供 outbox 上行携带。</summary>
+    Task<string?> GetLocalMessageAttachmentsJsonAsync(long ownerUserId, string clientMessageId);
+
     /// <summary>
     /// 更新 Outbox 状态并推进重试元数据。
     /// 仅当 status == Failed 时递增 RetryCount 并设置 NextRetryAt（指数退避 + jitter）。
