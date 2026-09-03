@@ -778,7 +778,7 @@ public class ChatViewModel : ViewModelBase, IDisposable
 
         IsIncomingCall = incoming;
         IsCallActive = hasActive && call!.State == CallStateDto.Active;
-        IncomingCallerName = incoming ? PeerNameOf(call.PeerUserId) : string.Empty;
+        IncomingCallerName = incoming ? PeerNameOf(call!.PeerUserId) : string.Empty;
         CallStatusText = hasActive
             ? (call!.State == CallStateDto.Active ? "通话中…" : "呼叫中…")
             : string.Empty;

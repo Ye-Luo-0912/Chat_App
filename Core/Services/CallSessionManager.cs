@@ -48,7 +48,7 @@ public sealed class CallSessionManager : ICallSessionManager
     public TimeSpan RingingTimeout { get; set; } = TimeSpan.FromSeconds(45);
 
     /// <summary>媒体面工厂：每个通话创建对应媒体会话；缺省为 null（仅控制面，不建媒体）。</summary>
-    public Func<string, ICallMediaSession>? MediaFactory { get; set; }
+    public Func<string, ICallMediaSession?>? MediaFactory { get; set; }
 
     public event EventHandler<CallSession>? IncomingCall;
     public event EventHandler<CallSession>? CallStateChanged;

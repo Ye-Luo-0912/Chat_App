@@ -15,6 +15,10 @@ using SyncBootstrapResponseDto = ChatApp.Shared.Protocol.Tcp.SyncBootstrapRespon
 using ConversationSyncWatermarkDto = ChatApp.Shared.Protocol.Tcp.ConversationSyncWatermark;
 using RelationshipSyncWatermarkDto = ChatApp.Shared.Protocol.Tcp.RelationshipSyncWatermark;
 
+// 测试桩声明全部接口事件但从不触发属预期（CS0067）：仅实现接口成员以满足编译。
+#pragma warning disable CS0067
+
+
 namespace UnitTests;
 
 /// <summary>
@@ -765,7 +769,7 @@ public sealed class CallSessionStateMachineTests
             => Task.CompletedTask;
         public Task DisconnectAsync(string? reason = null, CancellationToken ct = default) => Task.CompletedTask;
         public Task SendHeartbeatAsync(CancellationToken ct = default) => Task.CompletedTask;
-        public Task<string> SendChatMessageAsync(long targetUserId, string? content, IReadOnlyList<string>? attachmentIds = null, string? replyToMessageId = null, long? replyToSenderUserId = null, string? replyToPreview = null, string? forwardedFromMessageId = null, long? forwardedFromSenderUserId = null, string? forwardedFromPreview = null, string? clientMessageId = null, string? conversationId = null, IReadOnlyList<long>? mentionedUserIds = null, CancellationToken ct = default)
+        public Task<string> SendChatMessageAsync(long targetUserId, string? content, IReadOnlyList<string>? attachmentIds = null, string? replyToMessageId = null, long? replyToSenderUserId = null, string? replyToPreview = null, string? forwardedFromMessageId = null, long? forwardedFromSenderUserId = null, string? forwardedFromPreview = null, string? clientMessageId = null, string? conversationId = null, IReadOnlyList<long>? mentionedUserIds = null, IReadOnlyList<global::ChatApp.Shared.Protocol.Tcp.TcpAttachmentRef>? attachments = null, CancellationToken ct = default)
             => throw new NotSupportedException();
         public Task<ConversationListResponseDto> QueryConversationListAsync(int limit = 50, bool? beforeIsPinned = null, long? beforePinnedAtMs = null, long? beforeLastMessageAtMs = null, string? beforeConversationId = null, CancellationToken ct = default)
             => throw new NotSupportedException();
