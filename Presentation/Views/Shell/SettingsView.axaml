@@ -39,6 +39,62 @@
                     Foreground="#991B1B"/>
         </StackPanel>
 
+        <!-- 语音与缓存（VOICE-MSG-3）：输出设备路由 + 缓存占用/清理 -->
+        <Border Background="White"
+                CornerRadius="12"
+                Padding="12"
+                BorderBrush="#E2E8F0"
+                BorderThickness="1"
+                Margin="0 0 12 12"
+                DockPanel.Dock="Top">
+            <StackPanel>
+                <TextBlock Text="语音与缓存"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Margin="4 4 4 12"
+                           Foreground="#1E293B"/>
+                <Grid ColumnDefinitions="Auto,*" Margin="4 6">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="音频输出设备"
+                                   FontWeight="SemiBold"
+                                   Foreground="#0F172A"/>
+                        <TextBlock Text="语音播放使用的输出设备（下次播放生效）"
+                                   FontSize="12"
+                                   Foreground="#64748B"/>
+                    </StackPanel>
+                    <ComboBox Grid.Column="1"
+                              ItemsSource="{Binding AudioOutputDevices}"
+                              SelectedItem="{Binding SelectedAudioOutputDevice}"
+                              HorizontalAlignment="Right"
+                              VerticalAlignment="Center"
+                              MinWidth="160">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="vm:AudioOutputDeviceOption">
+                                <TextBlock Text="{Binding DisplayName}"/>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </Grid>
+                <Grid ColumnDefinitions="Auto,*" Margin="4 6">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="语音缓存"
+                                   FontWeight="SemiBold"
+                                   Foreground="#0F172A"/>
+                        <TextBlock Text="{Binding VoiceCacheUsageDisplay}"
+                                   FontSize="12"
+                                   Foreground="#64748B"/>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Content="清除语音缓存"
+                            Command="{Binding ClearVoiceCacheCommand}"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Padding="10 6"
+                            CornerRadius="8"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+
         <Border Background="White"
                 CornerRadius="12"
                 Padding="12"

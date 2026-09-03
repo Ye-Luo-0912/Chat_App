@@ -120,13 +120,18 @@ public partial class App : Application
             .AddSingleton<ISettingsService, SettingsService>()
             .AddSingleton<IAccessibilityService, AccessibilityService>()
             .AddSingleton<AccessibilityThemeApplier>()
-            .AddSingleton<IAttachmentStorageService, AttachmentStorageService>()
+            .AddSingleton<IAttachmentStorageService>(sp => new AttachmentStorageService(
+                sp.GetRequiredService<ICurrentUserContext>(),
+                // VOICE-MSG-3：语音/附件缓存容量上限可经 Voice:CacheMaxMegabytes（MB）配置，
+                // 未配置/非法值回退默认 512MB。
+                maxCacheBytes: ReadCacheMaxBytes(configuration)))
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<IAttachmentThumbnailService, AttachmentThumbnailService>()
             .AddSingleton<IThumbnailImageCodec, SkiaThumbnailImageCodec>()
             .AddSingleton<IAttachmentDownloadService, AttachmentDownloadService>()
             .AddSingleton<AttachmentRecoveryService>()
             .AddSingleton<DiagnosticsService>()
+            .AddSingleton<IAudioOutputDeviceEnumerator, WaveOutDeviceEnumerator>()
             .AddSingleton<IAudioPlayer, PcmAudioPlayer>()
             // CALL-E2E-2：通话会话管理器（控制面状态机编排 + 媒体面抽象注入点）。
             // 依赖 IChatSessionClient（wire 信令）与 ICurrentUserContext（当前用户）。
@@ -213,6 +218,23 @@ public partial class App : Application
     {
         client.DefaultRequestHeaders.TryAddWithoutValidation("X-Device-Id", device.DeviceId);
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", device.UserAgent);
+    }
+
+    /// <summary>
+    /// 读取语音/附件缓存容量上限（Voice:CacheMaxMegabytes，单位 MB）。
+    /// 未配置/非法（≤0）回退 null（AttachmentStorageService 默认 512MB）。
+    /// </summary>
+    private static long? ReadCacheMaxBytes(IConfiguration configuration)
+    {
+        try
+        {
+            var megabytes = configuration.GetValue<long?>("Voice:CacheMaxMegabytes");
+            return megabytes is > 0 ? megabytes.Value * 1024 * 1024 : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

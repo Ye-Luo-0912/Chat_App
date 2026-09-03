@@ -275,6 +275,21 @@ Concentus 编+解的自洽链路不受影响）。属第三方库编码器限制
   `.partial` 在途文件豁免、`cache.version` 标记文件保护、哈希校验失败不落盘完整缓存、路径安全与缓存命中；
 - 全量 Unit 150 / Protocol 58 / Integration 217 通过。
 
+#### 进展（语音输出路由与缓存维护，VOICE-MSG-3）
+- 音频输出路由（耳机 ⇄ 扬声器）：`IAudioPlayer` 新增 `GetOutputDevices`/`SelectOutputDevice`/`SelectedOutputDeviceId`，
+  切换只影响下一次 Play（不热切正在播放）；`PcmAudioPlayer` 经 `IAudioOutputDeviceEnumerator` 抽象枚举
+  WaveOut 设备（NAudio 2.2.1 移除了 `WaveOut.DeviceCount`，实现直接 P/Invoke winmm），
+  无音频设备/非 Windows 平台优雅降级为空列表；deviceId=null/非法/越界一律回退系统默认；
+- 设备偏好持久化到 `ClientSettings.AudioOutputDeviceId`（SQLite 键值 `audio_output_device_id`，无需迁移）：
+  设置页切换即写即生效；`MessageViewModel` 在每次进程首次播放前回放持久化偏好；
+- 缓存治理增强：淘汰目标改为回落到上限的 ~80%（滞后带），新增近期访问保护窗口（默认 10 分钟，窗口内
+  访问过的文件不删，覆盖"正在播放"场景）；容量上限经 `Voice:CacheMaxMegabytes`（appsettings.json，默认 512MB）配置；
+- 设置页新增"语音与缓存"卡片：输出设备下拉、缓存占用"已用/上限"展示（打开设置页时统计，无轮询）、
+  "清除语音缓存"命令（保留 cache.version 与在途 .partial，跳过被播放占用文件，报告释放量）；
+- 新增 `UnitTests/AudioOutputDeviceSelectionTests.cs`（15 项）、`SettingsViewModelVoiceTests.cs`（11 项）、
+  `AttachmentCacheGovernanceTests` 扩至 15 项、`SettingsServiceTests` 扩至 11 项、`VoiceDegradationViewModelTests`
+  扩至 7 项；全量 Unit 289 / Protocol 103 / Integration 233 通过。
+
 #### 进展（同步失败诊断）
 - 新增 `Core/Diagnostics/SyncFailureRecord`：结构化失败记录（机器错误码/信息/发生时间/可重试性）；
 - `ISyncDiagnostics` 扩展 `LastFailure`/`FailCount`/`ConsecutiveFailures`，成功归零连续失败但保留最近失败记录；

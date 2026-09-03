@@ -26,6 +26,7 @@ public sealed class SettingsService : ISettingsService
     private const string KeyFontSize = "a11y_font_size";
     private const string KeyReduceMotion = "a11y_reduce_motion";
     private const string KeyHighContrast = "a11y_high_contrast";
+    private const string KeyAudioOutputDevice = "audio_output_device_id";
 
     private readonly IDbContextFactory<ClientDbContext> _contextFactory;
 
@@ -60,6 +61,9 @@ public sealed class SettingsService : ISettingsService
             settings.HighContrast = highContrast;
         if (TryParseInt(map, KeyFontSize, out var fontSize))
             settings.FontSize = AccessibilityFontSizeExtensions.Coerce(fontSize);
+        // 音频输出偏好：缺省键 = 系统默认（null）；空白值同样视为系统默认。
+        if (map.TryGetValue(KeyAudioOutputDevice, out var rawDevice))
+            settings.AudioOutputDeviceId = string.IsNullOrWhiteSpace(rawDevice) ? null : rawDevice.Trim();
 
         settings.Normalize();
         return settings;
@@ -76,6 +80,7 @@ public sealed class SettingsService : ISettingsService
         normalized.FontSize = settings.FontSize;
         normalized.ReduceMotion = settings.ReduceMotion;
         normalized.HighContrast = settings.HighContrast;
+        normalized.AudioOutputDeviceId = settings.AudioOutputDeviceId;
         normalized.Normalize();
 
         await using var db = await _contextFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
@@ -96,6 +101,8 @@ public sealed class SettingsService : ISettingsService
             (KeyFontSize, ((int)normalized.FontSize).ToString()),
             (KeyReduceMotion, FormatBool(normalized.ReduceMotion)),
             (KeyHighContrast, FormatBool(normalized.HighContrast)),
+            // 系统默认存空串（LocalSetting.Value 非空约定），读取端把空白视为默认。
+            (KeyAudioOutputDevice, normalized.AudioOutputDeviceId ?? string.Empty),
         };
 
         foreach (var (key, value) in writes)

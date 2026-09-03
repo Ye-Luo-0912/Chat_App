@@ -534,12 +534,15 @@ public sealed class CallClientIntegrationTests
     {
         public bool IsPlaying => false;
         public string? CurrentKey => null;
+        public string? SelectedOutputDeviceId { get; private set; }
         public event Action<AudioPlaybackProgress>? Progress;
         public event Action? Stopped;
         public void Play(string key, string wavPath) { }
         public void Pause() { }
         public void Resume() { }
         public void Stop() { }
+        public IReadOnlyList<AudioOutputDevice> GetOutputDevices() => [];
+        public void SelectOutputDevice(string? deviceId) => SelectedOutputDeviceId = deviceId;
         public void Dispose() { }
     }
 

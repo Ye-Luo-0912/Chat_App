@@ -109,6 +109,62 @@ public sealed class VoiceDegradationViewModelTests
         Assert.False(vm.IsUploading);
     }
 
+    // ── 音频输出路由（VOICE-MSG-3）：持久化偏好在播放前应用 ──────────
+
+    [Fact]
+    public async Task PlayVoice_Applies_Persisted_OutputDevice_Before_Play()
+    {
+        var notifications = new FakeNotifications();
+        var player = new FakeAudioPlayer();
+        var settings = new FakeSettingsService { Settings = { AudioOutputDeviceId = "3" } };
+        var user = new StubUserContext { UserId = 7 };
+        var download = new FakeDownload { Result = @"C:\cache\voice.wav" };
+        using var vm = CreateVm(notifications, player, new FakeAttachmentClient(), download,
+            new FakeVoiceRecorder(), settings, user);
+
+        await InvokePlayVoice(vm, NewVoiceAttachment("voice-dev"));
+
+        // 持久化设备在 Play 前生效，且设置每进程只读一次。
+        Assert.Equal("3", player.SelectedOutputDeviceId);
+        Assert.Equal(1, player.PlayCalls);
+        Assert.Equal(1, settings.GetCalls);
+    }
+
+    [Fact]
+    public async Task PlayVoice_Second_Play_Does_Not_Reread_Settings()
+    {
+        var notifications = new FakeNotifications();
+        var player = new FakeAudioPlayer();
+        var settings = new FakeSettingsService { Settings = { AudioOutputDeviceId = "1" } };
+        var user = new StubUserContext { UserId = 7 };
+        var download = new FakeDownload { Result = @"C:\cache\voice.wav" };
+        using var vm = CreateVm(notifications, player, new FakeAttachmentClient(), download,
+            new FakeVoiceRecorder(), settings, user);
+
+        await InvokePlayVoice(vm, NewVoiceAttachment("voice-a"));
+        player.Stop();
+        await InvokePlayVoice(vm, NewVoiceAttachment("voice-b"));
+
+        Assert.Equal(2, player.PlayCalls);
+        Assert.Equal(1, settings.GetCalls);
+        Assert.Equal("1", player.SelectedOutputDeviceId);
+    }
+
+    [Fact]
+    public async Task PlayVoice_Without_Settings_Service_Plays_With_System_Default()
+    {
+        var notifications = new FakeNotifications();
+        var player = new FakeAudioPlayer();
+        var download = new FakeDownload { Result = @"C:\cache\voice.wav" };
+        using var vm = CreateVm(notifications, player, new FakeAttachmentClient(), download, new FakeVoiceRecorder());
+
+        await InvokePlayVoice(vm, NewVoiceAttachment("voice-nodefault"));
+
+        // 无设置服务（降级构造）：不抛异常，不选择任何设备（null = 系统默认），照常播放。
+        Assert.Null(player.SelectedOutputDeviceId);
+        Assert.Equal(1, player.PlayCalls);
+    }
+
     // ── 构造与驱动 ─────────────────────────────────────────────
 
     private static MessageViewModel CreateVm(
@@ -116,7 +172,9 @@ public sealed class VoiceDegradationViewModelTests
         FakeAudioPlayer player,
         FakeAttachmentClient attachments,
         FakeDownload download,
-        FakeVoiceRecorder recorder)
+        FakeVoiceRecorder recorder,
+        ISettingsService? settingsService = null,
+        ICurrentUserContext? currentUserContext = null)
     {
         return new MessageViewModel(
             notifications,
@@ -125,12 +183,13 @@ public sealed class VoiceDegradationViewModelTests
             null!,          // IMessageStore：仅成功路径使用，降级测试不触达
             new InMemoryEventBus(),
             null!,          // IDatabaseService
-            null!,          // ICurrentUserContext
+            currentUserContext!,
             null!,          // IAttachmentStorageService
             download,
             null!,          // IAttachmentThumbnailService
             recorder,
-            player);
+            player,
+            settingsService);
     }
 
     private static async Task InvokePlayVoice(MessageViewModel vm, AttachmentRefDto? attachment)
@@ -188,6 +247,7 @@ public sealed class VoiceDegradationViewModelTests
         public string? CurrentKey { get; private set; }
         public int PlayCalls { get; private set; }
         public int StopCalls { get; private set; }
+        public string? SelectedOutputDeviceId { get; private set; }
 
         public event Action<AudioPlaybackProgress>? Progress;
         public event Action? Stopped;
@@ -196,6 +256,8 @@ public sealed class VoiceDegradationViewModelTests
         public void Pause() { IsPlaying = false; }
         public void Resume() { IsPlaying = true; }
         public void Stop() { StopCalls++; IsPlaying = false; CurrentKey = null; }
+        public IReadOnlyList<AudioOutputDevice> GetOutputDevices() => [];
+        public void SelectOutputDevice(string? deviceId) => SelectedOutputDeviceId = deviceId;
         public void Dispose() { }
     }
 
@@ -245,6 +307,48 @@ public sealed class VoiceDegradationViewModelTests
             if (Exception is not null)
                 throw Exception;
             return Task.FromResult(Result);
+        }
+    }
+
+    /// <summary>内存版设置服务桩：记录 GetAsync 调用次数，验证偏好每进程只应用一次。</summary>
+    internal sealed class FakeSettingsService : ISettingsService
+    {
+        public Core.Settings.ClientSettings Settings { get; set; } = new();
+        public int GetCalls { get; private set; }
+
+        public Task<Core.Settings.ClientSettings> GetAsync(long ownerUserId, CancellationToken ct = default)
+        {
+            GetCalls++;
+            return Task.FromResult(Settings);
+        }
+
+        public Task SetAsync(long ownerUserId, Core.Settings.ClientSettings settings, CancellationToken ct = default)
+        {
+            Settings = settings;
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateAsync(long ownerUserId, Action<Core.Settings.ClientSettings> mutate, CancellationToken ct = default)
+        {
+            mutate(Settings);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>可切换登录态的用户上下文桩。</summary>
+    internal sealed class StubUserContext : ICurrentUserContext
+    {
+        public long Generation { get; set; } = 1;
+        public long? UserId { get; set; }
+        public string? UserName => UserId is { } id ? $"user-{id}" : null;
+        public bool IsAuthenticated => UserId is > 0;
+        public bool HasUserId => UserId is > 0;
+        public UserSessionSnapshot Snapshot => new(UserId ?? 0, Generation, UserName, null, null);
+        public long RequireUserId() => UserId ?? throw new InvalidOperationException("未登录");
+        public bool TryGetUserId(out long id)
+        {
+            id = UserId ?? 0;
+            return UserId is > 0;
         }
     }
 

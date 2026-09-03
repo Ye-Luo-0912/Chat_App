@@ -20,23 +20,36 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     private readonly string _basePath;
     private readonly long _maxCacheBytes;
 
-    // 下载缓存治理：容量上限（默认 512MB，可注入以便测试 LRU 淘汰）与并发下载合并。
+    // 下载缓存治理：容量上限（默认 512MB，可注入/可配置以便测试与个性化 LRU 淘汰）与并发下载合并。
     private const long DefaultMaxCacheBytes = 512L * 1024 * 1024; // 512MB
+    /// <summary>淘汰回落目标系数：删除至总占用 ~80% 上限，形成滞后带避免刚清完又被顶破。</summary>
+    private const double EvictTargetRatio = 0.8;
+    /// <summary>默认播放/近期使用保护窗口：窗口内访问过的文件视为"可能在播放"，不参与淘汰。</summary>
+    private static readonly TimeSpan DefaultRecentAccessProtection = TimeSpan.FromMinutes(10);
     private const int CacheVersion = 2;
     private const string CacheVersionFile = "cache.version";
     // 同一 (Owner, AttachmentId, append) 的并发下载合并：key = 合并键, value = 进行中的写入任务。
     private static readonly ConcurrentDictionary<string, Task<string>> _inFlightDownloads = new();
     // 每账户缓存版本只校验一次。
     private readonly ConcurrentDictionary<long, byte> _cacheVersionChecked = new();
+    private readonly TimeSpan _recentAccessProtection;
 
-    public AttachmentStorageService(ICurrentUserContext currentUserContext, string? basePath = null, long? maxCacheBytes = null)
+    public AttachmentStorageService(
+        ICurrentUserContext currentUserContext,
+        string? basePath = null,
+        long? maxCacheBytes = null,
+        TimeSpan? recentAccessProtection = null)
     {
         _basePath = basePath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ChatApp",
             "Attachments");
-        _maxCacheBytes = maxCacheBytes ?? DefaultMaxCacheBytes;
+        _maxCacheBytes = maxCacheBytes is > 0 ? maxCacheBytes.Value : DefaultMaxCacheBytes;
+        _recentAccessProtection = recentAccessProtection ?? DefaultRecentAccessProtection;
     }
+
+    /// <summary>下载缓存容量上限（字节）。</summary>
+    public long MaxCacheBytes => _maxCacheBytes;
 
     /// <summary>缓存版本失效：版本不匹配时清空下载缓存重建，并清扫崩溃残留的 .partial 半成品。</summary>
     private void EnsureCacheVersion(string downloadsDir)
@@ -338,28 +351,35 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
     }
 
     /// <summary>
-    /// LRU 清理：当下载缓存总大小超过上限时，按最后访问时间最久未用优先删除。
-    /// 活跃 .partial（断点续传在途）不参与淘汰，避免正在下载的文件被删。
-    /// 注：LRU 元数据（缓存路径/大小/访问时间）已可落入 SQLite（LocalAttachment.CachePath），
-    /// 目录扫描仅在超容量时触发一次，作为兜底保持目录与实际一致。
+    /// LRU 清理（VOICE-MSG-3）：当下载缓存总大小超过上限时，按最后访问时间最久未用优先
+    /// 删除，直到回落到上限的 ~80%（滞后带）。触发点为下载完成写入/移动落盘时，无后台轮询。
+    /// 两类豁免：
+    /// 1. 活跃 .partial（断点续传在途）不参与淘汰，避免正在下载的文件被删；
+    /// 2. <see cref="_recentAccessProtection"/> 窗口内访问过的文件不删（简单播放保护：
+    ///    缓存命中/写入都会刷新访问时间，正在播放的语音必在窗口内），待窗口过期后由
+    ///    下一次下载完成触发的清理回收。
+    /// 注：目录扫描仅在超容量时触发一次，作为兜底保持目录与实际一致。
     /// </summary>
     private void EvictIfOverCapacity(long ownerUserId)
     {
         try
         {
             var dir = GetDownloadsDir(ownerUserId);
-            var files = Directory.GetFiles(dir)
-                .Where(f => !Path.GetFileName(f).Equals(CacheVersionFile, StringComparison.Ordinal))
-                .Where(f => !Path.GetFileName(f).EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
-                .Select(f => new FileInfo(f))
-                .Where(f => f.Exists)
+            var files = ListDownloadCacheFiles(dir)
                 .OrderByDescending(f => f.LastAccessTimeUtc)
                 .ToList();
             var total = files.Sum(f => f.Length);
             if (total <= _maxCacheBytes)
                 return;
-            for (var i = files.Count - 1; i >= 0 && total > _maxCacheBytes; i--)
+
+            // 淘汰目标：~80% 上限。
+            var target = (long)(_maxCacheBytes * EvictTargetRatio);
+            var now = DateTime.UtcNow;
+            for (var i = files.Count - 1; i >= 0 && total > target; i--)
             {
+                // 播放/近期使用保护：窗口内访问过的文件跳过（即使最旧），留待下次触发。
+                if (now - files[i].LastAccessTimeUtc < _recentAccessProtection)
+                    continue;
                 try
                 {
                     total -= files[i].Length;
@@ -372,6 +392,66 @@ public sealed class AttachmentStorageService : IAttachmentStorageService
         {
             // 清理失败不阻塞下载
         }
+    }
+
+    /// <summary>统计下载缓存占用（字节）：口径与淘汰一致，不含 cache.version 与 .partial。</summary>
+    public long GetDownloadsCacheSizeBytes(long ownerUserId)
+    {
+        try
+        {
+            return ListDownloadCacheFiles(GetDownloadsDir(ownerUserId)).Sum(f => f.Length);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// 清空下载缓存：保留 cache.version 与 .partial；被占用（播放中）/删除失败的文件跳过。
+    /// 返回实际释放的字节数。
+    /// </summary>
+    public long ClearDownloadsCache(long ownerUserId)
+    {
+        try
+        {
+            var dir = GetDownloadsDir(ownerUserId);
+            var freed = 0L;
+            foreach (var file in Directory.GetFiles(dir))
+            {
+                var name = Path.GetFileName(file);
+                if (name.Equals(CacheVersionFile, StringComparison.Ordinal))
+                    continue;
+                if (name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
+                    continue; // 在途续传半成品不删，避免打断进行中的下载。
+                try
+                {
+                    var length = new FileInfo(file).Length;
+                    File.Delete(file);
+                    freed += length;
+                }
+                catch
+                {
+                    // 文件被播放器占用等：跳过，不打断整体清理。
+                }
+            }
+            return freed;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>列出下载缓存中的完整缓存文件（排除 cache.version 与 .partial）。</summary>
+    private static List<FileInfo> ListDownloadCacheFiles(string downloadsDir)
+    {
+        return Directory.GetFiles(downloadsDir)
+            .Where(f => !Path.GetFileName(f).Equals(CacheVersionFile, StringComparison.Ordinal))
+            .Where(f => !Path.GetFileName(f).EndsWith(".partial", StringComparison.OrdinalIgnoreCase))
+            .Select(f => new FileInfo(f))
+            .Where(f => f.Exists)
+            .ToList();
     }
 
     public long? GetAvailableDiskSpace()

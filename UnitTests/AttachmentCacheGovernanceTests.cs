@@ -23,8 +23,10 @@ public sealed class AttachmentCacheGovernanceTests : IDisposable
 
     public AttachmentCacheGovernanceTests()
     {
-        // 512MB 常量的默认淘汰在测试中不可行，注入小容量上限以确定性驱动 LRU。
-        _storage = new AttachmentStorageService(_ctx, _root, maxCacheBytes: 100);
+        // 512MB 常量的默认淘汰在测试中不可行，注入小容量上限以确定性驱动 LRU；
+        // 同时注入 10s 近期访问保护窗口（默认 10 分钟），使显式回拨访问时间的测试文件可被淘汰。
+        _storage = new AttachmentStorageService(_ctx, _root, maxCacheBytes: 100,
+            recentAccessProtection: TimeSpan.FromSeconds(10));
     }
 
     /// <summary>可切换用户上下文 stub（同账户隔离目录）。</summary>
@@ -155,6 +157,108 @@ public sealed class AttachmentCacheGovernanceTests : IDisposable
     public void ResolvePath_Rejects_Traversal()
     {
         Assert.Throws<SecurityException>(() => _storage.ResolvePath(1001, "../../outside.txt"));
+    }
+
+    // ---- VOICE-MSG-3：80% 回落目标 / 近期访问保护 / 占用统计与手动清理 ----
+
+    [Fact]
+    public void MaxCacheBytes_Reflects_Configured_Limit_And_Default()
+    {
+        Assert.Equal(100, _storage.MaxCacheBytes);
+
+        // 未配置回退默认 512MB；非法值（0/负数）同样回退默认。
+        var defaultPath = Path.Combine(_root, "default-limit");
+        Assert.Equal(512L * 1024 * 1024,
+            new AttachmentStorageService(_ctx, defaultPath).MaxCacheBytes);
+        Assert.Equal(512L * 1024 * 1024,
+            new AttachmentStorageService(_ctx, Path.Combine(_root, "invalid-limit"), maxCacheBytes: -1).MaxCacheBytes);
+    }
+
+    [Fact]
+    public async Task Eviction_Falls_Back_To_About_80_Percent_Of_Limit()
+    {
+        // A(60, 30s) + B(40, 25s) = 100 ≤ 100 不触发；写入 C(40) 后总量 140 > 100：
+        // 淘汰目标为 ~80%（80B），删最旧的 A(60) 后即停 —— 只清到目标，不做全量清空。
+        var a = await WriteFileAsync(1001, "att-80-a", "a.bin", 60, TimeSpan.FromSeconds(30));
+        await WriteFileAsync(1001, "att-80-b", "b.bin", 40, TimeSpan.FromSeconds(25));
+        var c = await WriteFileAsync(1001, "att-80-c", "c.bin", 40);
+
+        Assert.False(File.Exists(a), "最久未用的文件应被淘汰以回落到 80% 目标");
+        Assert.True(File.Exists(c));
+        Assert.InRange(_storage.GetDownloadsCacheSizeBytes(1001), 0, 80);
+    }
+
+    [Fact]
+    public async Task Eviction_Skips_Recently_Accessed_Files_Even_Still_Over_Limit()
+    {
+        // A(10, 30s) 可淘汰；B/C/D 均在 10s 保护窗口内（模拟正在播放/刚使用）：
+        // 删 A 后仍超 80% 目标，但受保护文件全部保留（清理顺延到下一次触发）。
+        var a = await WriteFileAsync(1001, "att-prot-a", "a.bin", 10, TimeSpan.FromSeconds(30));
+        var b = await WriteFileAsync(1001, "att-prot-b", "b.bin", 60, TimeSpan.FromSeconds(5));
+        var c = await WriteFileAsync(1001, "att-prot-c", "c.bin", 60, TimeSpan.FromSeconds(2));
+        var d = await WriteFileAsync(1001, "att-prot-d", "d.bin", 20);
+
+        Assert.False(File.Exists(a), "保护窗口外的旧文件应被淘汰");
+        Assert.True(File.Exists(b), "窗口内文件即使最旧（除已删者）也不应被删");
+        Assert.True(File.Exists(c), "窗口内文件不应被删");
+        Assert.True(File.Exists(d), "刚写入的文件不应被删");
+        Assert.Equal(140, _storage.GetDownloadsCacheSizeBytes(1001));
+    }
+
+    [Fact]
+    public async Task GetDownloadsCacheSize_Excludes_Version_And_Partial()
+    {
+        await WriteFileAsync(1001, "att-size-a", "a.bin", 10);
+        await WriteFileAsync(1001, "att-size-b", "b.bin", 20);
+        WritePartialFile(_storage.GetDownloadsDir(1001), "inflight", 50, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(30, _storage.GetDownloadsCacheSizeBytes(1001));
+        // 其他账户隔离：不串账。
+        Assert.Equal(0, _storage.GetDownloadsCacheSizeBytes(2002));
+    }
+
+    [Fact]
+    public async Task ClearDownloadsCache_Removes_Complete_Files_Keeps_Version_And_Partial()
+    {
+        await WriteFileAsync(1001, "att-clr-a", "a.bin", 10);
+        await WriteFileAsync(1001, "att-clr-b", "b.bin", 20);
+        await WriteFileAsync(1001, "att-clr-c", "c.bin", 30);
+        WritePartialFile(_storage.GetDownloadsDir(1001), "inflight", 50, TimeSpan.FromSeconds(1));
+        var versionPath = Path.Combine(_storage.GetDownloadsDir(1001), "cache.version");
+
+        var freed = _storage.ClearDownloadsCache(1001);
+
+        Assert.Equal(60, freed);
+        Assert.Equal(0, _storage.GetDownloadsCacheSizeBytes(1001));
+        Assert.True(File.Exists(versionPath), "cache.version 标记不应被清除");
+        Assert.True(File.Exists(Path.Combine(_storage.GetDownloadsDir(1001), "inflight.partial")),
+            "在途 .partial 不应被清除（断点续传不中断）");
+    }
+
+    [Fact]
+    public async Task ClearDownloadsCache_Skips_File_Locked_By_Playback()
+    {
+        // 模拟播放器占用：以 FileShare.None 独占打开一个缓存文件。
+        var locked = await WriteFileAsync(1001, "att-lock-a", "a.bin", 40);
+        var free = await WriteFileAsync(1001, "att-lock-b", "b.bin", 40);
+        using var stream = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var freed = _storage.ClearDownloadsCache(1001);
+
+        Assert.False(File.Exists(free), "未占用的文件应被清除");
+        Assert.True(freed >= 40, "至少应释放未占用文件的字节数");
+        if (OperatingSystem.IsWindows())
+        {
+            // Windows 上独占句柄使 File.Delete 抛共享冲突：被播放文件保留。
+            Assert.True(File.Exists(locked), "正在播放（被占用）的文件不应被删除");
+            Assert.Equal(40, freed);
+        }
+    }
+
+    [Fact]
+    public void ClearDownloadsCache_On_Empty_Dir_Returns_Zero()
+    {
+        Assert.Equal(0, _storage.ClearDownloadsCache(2002));
     }
 
     public void Dispose()

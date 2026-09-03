@@ -32,6 +32,13 @@ public sealed class ClientSettings
     /// <summary>是否启用高对比度文本。</summary>
     public bool HighContrast { get; set; }
 
+    // ---- 语音播放（VOICE-MSG-3）----
+    /// <summary>
+    /// 语音播放输出设备偏好（WaveOut 设备序号的十进制字符串）。
+    /// null/空白 = 系统默认；设备被拔出/序号漂移时由播放器回退系统默认。
+    /// </summary>
+    public string? AudioOutputDeviceId { get; set; }
+
     /// <summary>默认空闲自动锁定阈值（分钟）。</summary>
     public const int DefaultAutoLockIdleMinutes = 5;
 
@@ -45,6 +52,9 @@ public sealed class ClientSettings
         if (AutoLockIdleMinutes < MinAutoLockIdleMinutes || AutoLockIdleMinutes > MaxAutoLockIdleMinutes)
             AutoLockIdleMinutes = DefaultAutoLockIdleMinutes;
         FontSize = AccessibilityFontSizeExtensions.Coerce((int)FontSize);
+        AudioOutputDeviceId = string.IsNullOrWhiteSpace(AudioOutputDeviceId)
+            ? null
+            : AudioOutputDeviceId.Trim();
     }
 
     /// <summary>全部采用默认值的设置。</summary>

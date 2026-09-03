@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using Core.Interfaces;
@@ -11,16 +13,31 @@ namespace Chat_App.Infrastructure.Services.Voice;
 /// 通过 <see cref="WaveFileReader"/> 直接喂给 <see cref="WaveOutEvent"/>；用轻量定时器按
 /// 其 Position 上报进度，PlaybackStopped 触发 <see cref="IAudioPlayer.Stopped"/>。
 /// 仅支持标准 PCM WAV（本链路统一 codec=pcm、container=wav）。
+/// 输出设备路由（VOICE-MSG-3）：<see cref="SelectOutputDevice"/> 只影响下一次 Play ——
+/// 正在播放不热切换（重建渲染会打断进度/停止事件流，且收益低）；设备枚举经
+/// <see cref="IAudioOutputDeviceEnumerator"/> 抽象隔离，测试不依赖真实音频设备。
 /// </summary>
 public sealed class PcmAudioPlayer : IAudioPlayer
 {
+    /// <summary>WaveOut 的"系统默认设备"序号（NAudio 约定 -1 = 默认）。</summary>
+    private const int DefaultDeviceNumber = -1;
+
     private readonly object _gate = new();
+    private readonly IAudioOutputDeviceEnumerator _devices;
     private WaveOutEvent? _waveOut;
     private WaveFileReader? _reader;
     private Timer? _progressTimer;
     private string? _currentKey;
     private bool _paused;
     private bool _disposed;
+    private int _selectedDeviceNumber = DefaultDeviceNumber;
+    private string? _selectedDeviceId;
+
+    /// <summary>deviceEnumerator 传 null 时使用真实 WaveOut 枚举（生产默认路径）。</summary>
+    public PcmAudioPlayer(IAudioOutputDeviceEnumerator? deviceEnumerator = null)
+    {
+        _devices = deviceEnumerator ?? new WaveOutDeviceEnumerator();
+    }
 
     public bool IsPlaying
     {
@@ -38,8 +55,49 @@ public sealed class PcmAudioPlayer : IAudioPlayer
         }
     }
 
+    public string? SelectedOutputDeviceId
+    {
+        get
+        {
+            lock (_gate) return _selectedDeviceId;
+        }
+    }
+
     public event Action<AudioPlaybackProgress>? Progress;
     public event Action? Stopped;
+
+    public IReadOnlyList<AudioOutputDevice> GetOutputDevices() => _devices.EnumerateOutputDevices();
+
+    public void SelectOutputDevice(string? deviceId)
+    {
+        lock (_gate)
+        {
+            // null/空白 = 系统默认。
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                ResetToDefaultDevice();
+                return;
+            }
+            if (!int.TryParse(deviceId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number)
+                || number < 0)
+            {
+                // 非法持久化值（损坏/旧版本数据）：优雅回退系统默认，不抛异常。
+                ResetToDefaultDevice();
+                return;
+            }
+
+            var count = _devices.GetDeviceCount();
+            if (count is not null && number >= count)
+            {
+                // 设备越界（已拔出/枚举序漂移）：回退系统默认。
+                ResetToDefaultDevice();
+                return;
+            }
+
+            _selectedDeviceNumber = number;
+            _selectedDeviceId = number.ToString(CultureInfo.InvariantCulture);
+        }
+    }
 
     public void Play(string key, string wavPath)
     {
@@ -52,8 +110,11 @@ public sealed class PcmAudioPlayer : IAudioPlayer
         {
             StopInternal();
 
+            // 快照当前选择的设备：此后到 Init 前的切换顺延到下一次 Play（无热切）。
+            var deviceNumber = _selectedDeviceNumber;
+
             var reader = new WaveFileReader(wavPath);
-            var waveOut = new WaveOutEvent { DesiredLatency = 200 };
+            var waveOut = new WaveOutEvent { DesiredLatency = 200, DeviceNumber = deviceNumber };
             waveOut.PlaybackStopped += OnPlaybackStopped;
             waveOut.Init(reader);
 
@@ -122,6 +183,13 @@ public sealed class PcmAudioPlayer : IAudioPlayer
             waveOut.Dispose();
         }
         reader?.Dispose();
+    }
+
+    /// <summary>回退系统默认设备（调用方须持有 _gate）。</summary>
+    private void ResetToDefaultDevice()
+    {
+        _selectedDeviceNumber = DefaultDeviceNumber;
+        _selectedDeviceId = null;
     }
 
     private void OnProgressTick(object? state)

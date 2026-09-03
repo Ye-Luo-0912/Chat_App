@@ -20,6 +20,7 @@ using Core.Helpers;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
+using Core.Settings;
 using Chat_App.Infrastructure.Models;
 using Chat_App.Infrastructure.Serialization;
 using Chat_App.Infrastructure.Services;
@@ -44,7 +45,12 @@ public class MessageViewModel : ViewModelBase, IDisposable
     private readonly IAttachmentThumbnailService _thumbnailService;
     private readonly IVoiceRecorder _voiceRecorder;
     private readonly IAudioPlayer _audioPlayer;
+    /// <summary>可选：用于读取持久化的音频输出设备偏好（测试/降级场景可为 null）。</summary>
+    private readonly ISettingsService? _settingsService;
     private readonly List<IDisposable> _eventSubscriptions = [];
+
+    /// <summary>持久化音频输出偏好每进程只应用一次（设置页切换会即时覆盖播放器状态）。</summary>
+    private bool _audioOutputPreferenceApplied;
 
     private long CurrPeerId { get; set; }
     private string? CurrConversationId { get; set; }
@@ -332,7 +338,8 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IAttachmentDownloadService downloadService,
         IAttachmentThumbnailService thumbnailService,
         IVoiceRecorder voiceRecorder,
-        IAudioPlayer audioPlayer)
+        IAudioPlayer audioPlayer,
+        ISettingsService? settingsService = null)
     {
         _notificationService = notificationService;
         _chatSession = chatSessionClient;
@@ -342,6 +349,7 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _thumbnailService = thumbnailService;
         _voiceRecorder = voiceRecorder;
         _audioPlayer = audioPlayer;
+        _settingsService = settingsService;
         _messageStore = messageStore;
         _eventBus = eventBus;
         _dbService = dbService;
@@ -2265,7 +2273,34 @@ public class MessageViewModel : ViewModelBase, IDisposable
             return;
         }
 
+        // 重启后首次播放前应用持久化的输出设备偏好（用户在设置页改选时已即时生效，此处兜底）。
+        await ApplyPersistedAudioOutputAsync().ConfigureAwait(true);
+
         _audioPlayer.Play(attachment.AttachmentId, path);
+    }
+
+    /// <summary>
+    /// 把持久化的音频输出设备偏好（<see cref="ClientSettings.AudioOutputDeviceId"/>）应用到播放器。
+    /// 每进程仅执行一次设置读取；读取失败静默回退系统默认，不阻塞播放。
+    /// </summary>
+    private async Task ApplyPersistedAudioOutputAsync()
+    {
+        if (_audioOutputPreferenceApplied)
+            return;
+        _audioOutputPreferenceApplied = true;
+
+        try
+        {
+            if (_settingsService is null || _currentUserContext is null || !_currentUserContext.TryGetUserId(out var owner))
+                return;
+            var settings = await _settingsService.GetAsync(owner).ConfigureAwait(true);
+            _audioPlayer.SelectOutputDevice(settings.AudioOutputDeviceId);
+        }
+        catch (Exception ex)
+        {
+            // 偏好读取失败不阻断播放（回退系统默认），仅记录。
+            Log.Debug(ex, "应用音频输出设备偏好失败，使用系统默认");
+        }
     }
 
     private static string FormatVoiceTime(TimeSpan t)

@@ -53,6 +53,8 @@ public class SettingsServiceTests : IDisposable
         Assert.Equal(Core.Accessibility.AccessibilityFontSize.Standard, s.FontSize);
         Assert.False(s.ReduceMotion);
         Assert.False(s.HighContrast);
+        // 语音输出设备默认（VOICE-MSG-3）：未设置 = 系统默认（null）。
+        Assert.Null(s.AudioOutputDeviceId);
     }
 
     /// <summary>Set 后 Get 往返一致，且 4 个键均落盘（键集固定，写入幂等）。</summary>
@@ -76,7 +78,7 @@ public class SettingsServiceTests : IDisposable
 
         using var ctx = _factory.CreateDbContext();
         var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
-        Assert.Equal(7, rows.Count);
+        Assert.Equal(8, rows.Count);
         Assert.Contains(rows, r => r.Key == "auto_download_attachments");
     }
 
@@ -139,7 +141,7 @@ public class SettingsServiceTests : IDisposable
 
         using var ctx = _factory.CreateDbContext();
         var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
-        Assert.Equal(7, rows.Count);
+        Assert.Equal(8, rows.Count);
     }
 
     /// <summary>无障碍设置往返一致，且新键落盘。</summary>
@@ -184,6 +186,55 @@ public class SettingsServiceTests : IDisposable
 
         var s = await _service.GetAsync(UserA);
         Assert.Equal(Core.Accessibility.AccessibilityFontSize.Standard, s.FontSize);
+    }
+
+    // ---- 语音输出设备偏好（VOICE-MSG-3）----
+
+    /// <summary>输出设备 Id 设置后读取往返一致，且键落盘。</summary>
+    [Fact]
+    public async Task AudioOutputDeviceId_RoundTrips_And_Persists()
+    {
+        await _service.UpdateAsync(UserA, s => s.AudioOutputDeviceId = "2");
+
+        var s = await _service.GetAsync(UserA);
+        Assert.Equal("2", s.AudioOutputDeviceId);
+
+        using var ctx = _factory.CreateDbContext();
+        var rows = await ctx.Settings.Where(x => x.OwnerUserId == UserA).ToListAsync();
+        Assert.Contains(rows, r => r.Key == "audio_output_device_id" && r.Value == "2");
+    }
+
+    /// <summary>空白设备 Id 规整为 null（系统默认）；空白持久化值读取后同样回默认。</summary>
+    [Fact]
+    public async Task AudioOutputDeviceId_Blank_Normalized_To_Null_SystemDefault()
+    {
+        await _service.UpdateAsync(UserA, s => s.AudioOutputDeviceId = "   ");
+        var s = await _service.GetAsync(UserA);
+        Assert.Null(s.AudioOutputDeviceId);
+
+        // 直接写入空白行（模拟遗留数据）→ 读取回退系统默认。
+        using (var ctx = _factory.CreateDbContext())
+        {
+            ctx.Settings.Add(new LocalSetting
+            {
+                OwnerUserId = UserB,
+                Key = "audio_output_device_id",
+                Value = " ",
+                UpdatedAtMs = 1
+            });
+            await ctx.SaveChangesAsync();
+        }
+        var b = await _service.GetAsync(UserB);
+        Assert.Null(b.AudioOutputDeviceId);
+    }
+
+    /// <summary>输出设备偏好按账户隔离。</summary>
+    [Fact]
+    public async Task AudioOutputDeviceId_Is_Isolated_Per_Owner()
+    {
+        await _service.UpdateAsync(UserA, s => s.AudioOutputDeviceId = "1");
+        var b = await _service.GetAsync(UserB);
+        Assert.Null(b.AudioOutputDeviceId);
     }
 
     private sealed class DbContextFactoryStub(SqliteConnection connection) : IDbContextFactory<ClientDbContext>

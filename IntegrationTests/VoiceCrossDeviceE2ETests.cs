@@ -286,6 +286,7 @@ public class VoiceCrossDeviceE2ETests
         public bool IsPlaying { get; private set; }
         public string? CurrentKey { get; private set; }
         public string? PlayedPath { get; private set; }
+        public string? SelectedOutputDeviceId { get; private set; }
         public event Action<AudioPlaybackProgress>? Progress;
         public event Action? Stopped;
 
@@ -306,6 +307,8 @@ public class VoiceCrossDeviceE2ETests
             Stopped?.Invoke();
         }
 
+        public IReadOnlyList<AudioOutputDevice> GetOutputDevices() => [];
+        public void SelectOutputDevice(string? deviceId) => SelectedOutputDeviceId = deviceId;
         public void Dispose() { }
     }
 

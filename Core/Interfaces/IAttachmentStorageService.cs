@@ -66,4 +66,22 @@ public interface IAttachmentStorageService
 
     /// <summary>获取磁盘可用空间（字节）。返回 null 表示无法确定。</summary>
     long? GetAvailableDiskSpace();
+
+    // ---- 缓存治理（VOICE-MSG-3）：占用统计与手动清理 ----
+
+    /// <summary>下载缓存容量上限（字节）。用于设置页"已用/上限"展示与容量告警。</summary>
+    long MaxCacheBytes { get; }
+
+    /// <summary>
+    /// 统计下载缓存当前占用（字节）。口径与容量淘汰一致：不含 cache.version 与 .partial。
+    /// 统计失败返回 0，不抛异常。
+    /// </summary>
+    long GetDownloadsCacheSizeBytes(long ownerUserId);
+
+    /// <summary>
+    /// 清空下载缓存（设置页"清除语音缓存"入口）。保留 cache.version 标记与在途 .partial
+    /// （断点续传不中断）；被占用（如正在播放）或删除失败的文件跳过。
+    /// 返回实际释放的字节数；目录不可访问时返回 0，不抛异常。
+    /// </summary>
+    long ClearDownloadsCache(long ownerUserId);
 }
