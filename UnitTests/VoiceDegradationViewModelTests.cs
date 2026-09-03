@@ -173,7 +173,7 @@ public sealed class VoiceDegradationViewModelTests
 
     // ── 最小测试桩 ────────────────────────────────────────────
 
-    private sealed class FakeNotifications : INotificationService
+    internal sealed class FakeNotifications : INotificationService
     {
         public List<string> Errors { get; } = new();
         public void ShowError(string message, string title = "错误") => Errors.Add(message);
@@ -182,7 +182,7 @@ public sealed class VoiceDegradationViewModelTests
         public void ShowSuccess(string message, string title = "成功") { }
     }
 
-    private sealed class FakeAudioPlayer : IAudioPlayer
+    internal sealed class FakeAudioPlayer : IAudioPlayer
     {
         public bool IsPlaying { get; private set; }
         public string? CurrentKey { get; private set; }
@@ -199,7 +199,7 @@ public sealed class VoiceDegradationViewModelTests
         public void Dispose() { }
     }
 
-    private sealed class FakeAttachmentClient : IAttachmentClientService
+    internal sealed class FakeAttachmentClient : IAttachmentClientService
     {
         public Exception? UploadException { get; set; }
         public List<string> AbandonedIds { get; } = new();
@@ -234,7 +234,7 @@ public sealed class VoiceDegradationViewModelTests
             => throw new NotSupportedException();
     }
 
-    private sealed class FakeDownload : IAttachmentDownloadService
+    internal sealed class FakeDownload : IAttachmentDownloadService
     {
         public Exception? Exception { get; set; }
         public string? Result { get; set; }
@@ -248,7 +248,7 @@ public sealed class VoiceDegradationViewModelTests
         }
     }
 
-    private sealed class FakeVoiceRecorder : IVoiceRecorder
+    internal sealed class FakeVoiceRecorder : IVoiceRecorder
     {
         public bool IsRecording => false;
         public VoiceRecorderOptions Options { get; } = new(16_000, 1);
@@ -260,7 +260,7 @@ public sealed class VoiceDegradationViewModelTests
     }
 
     /// <summary>最小 IChatSessionClient 桩：仅构造期订阅的 4 个事件字段可用，方法体不触达。</summary>
-    private sealed class SessionStub : IChatSessionClient
+    internal sealed class SessionStub : IChatSessionClient
     {
         public bool IsConnected { get; set; }
         public bool IsAuthenticated { get; set; }

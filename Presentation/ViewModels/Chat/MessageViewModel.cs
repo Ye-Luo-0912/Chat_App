@@ -240,6 +240,13 @@ public class MessageViewModel : ViewModelBase, IDisposable
 
     public BatchObservableCollection<Message> Messages { get; } = [];
 
+    // 当前会话历史是否已渲染完成（含空会话）：首次批量加载到达前不显示空态，
+    // 避免切换会话瞬间（ClearMessages → 历史异步加载）"还没有消息"占位闪烁。
+    private bool _historyRendered = true;
+
+    /// <summary>当前会话消息列表为空且历史已加载完成：驱动消息区"还没有消息"空态占位。</summary>
+    public bool IsMessageListEmpty => _historyRendered && Messages.Count == 0;
+
     private readonly Dictionary<string, Message> _messagesByServerId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Message> _messagesByClientId = new(StringComparer.Ordinal);
     private static readonly User EmptyUser = new();
@@ -670,6 +677,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
         _eventSubscriptions.Add(_eventBus.Subscribe<MessageEditedEvent>(OnMessageEditedPersisted));
         _eventSubscriptions.Add(_eventBus.Subscribe<PeerReadWatermarkAdvancedEvent>(OnPeerReadWatermarkAdvanced));
         _eventSubscriptions.Add(_eventBus.Subscribe<ConversationUpdatedEvent>(OnConversationUpdated));
+
+        // 消息集合的任何变化（Add/Clear/Insert/Remove）都同步空态属性。
+        Messages.CollectionChanged += (_, _) => OnPropertyChanged(nameof(IsMessageListEmpty));
     }
 
     private void OnMessagePersisted(MessagePersistedEvent e)
@@ -994,6 +1004,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
         CancelPeerTypingClear();
         ClearMessages();
         // 加载新会话草稿（从 DB 恢复上次未发送的输入）
+        // 历史未加载完成前不显示空态（见 IsMessageListEmpty）。
+        _historyRendered = false;
+        OnPropertyChanged(nameof(IsMessageListEmpty));
         _ = LoadDraftAsync(CurrConversationId, generation, ct);
         ClearPendingAttachment();
         ClearReplyDraft();
@@ -1251,6 +1264,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
                         batch.Add(ui);
                 }
                 Messages.AddRange(batch);
+                // 历史页已渲染（含空会话）：此时才允许显示空态。
+                _historyRendered = true;
+                OnPropertyChanged(nameof(IsMessageListEmpty));
             });
         }
         catch (OperationCanceledException)
@@ -2498,6 +2514,9 @@ public class MessageViewModel : ViewModelBase, IDisposable
         IsPeerTyping = false;
         CancelPeerTypingClear();
         ClearMessages();
+        // 回到初始态：无会话打开，空态判定恢复默认（消息区此时整体隐藏）。
+        _historyRendered = true;
+        OnPropertyChanged(nameof(IsMessageListEmpty));
         NewMessage = string.Empty;
         ClearPendingAttachment();
         ClearReplyDraft();

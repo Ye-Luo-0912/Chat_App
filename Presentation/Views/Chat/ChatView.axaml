@@ -4,30 +4,35 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:Chat_App.Presentation.ViewModels.Chat"
              xmlns:controls="clr-namespace:Chat_App.Presentation.Controls"
+             xmlns:conv="clr-namespace:Chat_App.Presentation.Converters"
              xmlns:models="clr-namespace:Chat_App.Infrastructure.Models;assembly=Infrastructure"
              mc:Ignorable="d"
              x:Class="Chat_App.Presentation.Views.Chat.ChatView"
              x:Name="Root"
              x:DataType="vm:ChatViewModel">
 
+    <UserControl.Resources>
+        <conv:CountIsEmptyConverter x:Key="CountIsEmpty"/>
+    </UserControl.Resources>
+
     <!-- 聊天主布局：左侧好友列表 + 右侧消息区域 -->
-    <Grid ColumnDefinitions="240,*" Background="#F0F2F5">
+    <Grid ColumnDefinitions="240,*" Background="{DynamicResource ChatBgBrush}">
 
         <!-- ===== 左侧：好友列表面板 ===== -->
         <Border Grid.Column="0"
-                Background="White"
+                Background="{DynamicResource SurfaceBrush}"
                 CornerRadius="0"
                 Padding="0">
             <DockPanel>
                 <!-- 顶部：标题和搜索栏 -->
-                <StackPanel DockPanel.Dock="Top" Background="#F9FAFB" Spacing="8">
+                <StackPanel DockPanel.Dock="Top" Background="{DynamicResource SurfaceAltBrush}" Spacing="8">
                     <!-- 标题栏 -->
-                    <Border Background="#3B82F6" Padding="16 12">
+                    <Border Background="{DynamicResource AccentBrush}" Padding="16 12">
                         <Grid ColumnDefinitions="*,Auto">
                             <TextBlock Text="聊天"
                                        FontSize="18"
                                        FontWeight="Bold"
-                                       Foreground="White"
+                                       Foreground="{DynamicResource OnAccentBrush}"
                                        VerticalAlignment="Center"/>
                             <StackPanel Grid.Column="1"
                                         Orientation="Horizontal"
@@ -37,8 +42,8 @@
                                         Command="{Binding OpenCreateGroupPanelCommand}"
                                         Padding="8 4"
                                         FontSize="12"
-                                        Background="#2563EB"
-                                        Foreground="White"
+                                        Background="{DynamicResource AccentStrongBrush}"
+                                        Foreground="{DynamicResource OnAccentBrush}"
                                         CornerRadius="6"
                                         VerticalAlignment="Center"/>
                                 <Button Content="通话"
@@ -46,8 +51,8 @@
                                         CommandParameter="{Binding SelectedConversation}"
                                         Padding="8 4"
                                         FontSize="12"
-                                        Background="#3B82F6"
-                                        Foreground="White"
+                                        Background="{DynamicResource AccentBrush}"
+                                        Foreground="{DynamicResource OnAccentBrush}"
                                         CornerRadius="6"
                                         VerticalAlignment="Center"/>
                                 <Ellipse Width="8" Height="8"
@@ -55,7 +60,7 @@
                                          VerticalAlignment="Center"/>
                                 <TextBlock Text="{Binding ConnectionStatusText}"
                                            FontSize="12"
-                                           Foreground="#E0E7FF"
+                                           Foreground="{DynamicResource OnAccentMutedBrush}"
                                            VerticalAlignment="Center"/>
                             </StackPanel>
                         </Grid>
@@ -63,7 +68,7 @@
 
                     <!-- 创建群聊面板 -->
                     <Border Margin="12 4 12 8"
-                            Background="#EEF2FF"
+                            Background="{DynamicResource InfoSoftBrush}"
                             CornerRadius="8"
                             Padding="12 10"
                             IsVisible="{Binding IsCreatingGroup}">
@@ -71,20 +76,20 @@
                             <TextBlock Text="创建群聊"
                                        FontSize="14"
                                        FontWeight="SemiBold"
-                                       Foreground="#1E3A8A"/>
+                                       Foreground="{DynamicResource InfoTextStrongBrush}"/>
                             <TextBox PlaceholderText="群聊名称"
                                      Text="{Binding GroupTitleInput, Mode=TwoWay}"
                                      FontSize="13"
                                      Padding="8 6"
                                      CornerRadius="6"
-                                     Background="White"
-                                     BorderBrush="#C7D2FE"/>
+                                     Background="{DynamicResource SurfaceBrush}"
+                                     BorderBrush="{DynamicResource InfoBorderBrush}"/>
                             <TextBlock Text="选择成员"
                                        FontSize="12"
-                                       Foreground="#4338CA"/>
+                                       Foreground="{DynamicResource InfoTextBrush}"/>
                             <ListBox ItemsSource="{Binding GroupCreationCandidates}"
                                      MaxHeight="180"
-                                     Background="White"
+                                     Background="{DynamicResource SurfaceBrush}"
                                      CornerRadius="6"
                                      Padding="4">
                                 <ListBox.Styles>
@@ -98,7 +103,7 @@
                                         <CheckBox Content="{Binding DisplayName}"
                                                   IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   FontSize="13"
-                                                  Foreground="#1F2937"/>
+                                                  Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>
@@ -107,15 +112,15 @@
                                         Command="{Binding CreateGroupCommand}"
                                         Padding="14 5"
                                         FontSize="13"
-                                        Background="#3B82F6"
-                                        Foreground="White"
+                                        Background="{DynamicResource AccentBrush}"
+                                        Foreground="{DynamicResource OnAccentBrush}"
                                         CornerRadius="6"/>
                                 <Button Content="取消"
                                         Command="{Binding CancelCreateGroupCommand}"
                                         Padding="14 5"
                                         FontSize="13"
                                         Background="Transparent"
-                                        Foreground="#B91C1C"
+                                        Foreground="{DynamicResource DangerTextBrush}"
                                         CornerRadius="6"/>
                             </StackPanel>
                         </StackPanel>
@@ -128,23 +133,23 @@
                              FontSize="13"
                              Padding="8 6"
                              CornerRadius="6"
-                             BorderBrush="#E5E7EB"
-                             Background="#F3F4F6">
+                             BorderBrush="{DynamicResource DividerBrush}"
+                             Background="{DynamicResource InputBrush}">
                          <TextBox.InnerLeftContent>
-                             <TextBlock Text="🔍" Margin="8 0 4 0" VerticalAlignment="Center" Foreground="#9CA3AF" FontSize="12"/>
+                             <TextBlock Text="🔍" Margin="8 0 4 0" VerticalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}" FontSize="12"/>
                          </TextBox.InnerLeftContent>
                     </TextBox>
 
                     <!-- 转发选目标横幅 -->
                     <Border Margin="12 0 12 8"
-                            Background="#EEF2FF"
+                            Background="{DynamicResource InfoSoftBrush}"
                             CornerRadius="8"
                             Padding="10 8"
                             IsVisible="{Binding IsSelectingForwardTarget}">
                         <Grid ColumnDefinitions="*,Auto">
                             <TextBlock Text="{Binding ForwardHintText}"
                                        FontSize="13"
-                                       Foreground="#4338CA"
+                                       Foreground="{DynamicResource InfoTextBrush}"
                                        VerticalAlignment="Center"
                                        TextWrapping="Wrap"/>
                             <Button Grid.Column="1"
@@ -153,68 +158,84 @@
                                     Padding="10 4"
                                     FontSize="12"
                                     Background="Transparent"
-                                    Foreground="#B91C1C"
+                                    Foreground="{DynamicResource DangerTextBrush}"
                                     VerticalAlignment="Center"/>
                         </Grid>
                     </Border>
                 </StackPanel>
 
-                <!-- 会话列表 (使用 FilteredConversations 绑定) -->
-                <ListBox x:Name="ConversationList"
-                         ItemsSource="{Binding FilteredConversations}"
-                         SelectedItem="{Binding SelectedConversation, Mode=TwoWay}"
-                         Background="White"
-                         Padding="4"
-                         BorderThickness="0">
-                    <ListBox.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <VirtualizingStackPanel/>
-                        </ItemsPanelTemplate>
-                    </ListBox.ItemsPanel>
-                    <ListBox.ItemTemplate>
-                        <DataTemplate DataType="models:LocalConversation">
-                            <controls:FriendsItemControl Margin="0 1">
-                                <controls:FriendsItemControl.ContextMenu>
-                                    <ContextMenu>
-                                        <MenuItem Header="置顶"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).PinConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <MenuItem Header="取消置顶"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnpinConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <Separator/>
-                                        <MenuItem Header="消息免打扰"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).MuteConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <MenuItem Header="关闭免打扰"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnmuteConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <Separator/>
-                                        <MenuItem Header="归档会话"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).ArchiveConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <MenuItem Header="恢复归档"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnarchiveConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <Separator/>
-                                        <MenuItem Header="查看成员"
-                                                  IsVisible="{Binding IsGroup}"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).ShowGroupMembersCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <MenuItem Header="退出群聊"
-                                                  IsVisible="{Binding IsGroup}"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).LeaveGroupCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                        <Separator IsVisible="{Binding IsGroup}"/>
-                                        <MenuItem Header="删除会话"
-                                                  Command="{Binding #Root.((vm:ChatViewModel)DataContext).DeleteConversationCommand}"
-                                                  CommandParameter="{Binding}"/>
-                                    </ContextMenu>
-                                </controls:FriendsItemControl.ContextMenu>
-                            </controls:FriendsItemControl>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                <!-- 会话列表 (使用 FilteredConversations 绑定) + 空态占位 -->
+                <Panel>
+                    <ListBox x:Name="ConversationList"
+                             ItemsSource="{Binding FilteredConversations}"
+                             SelectedItem="{Binding SelectedConversation, Mode=TwoWay}"
+                             Background="{DynamicResource SurfaceBrush}"
+                             Padding="4"
+                             BorderThickness="0">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="models:LocalConversation">
+                                <controls:FriendsItemControl Margin="0 1">
+                                    <controls:FriendsItemControl.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="置顶"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).PinConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="取消置顶"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnpinConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <Separator/>
+                                            <MenuItem Header="消息免打扰"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).MuteConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="关闭免打扰"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnmuteConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <Separator/>
+                                            <MenuItem Header="归档会话"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).ArchiveConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="恢复归档"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).UnarchiveConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <Separator/>
+                                            <MenuItem Header="查看成员"
+                                                      IsVisible="{Binding IsGroup}"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).ShowGroupMembersCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <MenuItem Header="退出群聊"
+                                                      IsVisible="{Binding IsGroup}"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).LeaveGroupCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                            <Separator IsVisible="{Binding IsGroup}"/>
+                                            <MenuItem Header="删除会话"
+                                                      Command="{Binding #Root.((vm:ChatViewModel)DataContext).DeleteConversationCommand}"
+                                                      CommandParameter="{Binding}"/>
+                                        </ContextMenu>
+                                    </controls:FriendsItemControl.ContextMenu>
+                                </controls:FriendsItemControl>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- 空态：无会话（含搜索无结果）时给明确反馈，替代纯空白 -->
+                    <StackPanel HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Spacing="10"
+                                IsVisible="{Binding FilteredConversations.Count, Converter={StaticResource CountIsEmpty}}">
+                        <TextBlock Text="📭"
+                                   FontSize="36"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="暂无会话"
+                                   FontSize="13"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+                </Panel>
             </DockPanel>
         </Border>
 
@@ -222,7 +243,7 @@
         <Border Grid.Column="0"
                 HorizontalAlignment="Right"
                 Width="1"
-                Background="#E5E7EB"/>
+                Background="{DynamicResource DividerBrush}"/>
 
         <!-- ===== 右侧：消息区域 + 群成员面板 ===== -->
         <Grid Grid.Column="1" ColumnDefinitions="*,300">
@@ -231,8 +252,8 @@
                 <Border Margin="12 12 12 0"
                         Padding="12 10"
                         VerticalAlignment="Top"
-                        Background="#EEF2FF"
-                        BorderBrush="#C7D2FE"
+                        Background="{DynamicResource InfoSoftBrush}"
+                        BorderBrush="{DynamicResource InfoBorderBrush}"
                         BorderThickness="1"
                         CornerRadius="8"
                         IsVisible="{Binding IsIncomingCall}">
@@ -242,11 +263,11 @@
                                     Spacing="2">
                             <TextBlock Text="来电"
                                        FontSize="12"
-                                       Foreground="#1E3A8A"/>
+                                       Foreground="{DynamicResource InfoTextStrongBrush}"/>
                             <TextBlock Text="{Binding IncomingCallerName}"
                                        FontSize="14"
                                        FontWeight="SemiBold"
-                                       Foreground="#111827"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
                                        VerticalAlignment="Center"/>
                         </StackPanel>
                         <Button Grid.Column="1"
@@ -255,8 +276,8 @@
                                 Margin="8 0 8 0"
                                 Padding="14 4"
                                 FontSize="12"
-                                Background="#3B82F6"
-                                Foreground="White"
+                                Background="{DynamicResource AccentBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 CornerRadius="6"
                                 VerticalAlignment="Center"/>
                         <Button Grid.Column="2"
@@ -264,8 +285,8 @@
                                 Command="{Binding RejectCallCommand}"
                                 Padding="14 4"
                                 FontSize="12"
-                                Background="#DC2626"
-                                Foreground="White"
+                                Background="{DynamicResource DangerBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 CornerRadius="6"
                                 VerticalAlignment="Center"/>
                     </Grid>
@@ -275,8 +296,8 @@
                 <Border Margin="12 12 12 0"
                         Padding="12 10"
                         VerticalAlignment="Top"
-                        Background="#EFF6FF"
-                        BorderBrush="#3B82F6"
+                        Background="{DynamicResource InfoSoftBrush}"
+                        BorderBrush="{DynamicResource AccentBrush}"
                         BorderThickness="1"
                         CornerRadius="8"
                         IsVisible="{Binding IsCallActive}">
@@ -285,15 +306,15 @@
                                    Text="{Binding CallStatusText}"
                                    FontSize="14"
                                    FontWeight="SemiBold"
-                                   Foreground="#1D4ED8"
+                                   Foreground="{DynamicResource InfoTextStrongBrush}"
                                    VerticalAlignment="Center"/>
                         <Button Grid.Column="1"
                                 Content="挂断"
                                 Command="{Binding EndCallCommand}"
                                 Padding="14 4"
                                 FontSize="12"
-                                Background="#DC2626"
-                                Foreground="White"
+                                Background="{DynamicResource DangerBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 CornerRadius="6"
                                 VerticalAlignment="Center"/>
                     </Grid>
@@ -310,7 +331,7 @@
                                HorizontalAlignment="Center"/>
                     <TextBlock Text="选择左侧会话开始聊天"
                                FontSize="16"
-                               Foreground="#888"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
                                HorizontalAlignment="Center"/>
                 </StackPanel>
 
@@ -325,21 +346,21 @@
 
             <!-- 群成员面板 -->
             <Border Grid.Column="1"
-                    Background="#F8FAFC"
-                    BorderBrush="#E5E7EB"
+                    Background="{DynamicResource SurfaceAltBrush}"
+                    BorderBrush="{DynamicResource DividerBrush}"
                     BorderThickness="1 0 0 0"
                     IsVisible="{Binding IsShowingGroupMembers}">
                 <DockPanel>
                     <Border DockPanel.Dock="Top"
-                            Background="#F1F5F9"
-                            BorderBrush="#E5E7EB"
+                            Background="{DynamicResource SurfaceSubtleBrush}"
+                            BorderBrush="{DynamicResource DividerBrush}"
                             BorderThickness="0 0 0 1"
                             Padding="12 10">
                         <Grid ColumnDefinitions="*,Auto">
                             <TextBlock Text="{Binding GroupMembersTitle}"
                                        FontSize="14"
                                        FontWeight="SemiBold"
-                                       Foreground="#111827"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
                                        VerticalAlignment="Center"/>
                             <Button Grid.Column="1"
                                     Content="✕"
@@ -347,7 +368,7 @@
                                     Padding="8 4"
                                     FontSize="12"
                                     Background="Transparent"
-                                    Foreground="#6B7280"
+                                    Foreground="{DynamicResource TextSecondaryBrush}"
                                     VerticalAlignment="Center"/>
                         </Grid>
                     </Border>
@@ -366,7 +387,7 @@
                         </ListBox.Styles>
                         <ListBox.ItemTemplate>
                             <DataTemplate DataType="vm:GroupMemberUiItem">
-                                <Border Background="#FFFFFF"
+                                <Border Background="{DynamicResource SurfaceBrush}"
                                         CornerRadius="8"
                                         Padding="10 8">
                                     <Grid ColumnDefinitions="Auto,*,Auto">
@@ -374,12 +395,12 @@
                                                 Width="34"
                                                 Height="34"
                                                 CornerRadius="17"
-                                                Background="#E0E7FF"
+                                                Background="{DynamicResource AvatarBrush}"
                                                 VerticalAlignment="Center">
                                             <TextBlock Text="{Binding Initial}"
                                                        FontSize="14"
                                                        FontWeight="SemiBold"
-                                                       Foreground="#4338CA"
+                                                       Foreground="{DynamicResource AvatarTextBrush}"
                                                        HorizontalAlignment="Center"
                                                        VerticalAlignment="Center"/>
                                         </Border>
@@ -390,14 +411,14 @@
                                             <TextBlock Text="{Binding DisplayName}"
                                                        FontSize="13"
                                                        FontWeight="SemiBold"
-                                                       Foreground="#111827"/>
+                                                       Foreground="{DynamicResource TextPrimaryBrush}"/>
                                             <StackPanel Orientation="Horizontal" Spacing="6">
                                                 <TextBlock Text="{Binding RoleText}"
                                                            FontSize="11"
-                                                           Foreground="#6B7280"/>
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
                                                 <TextBlock Text="（我）"
                                                            FontSize="11"
-                                                           Foreground="#3B82F6"
+                                                           Foreground="{DynamicResource AccentBrush}"
                                                            IsVisible="{Binding IsSelf}"/>
                                             </StackPanel>
                                         </StackPanel>
@@ -410,8 +431,8 @@
                                                     CommandParameter="{Binding}"
                                                     FontSize="11"
                                                     Padding="8 3"
-                                                    Background="#EEF2FF"
-                                                    Foreground="#4338CA"
+                                                    Background="{DynamicResource InfoSoftBrush}"
+                                                    Foreground="{DynamicResource InfoTextBrush}"
                                                     CornerRadius="4"
                                                     IsVisible="{Binding CanPromote}"/>
                                             <Button Content="取消管理员"
@@ -419,8 +440,8 @@
                                                     CommandParameter="{Binding}"
                                                     FontSize="11"
                                                     Padding="8 3"
-                                                    Background="#FEF3C7"
-                                                    Foreground="#92400E"
+                                                    Background="{DynamicResource WarnSoftBrush}"
+                                                    Foreground="{DynamicResource WarnTextBrush}"
                                                     CornerRadius="4"
                                                     IsVisible="{Binding CanDemote}"/>
                                             <Button Content="移除"
@@ -428,8 +449,8 @@
                                                     CommandParameter="{Binding}"
                                                     FontSize="11"
                                                     Padding="8 3"
-                                                    Background="#FEE2E2"
-                                                    Foreground="#B91C1C"
+                                                    Background="{DynamicResource DangerSoftBrush}"
+                                                    Foreground="{DynamicResource DangerTextBrush}"
                                                     CornerRadius="4"
                                                     IsVisible="{Binding CanRemove}"/>
                                         </StackPanel>
@@ -445,10 +466,10 @@
                                 Command="{Binding ToggleAddGroupMembersCommand}"
                                 FontSize="13"
                                 Padding="10 6"
-                                Background="#3B82F6"
-                                Foreground="White"
+                                Background="{DynamicResource AccentBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 CornerRadius="6"/>
-                        <Border Background="White"
+                        <Border Background="{DynamicResource SurfaceBrush}"
                                 CornerRadius="8"
                                 Padding="10 8"
                                 IsVisible="{Binding IsAddingGroupMembers}">
@@ -456,10 +477,10 @@
                                 <TextBlock Text="选择好友"
                                            FontSize="12"
                                            FontWeight="SemiBold"
-                                           Foreground="#374151"/>
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
                                 <ListBox ItemsSource="{Binding GroupAddCandidates}"
                                          MaxHeight="140"
-                                         Background="#FFFFFF"
+                                         Background="{DynamicResource SurfaceBrush}"
                                          Padding="2">
                                     <ListBox.Styles>
                                         <Style Selector="ListBoxItem">
@@ -472,7 +493,7 @@
                                             <CheckBox Content="{Binding DisplayName}"
                                                       IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                       FontSize="13"
-                                                      Foreground="#1F2937"/>
+                                                      Foreground="{DynamicResource TextPrimaryBrush}"/>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
@@ -480,8 +501,8 @@
                                         Command="{Binding AddGroupMembersCommand}"
                                         FontSize="12"
                                         Padding="10 4"
-                                        Background="#2563EB"
-                                        Foreground="White"
+                                        Background="{DynamicResource AccentStrongBrush}"
+                                        Foreground="{DynamicResource OnAccentBrush}"
                                         CornerRadius="6"/>
                             </StackPanel>
                         </Border>
@@ -491,8 +512,8 @@
                                 IsVisible="{Binding IsGroupOwner}"
                                 FontSize="13"
                                 Padding="10 6"
-                                Background="#DC2626"
-                                Foreground="White"
+                                Background="{DynamicResource DangerBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 CornerRadius="6"/>
                     </StackPanel>
                 </DockPanel>

@@ -24,6 +24,7 @@ public sealed class VoicePlaybackStateConverter : IMultiValueConverter
         return parameter switch
         {
             "IsThisPlaying" => isThisPlaying,
+            "IsNotThisPlaying" => !isThisPlaying,
             "Progress" => isThisPlaying ? progress : 0d,
             "Label" => isThisPlaying ? "暂停语音" : "播放语音", // 无障碍标签
             _ => isThisPlaying ? "暂停" : "播放" // 默认 Icon

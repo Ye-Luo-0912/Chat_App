@@ -143,7 +143,7 @@ public class Message : INotifyPropertyChanged
     public string StatusGlyphColor => Status switch
     {
         MessageStatus.Failed => "#EF4444",
-        MessageStatus.Read or MessageStatus.Delivered => "#3B82F6",
+        MessageStatus.Read => "#3B82F6", // 已读用高亮蓝，与已送达的灰色 ✓✓ 形成视觉区分
         _ => "#94A3B8"
     };
 

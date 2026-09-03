@@ -1,17 +1,83 @@
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- 浅色主题 -->
+    <!--
+      语义调色板（聊天主界面）：
+      Light 值与界面既有硬编码色一致（浅色观感不变）；
+      Dark 值为协调的深色等价（高对比度/系统深色下聊天界面不再白底黑字错乱）。
+      控件属性用 {DynamicResource} 消费以随主题变体切换；
+      转换器属性等无法用 DynamicResource 的位置用 {StaticResource}（加载时解析）。
+    -->
     <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Light">
             <SolidColorBrush x:Key="PrimaryBrush" Color="#2196F3"/>
             <SolidColorBrush x:Key="SecondaryBrush" Color="#F5F5F5"/>
             <SolidColorBrush x:Key="TextBrush" Color="#212121"/>
+
+            <!-- 聊天界面语义色 -->
+            <SolidColorBrush x:Key="ChatBgBrush" Color="#F0F2F5"/>
+            <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF"/>
+            <SolidColorBrush x:Key="SurfaceAltBrush" Color="#F8FAFC"/>
+            <SolidColorBrush x:Key="SurfaceSubtleBrush" Color="#F1F5F9"/>
+            <SolidColorBrush x:Key="InputBrush" Color="#F3F4F6"/>
+            <SolidColorBrush x:Key="DividerBrush" Color="#E5E7EB"/>
+            <SolidColorBrush x:Key="TextPrimaryBrush" Color="#111827"/>
+            <SolidColorBrush x:Key="TextSecondaryBrush" Color="#6B7280"/>
+            <SolidColorBrush x:Key="TextTertiaryBrush" Color="#94A3B8"/>
+            <SolidColorBrush x:Key="AccentBrush" Color="#3B82F6"/>
+            <SolidColorBrush x:Key="AccentStrongBrush" Color="#2563EB"/>
+            <SolidColorBrush x:Key="OnAccentBrush" Color="#FFFFFF"/>
+            <SolidColorBrush x:Key="OnAccentMutedBrush" Color="#E0E7FF"/>
+            <SolidColorBrush x:Key="DangerBrush" Color="#DC2626"/>
+            <SolidColorBrush x:Key="DangerSoftBrush" Color="#FEE2E2"/>
+            <SolidColorBrush x:Key="DangerTextBrush" Color="#B91C1C"/>
+            <SolidColorBrush x:Key="InfoSoftBrush" Color="#EEF2FF"/>
+            <SolidColorBrush x:Key="InfoBorderBrush" Color="#C7D2FE"/>
+            <SolidColorBrush x:Key="InfoTextBrush" Color="#4338CA"/>
+            <SolidColorBrush x:Key="InfoTextStrongBrush" Color="#1E3A8A"/>
+            <SolidColorBrush x:Key="WarnSoftBrush" Color="#FEF3C7"/>
+            <SolidColorBrush x:Key="WarnTextBrush" Color="#92400E"/>
+            <SolidColorBrush x:Key="BubbleInBrush" Color="#E5E7EB"/>
+            <SolidColorBrush x:Key="BubbleOutBrush" Color="#D6E7FD"/>
+            <SolidColorBrush x:Key="AvatarBrush" Color="#DBEAFE"/>
+            <SolidColorBrush x:Key="AvatarTextBrush" Color="#1D4ED8"/>
+            <SolidColorBrush x:Key="OnlineBrush" Color="#22C55E"/>
+            <SolidColorBrush x:Key="OfflineBrush" Color="#D1D5DB"/>
         </ResourceDictionary>
-        
+
         <ResourceDictionary x:Key="Dark">
             <SolidColorBrush x:Key="PrimaryBrush" Color="#1976D2"/>
             <SolidColorBrush x:Key="SecondaryBrush" Color="#2D2D2D"/>
             <SolidColorBrush x:Key="TextBrush" Color="#E0E0E0"/>
+
+            <!-- 聊天界面语义色（深色等价） -->
+            <SolidColorBrush x:Key="ChatBgBrush" Color="#0F172A"/>
+            <SolidColorBrush x:Key="SurfaceBrush" Color="#1E293B"/>
+            <SolidColorBrush x:Key="SurfaceAltBrush" Color="#223047"/>
+            <SolidColorBrush x:Key="SurfaceSubtleBrush" Color="#2B3A55"/>
+            <SolidColorBrush x:Key="InputBrush" Color="#1C2A44"/>
+            <SolidColorBrush x:Key="DividerBrush" Color="#334155"/>
+            <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F1F5F9"/>
+            <SolidColorBrush x:Key="TextSecondaryBrush" Color="#94A3B8"/>
+            <SolidColorBrush x:Key="TextTertiaryBrush" Color="#64748B"/>
+            <SolidColorBrush x:Key="AccentBrush" Color="#3B82F6"/>
+            <SolidColorBrush x:Key="AccentStrongBrush" Color="#1D4ED8"/>
+            <SolidColorBrush x:Key="OnAccentBrush" Color="#FFFFFF"/>
+            <SolidColorBrush x:Key="OnAccentMutedBrush" Color="#C7D2FE"/>
+            <SolidColorBrush x:Key="DangerBrush" Color="#DC2626"/>
+            <SolidColorBrush x:Key="DangerSoftBrush" Color="#7F1D1D"/>
+            <SolidColorBrush x:Key="DangerTextBrush" Color="#FCA5A5"/>
+            <SolidColorBrush x:Key="InfoSoftBrush" Color="#1E2F55"/>
+            <SolidColorBrush x:Key="InfoBorderBrush" Color="#3D5A9E"/>
+            <SolidColorBrush x:Key="InfoTextBrush" Color="#A5B4FC"/>
+            <SolidColorBrush x:Key="InfoTextStrongBrush" Color="#BFDBFE"/>
+            <SolidColorBrush x:Key="WarnSoftBrush" Color="#78350F"/>
+            <SolidColorBrush x:Key="WarnTextBrush" Color="#FDE68A"/>
+            <SolidColorBrush x:Key="BubbleInBrush" Color="#334155"/>
+            <SolidColorBrush x:Key="BubbleOutBrush" Color="#21395C"/>
+            <SolidColorBrush x:Key="AvatarBrush" Color="#1E3A8A"/>
+            <SolidColorBrush x:Key="AvatarTextBrush" Color="#BFDBFE"/>
+            <SolidColorBrush x:Key="OnlineBrush" Color="#4ADE80"/>
+            <SolidColorBrush x:Key="OfflineBrush" Color="#64748B"/>
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>

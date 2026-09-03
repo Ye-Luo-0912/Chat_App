@@ -13,16 +13,20 @@
              x:Class="Chat_App.Presentation.Views.Chat.MessageView"
              x:Name="Root"
              x:DataType="vm:MessageViewModel"
-             Background="White">
+             Background="{DynamicResource SurfaceBrush}">
 
     <UserControl.Resources>
         <conv:BoolToAlignmentConverter x:Key="BoolToAlignment"/>
         <conv:BoolToColumnConverter x:Key="BoolToColumn"/>
+        <!-- 气泡底色：我方 = 浅蓝调 BubbleOut，对方 = 灰调 BubbleIn。
+             改为浅色底后气泡内深色文字/状态字形（含蓝色"已读 ✓✓"）始终可读，
+             语音播放按钮也不再与气泡同色相融。 -->
         <conv:BoolToBrushConverter x:Key="BoolToBrush"
-                                   TrueBrush="#3B82F6"
-                                   FalseBrush="#E5E7EB"/>
+                                   TrueBrush="{StaticResource BubbleOutBrush}"
+                                   FalseBrush="{StaticResource BubbleInBrush}"/>
         <conv:LongToBoolConverter x:Key="LongToBool"/>
         <conv:MessageStatusMatchConverter x:Key="StatusMatch"/>
+        <conv:CountIsEmptyConverter x:Key="CountIsEmpty"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmap"/>
         <conv:PathToBitmapConverter x:Key="PathToBitmapPreview" MaxCacheEntries="4"/>
         <conv:VoicePlaybackStateConverter x:Key="VoicePlaybackState"/>
@@ -30,55 +34,56 @@
 
     <Grid RowDefinitions="Auto,*,Auto">
         <Border Grid.Row="0"
-                Background="#F8FAFC"
-                BorderBrush="#E5E7EB"
+                Background="{DynamicResource SurfaceAltBrush}"
+                BorderBrush="{DynamicResource DividerBrush}"
                 BorderThickness="0 0 0 1"
                 Padding="16 12">
             <StackPanel Spacing="2">
                 <TextBlock Text="{Binding PeerTitle}"
                            FontSize="16"
                            FontWeight="SemiBold"
-                           Foreground="#111827"/>
+                           Foreground="{DynamicResource TextPrimaryBrush}"
+                           TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding PeerStatusText}"
                            FontSize="12"
-                           Foreground="#6B7280"/>
+                           Foreground="{DynamicResource TextSecondaryBrush}"/>
                 <TextBlock Text="{Binding TypingStatusText}"
                            FontSize="12"
-                           Foreground="#3B82F6"
+                           Foreground="{DynamicResource AccentBrush}"
                            IsVisible="{Binding IsPeerTyping}"/>
             </StackPanel>
         </Border>
 
         <!-- 八: 删除外层 ScrollViewer，改由 ListBox 自身滚动系统驱动虚拟化。
              外层 ScrollViewer 会给列表无限高度，导致一次性创建全部容器，抵消虚拟化。 -->
-        <ListBox Grid.Row="1"
-                 x:Name="MessageList"
-                 ItemsSource="{Binding Messages}"
-                 Background="Transparent"
-                 BorderThickness="0"
-                 SelectionMode="Single"
-                 Padding="16 0"
-                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                 ScrollViewer.VerticalScrollBarVisibility="Auto">
-            <ListBox.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <VirtualizingStackPanel/>
-                </ItemsPanelTemplate>
-            </ListBox.ItemsPanel>
-            <ListBox.Styles>
-                <Style Selector="ListBoxItem">
-                    <Setter Property="Background" Value="Transparent"/>
-                    <Setter Property="Padding" Value="0"/>
-                    <Setter Property="Margin" Value="0"/>
-                    <Setter Property="Focusable" Value="False"/>
-                </Style>
-                <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
-                    <Setter Property="Background" Value="Transparent"/>
-                </Style>
-                <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
-                    <Setter Property="Background" Value="Transparent"/>
-                </Style>
-            </ListBox.Styles>
+        <Panel Grid.Row="1">
+            <ListBox x:Name="MessageList"
+                     ItemsSource="{Binding Messages}"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     SelectionMode="Single"
+                     Padding="16 0"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel/>
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.Styles>
+                    <Style Selector="ListBoxItem">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="Padding" Value="0"/>
+                        <Setter Property="Margin" Value="0"/>
+                        <Setter Property="Focusable" Value="False"/>
+                    </Style>
+                    <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
+                        <Setter Property="Background" Value="Transparent"/>
+                    </Style>
+                    <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
+                        <Setter Property="Background" Value="Transparent"/>
+                    </Style>
+                </ListBox.Styles>
                 <ListBox.ItemTemplate>
                     <DataTemplate DataType="models:Message">
                         <Grid HorizontalAlignment="{Binding IsSentByMe, Converter={StaticResource BoolToAlignment}}"
@@ -127,33 +132,33 @@
                                         </MenuFlyout>
                                     </Border.ContextFlyout>
                                     <StackPanel Spacing="6">
-                                        <Border Background="#F1F5F9"
+                                        <Border Background="{DynamicResource SurfaceSubtleBrush}"
                                                 CornerRadius="8"
                                                 Padding="8 6"
                                                 IsVisible="{Binding HasReply}">
                                             <StackPanel Spacing="2">
                                                 <TextBlock Text="回复"
                                                            FontSize="11"
-                                                           Foreground="#64748B"/>
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
                                                 <TextBlock Text="{Binding ReplyDisplayText}"
                                                            FontSize="12"
-                                                           Foreground="#334155"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}"
                                                            TextWrapping="Wrap"
                                                            TextTrimming="CharacterEllipsis"
                                                            MaxLines="2"/>
                                             </StackPanel>
                                         </Border>
-                                        <Border Background="#EEF2FF"
+                                        <Border Background="{DynamicResource InfoSoftBrush}"
                                                 CornerRadius="8"
                                                 Padding="8 6"
                                                 IsVisible="{Binding HasForward}">
                                             <StackPanel Spacing="2">
                                                 <TextBlock Text="转发"
                                                            FontSize="11"
-                                                           Foreground="#6366F1"/>
+                                                           Foreground="{DynamicResource InfoTextBrush}"/>
                                                 <TextBlock Text="{Binding ForwardDisplayText}"
                                                            FontSize="12"
-                                                           Foreground="#334155"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}"
                                                            TextWrapping="Wrap"
                                                            TextTrimming="CharacterEllipsis"
                                                            MaxLines="2"/>
@@ -162,7 +167,7 @@
                                         <TextBlock Text="{Binding DisplayContent}"
                                                    FontSize="14"
                                                    TextWrapping="Wrap"
-                                                   Foreground="#1A1A2E"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
                                                    IsVisible="{Binding DisplayContent, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                                         <!-- 图片附件内联缩略图条：后台预取成功后逐个显示，点击下载/保存原图 -->
                                         <ItemsControl ItemsSource="{Binding ImageThumbnails}"
@@ -187,7 +192,7 @@
                                                             CommandParameter="{Binding}">
                                                         <Border CornerRadius="8"
                                                                 ClipToBounds="True"
-                                                                BorderBrush="#E2E8F0"
+                                                                BorderBrush="{DynamicResource DividerBrush}"
                                                                 BorderThickness="1">
                                                             <Image Source="{Binding ThumbnailPath, Converter={StaticResource PathToBitmap}}"
                                                                    Width="88"
@@ -212,8 +217,8 @@
                                                                 Width="34"
                                                                 Height="34"
                                                                 CornerRadius="17"
-                                                                Background="#3B82F6"
-                                                                Foreground="White"
+                                                                Background="{DynamicResource AccentBrush}"
+                                                                Foreground="{DynamicResource OnAccentBrush}"
                                                                 Cursor="Hand"
                                                                 Command="{Binding #Root.((vm:MessageViewModel)DataContext).PlayVoiceCommand}"
                                                                 CommandParameter="{Binding}">
@@ -253,17 +258,42 @@
                                                                     </MultiBinding>
                                                                 </ProgressBar.Value>
                                                             </ProgressBar>
-                                                            <TextBlock FontSize="11"
-                                                                       Foreground="#6B7280">
-                                                                <TextBlock.Text>
-                                                                    <Binding Path="VoiceDurationMs"
-                                                                             TargetNullValue="0:00">
-                                                                        <Binding.Converter>
-                                                                            <conv:VoiceDurationConverter/>
-                                                                        </Binding.Converter>
-                                                                    </Binding>
-                                                                </TextBlock.Text>
-                                                            </TextBlock>
+                                                            <!-- 时长文字：未播放显示总时长；播放中切换为"已播 / 总时长"实时进度 -->
+                                                            <Panel MinHeight="15">
+                                                                <TextBlock FontSize="11"
+                                                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                                                           VerticalAlignment="Center">
+                                                                    <TextBlock.IsVisible>
+                                                                        <MultiBinding Converter="{StaticResource VoicePlaybackState}"
+                                                                                      ConverterParameter="IsNotThisPlaying">
+                                                                            <Binding Path="#Root.((vm:MessageViewModel)DataContext).IsVoicePlaying"/>
+                                                                            <Binding Path="#Root.((vm:MessageViewModel)DataContext).PlayingVoiceAttachmentId"/>
+                                                                            <Binding Path="AttachmentId"/>
+                                                                        </MultiBinding>
+                                                                    </TextBlock.IsVisible>
+                                                                    <TextBlock.Text>
+                                                                        <Binding Path="VoiceDurationMs"
+                                                                                 TargetNullValue="0:00">
+                                                                            <Binding.Converter>
+                                                                                <conv:VoiceDurationConverter/>
+                                                                            </Binding.Converter>
+                                                                        </Binding>
+                                                                    </TextBlock.Text>
+                                                                </TextBlock>
+                                                                <TextBlock FontSize="11"
+                                                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                                                           VerticalAlignment="Center"
+                                                                           Text="{Binding #Root.((vm:MessageViewModel)DataContext).VoicePlaybackDisplayText}">
+                                                                    <TextBlock.IsVisible>
+                                                                        <MultiBinding Converter="{StaticResource VoicePlaybackState}"
+                                                                                      ConverterParameter="IsThisPlaying">
+                                                                            <Binding Path="#Root.((vm:MessageViewModel)DataContext).IsVoicePlaying"/>
+                                                                            <Binding Path="#Root.((vm:MessageViewModel)DataContext).PlayingVoiceAttachmentId"/>
+                                                                            <Binding Path="AttachmentId"/>
+                                                                        </MultiBinding>
+                                                                    </TextBlock.IsVisible>
+                                                                </TextBlock>
+                                                            </Panel>
                                                         </StackPanel>
                                                     </StackPanel>
                                                     <!-- 普通附件链接 -->
@@ -284,12 +314,12 @@
                                                             <TextBlock Text="{Binding FileName, TargetNullValue=附件}"
                                                                        FontSize="13"
                                                                        TextDecorations="Underline"
-                                                                       Foreground="#0F172A"
+                                                                       Foreground="{DynamicResource TextPrimaryBrush}"
                                                                        TextWrapping="Wrap"/>
                                                         </Button>
                                                         <TextBlock Text="{Binding SizeBytes, StringFormat='{}{0:N0} B'}"
                                                                    FontSize="11"
-                                                                   Foreground="Gray"
+                                                                   Foreground="{DynamicResource TextTertiaryBrush}"
                                                                    VerticalAlignment="Center"
                                                                    IsVisible="{Binding SizeBytes, Converter={StaticResource LongToBool}}"/>
                                                     </StackPanel>
@@ -299,7 +329,7 @@
                                         </ItemsControl>
                                         <TextBlock Text="已编辑"
                                                    FontSize="10"
-                                                   Foreground="#94A3B8"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}"
                                                    IsVisible="{Binding IsEdited}"
                                                    HorizontalAlignment="Right"/>
                                         <StackPanel Orientation="Horizontal"
@@ -313,7 +343,7 @@
                                                        VerticalAlignment="Center"/>
                                             <TextBlock Text="{Binding Timestamp, StringFormat='HH:mm'}"
                                                        FontSize="10"
-                                                       Foreground="#999"/>
+                                                       Foreground="{DynamicResource TextTertiaryBrush}"/>
                                         </StackPanel>
                                     </StackPanel>
                                 </Border>
@@ -321,11 +351,26 @@
                         </Grid>
                     </DataTemplate>
                 </ListBox.ItemTemplate>
-        </ListBox>
+            </ListBox>
+
+            <!-- 空态：会话历史渲染完成后仍无消息时显示（加载期间不显示，避免切换会话闪烁） -->
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="10"
+                        IsVisible="{Binding IsMessageListEmpty}">
+                <TextBlock Text="💬"
+                           FontSize="40"
+                           HorizontalAlignment="Center"/>
+                <TextBlock Text="还没有消息，打个招呼吧"
+                           FontSize="13"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Panel>
 
         <Border Grid.Row="2"
-                Background="White"
-                BorderBrush="#E5E7EB"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource DividerBrush}"
                 BorderThickness="0 1 0 0"
                 Padding="16 12">
             <StackPanel Spacing="8">
@@ -334,10 +379,10 @@
                     <StackPanel Grid.Column="0" Spacing="2">
                         <TextBlock Text="正在回复"
                                    FontSize="11"
-                                   Foreground="#64748B"/>
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
                         <TextBlock Text="{Binding ReplyDraftPreview}"
                                    FontSize="12"
-                                   Foreground="#334155"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"
                                    TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                     <Button Grid.Column="1"
@@ -346,7 +391,7 @@
                             Padding="10 4"
                             FontSize="12"
                             Background="Transparent"
-                            Foreground="#B91C1C"/>
+                            Foreground="{DynamicResource DangerTextBrush}"/>
                 </Grid>
 
                 <Grid ColumnDefinitions="*,Auto"
@@ -354,10 +399,10 @@
                     <StackPanel Grid.Column="0" Spacing="2">
                         <TextBlock Text="正在编辑"
                                    FontSize="11"
-                                   Foreground="#64748B"/>
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
                         <TextBlock Text="{Binding EditDraftPreview}"
                                    FontSize="12"
-                                   Foreground="#334155"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"
                                    TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                     <Button Grid.Column="1"
@@ -366,7 +411,7 @@
                             Padding="10 4"
                             FontSize="12"
                             Background="Transparent"
-                            Foreground="#B91C1C"/>
+                            Foreground="{DynamicResource DangerTextBrush}"/>
                 </Grid>
 
                 <ItemsControl ItemsSource="{Binding PendingAttachments}"
@@ -380,7 +425,7 @@
                                            VerticalAlignment="Center"/>
                                 <TextBlock Text="{Binding FileName}"
                                            FontSize="12"
-                                           Foreground="#475569"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"
                                            VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis"/>
                                 <Button Content="✕"
@@ -390,7 +435,7 @@
                                         Padding="6,2"
                                         FontSize="12"
                                         Background="Transparent"
-                                        Foreground="#B91C1C"/>
+                                        Foreground="{DynamicResource DangerTextBrush}"/>
                             </StackPanel>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
@@ -404,8 +449,8 @@
                             Padding="12 10"
                             MinWidth="56"
                             CornerRadius="12"
-                            Background="#F3F4F6"
-                            Foreground="#111827"
+                            Background="{DynamicResource InputBrush}"
+                            Foreground="{DynamicResource TextPrimaryBrush}"
                             VerticalAlignment="Bottom"
                             IsVisible="{Binding !IsRecording}"/>
 
@@ -416,8 +461,8 @@
                             Padding="12 10"
                             MinWidth="56"
                             CornerRadius="12"
-                            Background="#F3F4F6"
-                            Foreground="#111827"
+                            Background="{DynamicResource InputBrush}"
+                            Foreground="{DynamicResource TextPrimaryBrush}"
                             VerticalAlignment="Bottom"
                             IsVisible="{Binding !IsRecording}"/>
 
@@ -436,24 +481,25 @@
                                             Gesture="Ctrl+Enter"/>
                             </TextBox.KeyBindings>
                         </TextBox>
+                        <!-- 上传进度条：仅上传中显示，避免空闲/完成后残留一条无意义(或满格)的进度条 -->
                         <ProgressBar Maximum="100"
                                      Value="{Binding UploadProgress}"
                                      Height="4"
                                      Margin="0 4 0 0"
-                                     IsVisible="{Binding !IsRecording}"/>
+                                     IsVisible="{Binding IsUploading}"/>
                         <!-- 录音状态：时长实时更新（VOICE-MSG-2）。 -->
                         <StackPanel Orientation="Horizontal"
                                     Spacing="8"
                                     IsVisible="{Binding IsRecording}">
-                            <Ellipse Width="10" Height="10" Fill="#EF4444"/>
+                            <Ellipse Width="10" Height="10" Fill="{DynamicResource DangerBrush}"/>
                             <TextBlock Text="{Binding RecordingDurationText}"
                                        FontSize="15"
                                        FontWeight="SemiBold"
-                                       Foreground="#111827"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
                                        VerticalAlignment="Center"/>
-                            <TextBlock Text="录音中，点击右上角发送"
+                            <TextBlock Text="录音中，点击「发送语音」发送"
                                        FontSize="12"
-                                       Foreground="#6B7280"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
                                        VerticalAlignment="Center"/>
                         </StackPanel>
                     </StackPanel>
@@ -465,8 +511,8 @@
                             Padding="12 10"
                             IsVisible="{Binding IsUploading}"
                             CornerRadius="12"
-                            Background="#FEE2E2"
-                            Foreground="#991B1B"
+                            Background="{DynamicResource DangerSoftBrush}"
+                            Foreground="{DynamicResource DangerTextBrush}"
                             VerticalAlignment="Bottom"/>
 
                     <Button Grid.Column="3"
@@ -476,8 +522,8 @@
                             Padding="12 10"
                             IsVisible="{Binding IsRecording}"
                             CornerRadius="12"
-                            Background="#FEE2E2"
-                            Foreground="#991B1B"
+                            Background="{DynamicResource DangerSoftBrush}"
+                            Foreground="{DynamicResource DangerTextBrush}"
                             VerticalAlignment="Bottom"/>
 
                     <Button Grid.Column="4"
@@ -487,8 +533,8 @@
                             Padding="20 10"
                             MinWidth="72"
                             CornerRadius="12"
-                            Background="#3B82F6"
-                            Foreground="White"
+                            Background="{DynamicResource AccentBrush}"
+                            Foreground="{DynamicResource OnAccentBrush}"
                             FontWeight="SemiBold"
                             VerticalAlignment="Bottom"
                             IsVisible="{Binding !IsRecording}"/>
@@ -500,8 +546,8 @@
                             Padding="20 10"
                             MinWidth="72"
                             CornerRadius="12"
-                            Background="#3B82F6"
-                            Foreground="White"
+                            Background="{DynamicResource AccentBrush}"
+                            Foreground="{DynamicResource OnAccentBrush}"
                             FontWeight="SemiBold"
                             VerticalAlignment="Bottom"
                             IsVisible="{Binding IsRecording}"/>
@@ -528,7 +574,7 @@
                                 Margin="0 0 0 10">
                         <TextBlock Text="{Binding PreviewImageName}"
                                    FontSize="12"
-                                   Foreground="#94A3B8"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
                                    VerticalAlignment="Center"
                                    Margin="0 0 12 0"
                                    TextTrimming="CharacterEllipsis"
@@ -537,15 +583,15 @@
                                 Command="{Binding SavePreviewedImageCommand}"
                                 Padding="16 8"
                                 CornerRadius="8"
-                                Background="#3B82F6"
-                                Foreground="White"
+                                Background="{DynamicResource AccentBrush}"
+                                Foreground="{DynamicResource OnAccentBrush}"
                                 FontWeight="SemiBold"/>
                         <Button Content="关闭"
                                 Command="{Binding ClosePreviewCommand}"
                                 Padding="16 8"
                                 CornerRadius="8"
-                                Background="#F3F4F6"
-                                Foreground="#111827"/>
+                                Background="{DynamicResource InputBrush}"
+                                Foreground="{DynamicResource TextPrimaryBrush}"/>
                     </StackPanel>
                     <Grid DockPanel.Dock="Bottom">
                         <Image Source="{Binding PreviewImagePath, Converter={StaticResource PathToBitmapPreview}}"
@@ -555,7 +601,7 @@
                                IsVisible="{Binding HasPreviewImage}"/>
                         <TextBlock Text="图片加载中…"
                                    FontSize="13"
-                                   Foreground="#94A3B8"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
                                    HorizontalAlignment="Center"
                                    VerticalAlignment="Center"
                                    IsVisible="{Binding !HasPreviewImage}"/>

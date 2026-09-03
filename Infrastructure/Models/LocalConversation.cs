@@ -86,6 +86,7 @@ public class LocalConversation : INotifyPropertyChanged
                 OnPropertyChanged(nameof(HasUnread));
                 OnPropertyChanged(nameof(UnreadBadgeText));
                 OnPropertyChanged(nameof(UnreadBadgeVisibility));
+                OnPropertyChanged(nameof(UnreadBadgeColor));
             }
         }
     }
@@ -125,6 +126,7 @@ public class LocalConversation : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(MuteGlyph));
                 OnPropertyChanged(nameof(Subtitle));
+                OnPropertyChanged(nameof(UnreadBadgeColor));
             }
         }
     }
@@ -236,6 +238,10 @@ public class LocalConversation : INotifyPropertyChanged
 
     [NotMapped]
     public bool UnreadBadgeVisibility => UnreadCount > 0;
+
+    /// <summary>未读徽标底色：普通会话红色（最高提示层级）；免打扰会话灰色，避免打扰式提醒。</summary>
+    [NotMapped]
+    public string UnreadBadgeColor => IsMuted ? "#9CA3AF" : "#EF4444";
 
     [NotMapped]
     public string UnreadBadgeText => UnreadCount > 99 ? "99+" : UnreadCount.ToString();

@@ -11,21 +11,21 @@
 
     <Border Name="HighlightBorder" CornerRadius="8" Padding="4 2">
         <Grid Height="56" ColumnDefinitions="Auto,*,Auto,Auto">
-            <Border Width="40" Height="40" CornerRadius="20" Background="#DBEAFE"
+            <Border Width="40" Height="40" CornerRadius="20" Background="{DynamicResource AvatarBrush}"
                     VerticalAlignment="Center" Margin="4 0 10 0">
                 <Panel>
                     <TextBlock Text="{Binding Initial}"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center"
                                FontWeight="SemiBold"
-                               Foreground="#1D4ED8"/>
+                               Foreground="{DynamicResource AvatarTextBrush}"/>
                     <Ellipse Width="10" Height="10"
                              HorizontalAlignment="Right"
                              VerticalAlignment="Bottom"
                              Margin="0 0 1 1"
                              Stroke="White"
                              StrokeThickness="1.5"
-                             Fill="#22C55E"
+                             Fill="{DynamicResource OnlineBrush}"
                              IsVisible="{Binding PeerIsOnline}"/>
                     <Ellipse Width="10" Height="10"
                              HorizontalAlignment="Right"
@@ -33,7 +33,7 @@
                              Margin="0 0 1 1"
                              Stroke="White"
                              StrokeThickness="1.5"
-                             Fill="#D1D5DB"
+                             Fill="{DynamicResource OfflineBrush}"
                              IsVisible="{Binding IsOffline}"/>
                 </Panel>
             </Border>
@@ -42,10 +42,10 @@
                 <TextBlock Text="{Binding Title}"
                            FontWeight="SemiBold"
                            FontSize="14"
-                           Foreground="#111827"
+                           Foreground="{DynamicResource TextPrimaryBrush}"
                            TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Subtitle}"
-                           Foreground="#6B7280"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
                            FontSize="12"
                            TextTrimming="CharacterEllipsis"/>
             </StackPanel>
@@ -59,9 +59,10 @@
                 <TextBlock Text="{Binding MuteGlyph}" FontSize="12"/>
             </StackPanel>
 
+            <!-- 未读徽标：免打扰会话灰色（UnreadBadgeColor），普通会话红色，保持提示层级 -->
             <Border Grid.Column="3"
                     CornerRadius="10"
-                    Background="#EF4444"
+                    Background="{Binding UnreadBadgeColor}"
                     MinWidth="18"
                     Height="18"
                     Padding="4 0"
@@ -69,7 +70,7 @@
                     Margin="4 0 4 0"
                     IsVisible="{Binding UnreadBadgeVisibility}">
                 <TextBlock Text="{Binding UnreadBadgeText}"
-                           Foreground="White"
+                           Foreground="{DynamicResource OnAccentBrush}"
                            FontSize="11"
                            FontWeight="SemiBold"
                            HorizontalAlignment="Center"
