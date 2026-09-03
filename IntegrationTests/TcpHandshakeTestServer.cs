@@ -1,6 +1,8 @@
 using System.Buffers;
-using Chat_App.Infrastructure.Serialization;
+using ChatApp.Binary.Core;
 using ChatApp.Shared.Protocol.Tcp;
+using ChatApp.Shared.Protocol.Tcp.Binary;
+using ChatApp.Shared.Protocol.Tcp.Binary.Schemas;
 using Core.Models;
 using Core.Protocol;
 
@@ -11,27 +13,47 @@ internal static class TcpHandshakeTestServer
 {
     public static ReadOnlyMemory<byte> ServerHelloFrame { get; } = CreateServerHelloFrame();
 
-    private static byte[] CreateServerHelloFrame()
+    /// <summary>
+    /// 二进制变体：仍以 JSON 握手段（ServerHello 永远 JSON），但声明
+    /// PayloadFormat = chatapp-bin-v1 与 BinaryPayload 能力位，完整握手后连接固定为二进制。
+    /// </summary>
+    public static ReadOnlyMemory<byte> BinaryServerHelloFrame { get; } =
+        CreateServerHelloFrame(
+            BinaryPayloadFormat.Id,
+            GatewayFeature.CommandCapabilities |
+            GatewayFeature.ConversationSync |
+            GatewayFeature.ConversationPreferences |
+            GatewayFeature.MessageMutation |
+            GatewayFeature.PresenceAndTyping |
+            GatewayFeature.GroupManagement |
+            GatewayFeature.RelationshipRead |
+            GatewayFeature.CallSignaling |
+            GatewayFeature.BinaryPayload);
+
+    private static byte[] CreateServerHelloFrame(
+        string payloadFormat = ProtocolPayloadFormat.Json,
+        GatewayFeature featureBits =
+            GatewayFeature.CommandCapabilities |
+            GatewayFeature.ConversationSync |
+            GatewayFeature.ConversationPreferences |
+            GatewayFeature.MessageMutation |
+            GatewayFeature.PresenceAndTyping |
+            GatewayFeature.GroupManagement |
+            GatewayFeature.RelationshipRead |
+            GatewayFeature.CallSignaling)
     {
-        var serializer = new JsonPacketBodySerializer();
+        var serializer = new Chat_App.Infrastructure.Serialization.JsonPacketBodySerializer();
         var body = new ArrayBufferWriter<byte>();
         serializer.Serialize(body, new ServerHello
         {
             ProtocolVersion = 1,
-            FeatureBits = (uint)(GatewayFeature.CommandCapabilities |
-                                 GatewayFeature.ConversationSync |
-                                 GatewayFeature.ConversationPreferences |
-                                 GatewayFeature.MessageMutation |
-                                 GatewayFeature.PresenceAndTyping |
-                                 GatewayFeature.GroupManagement |
-                                 GatewayFeature.RelationshipRead |
-                                 GatewayFeature.CallSignaling),
+            FeatureBits = (uint)featureBits,
             ServerDeviceId = "integration-test-gateway",
             ServerTimeMs = 1_700_000_000_000,
             HeartbeatIntervalMs = 15_000,
             MaxPayloadBytes = 1_048_576,
             ResumeSupported = false,
-            PayloadFormat = ProtocolPayloadFormat.Json
+            PayloadFormat = payloadFormat
         });
 
         var frame = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + body.WrittenCount);
@@ -40,6 +62,23 @@ internal static class TcpHandshakeTestServer
             new ReadOnlySequence<byte>(body.WrittenMemory));
         if (!new MessagePacketCodec().TryWrite(packet, frame, out _))
             throw new InvalidOperationException("无法构造集成测试 ServerHello 帧");
+        return frame.WrittenSpan.ToArray();
+    }
+
+    /// <summary>按共享 schema 编码一帧 S2C 二进制载荷（chatapp-bin-v1）。</summary>
+    public static byte[] CreateBinaryFrame<T>(PacketCommand command, T shared) where T : class
+    {
+        var buffer = new byte[BinaryLimits.Default.MaxMessageBytes];
+        var encode = TcpBinaryWireEncoder.TryEncode(shared, buffer, BinaryLimits.Default);
+        if (encode.Status != TcpBinaryWireEncodeStatus.Encoded)
+            throw new InvalidOperationException($"无法编码二进制测试帧 {command}: {encode.Status}");
+
+        var frame = new ArrayBufferWriter<byte>(MessagePacket.HeaderSize + encode.Written);
+        var packet = new MessagePacket(
+            command,
+            new ReadOnlySequence<byte>(buffer.AsSpan(0, encode.Written).ToArray()));
+        if (!new MessagePacketCodec().TryWrite(packet, frame, out _))
+            throw new InvalidOperationException("无法构造集成测试二进制帧");
         return frame.WrittenSpan.ToArray();
     }
 }

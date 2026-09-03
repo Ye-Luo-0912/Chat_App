@@ -3,6 +3,7 @@ using Core.Diagnostics;
 using Core.Interfaces;
 using Core.Models;
 using Core.Models.DTO;
+using Core.Protocol.Binary;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -10,6 +11,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using ChatApp.Binary.Core;
+using ChatApp.Shared.Protocol.Tcp;
+using ChatApp.Shared.Protocol.Tcp.Binary.Schemas;
 using TcpClientHello = ChatApp.Shared.Protocol.Tcp.ClientHello;
 using TcpGatewayFeature = ChatApp.Shared.Protocol.Tcp.GatewayFeature;
 using TcpGoAway = ChatApp.Shared.Protocol.Tcp.GoAway;
@@ -20,6 +24,8 @@ using TcpProtocolErrorFrame = ChatApp.Shared.Protocol.Tcp.ProtocolErrorFrame;
 using TcpResumeResponse = ChatApp.Shared.Protocol.Tcp.ResumeResponse;
 using TcpServerHello = ChatApp.Shared.Protocol.Tcp.ServerHello;
 using TcpFrameConstants = ChatApp.Shared.Protocol.Tcp.TcpFrameConstants;
+using TcpBinaryPayloadFormat = ChatApp.Shared.Protocol.Tcp.Binary.BinaryPayloadFormat;
+using TcpProtocolPayloadFormat = ChatApp.Shared.Protocol.Tcp.ProtocolPayloadFormat;
 
 namespace Core.Services
 {
@@ -36,6 +42,7 @@ namespace Core.Services
         private long _handshakeGeneration;
         private int _negotiatedProtocolVersion;
         private uint _negotiatedFeatureBits;
+        private int _negotiatedPayloadFormat;
         private int _serverHeartbeatIntervalMs;
         private int _serverMaxPayloadBytes;
         private readonly ConcurrentDictionary<string, TaskCompletionSource<ConversationListResponseDto>> _listPending = new(StringComparer.Ordinal);
@@ -94,6 +101,19 @@ namespace Core.Services
             TcpGatewayFeature.GroupManagement |
             TcpGatewayFeature.RelationshipRead |
             TcpGatewayFeature.CallSignaling;
+
+        /// <summary>
+        /// 是否在 ClientHello.FeatureBits 中声明 <see cref="TcpGatewayFeature.BinaryPayload"/>
+        /// 二进制载荷能力。默认开启；服务端在 ServerHello.PayloadFormat 回应 json 时整个连接
+        /// 回退为 JSON（老服务端兼容）。关闭后 ClientHello 不再声明该位。
+        /// </summary>
+        public bool AdvertiseBinaryPayload { get; set; } = true;
+
+        /// <summary>本次握手实际上报的能力位（含/不含 BinaryPayload 取决于 <see cref="AdvertiseBinaryPayload"/>）。</summary>
+        private TcpGatewayFeature GetAdvertisedFeatures() =>
+            AdvertiseBinaryPayload
+                ? AdvertisedFeatures | TcpGatewayFeature.BinaryPayload
+                : AdvertisedFeatures;
 
         /// <summary>
         /// 关系只读能力是否已协商启用：仅当握手中服务端回显 <see cref="TcpGatewayFeature.RelationshipRead"/>
@@ -170,6 +190,13 @@ namespace Core.Services
             (ushort)Volatile.Read(ref _negotiatedProtocolVersion);
 
         public uint NegotiatedFeatureBits => Volatile.Read(ref _negotiatedFeatureBits);
+
+        /// <summary>
+        /// 当前连接协商出的载荷格式：完整握手前恒为 <see cref="SessionPayloadFormat.Json"/>；
+        /// 由 ServerHello.PayloadFormat 决定，连接存续期间固定不变。
+        /// </summary>
+        public SessionPayloadFormat NegotiatedPayloadFormat =>
+            (SessionPayloadFormat)Volatile.Read(ref _negotiatedPayloadFormat);
 
         public int ServerHeartbeatIntervalMs => Volatile.Read(ref _serverHeartbeatIntervalMs);
 
@@ -396,13 +423,14 @@ namespace Core.Services
                 Volatile.Write(ref _handshakeGeneration, 0);
                 Volatile.Write(ref _negotiatedProtocolVersion, 0);
                 Volatile.Write(ref _negotiatedFeatureBits, 0);
+                Volatile.Write(ref _negotiatedPayloadFormat, (int)SessionPayloadFormat.Json);
                 Volatile.Write(ref _serverHeartbeatIntervalMs, 0);
                 Volatile.Write(ref _serverMaxPayloadBytes, 0);
 
                 var hello = new TcpClientHello
                 {
                     ProtocolVersion = TcpFrameConstants.CurrentProtocolVersion,
-                    FeatureBits = (uint)AdvertisedFeatures,
+                    FeatureBits = (uint)GetAdvertisedFeatures(),
                     InstallationId = _installationId,
                     ClientTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     ResumeToken = null,
@@ -543,6 +571,7 @@ namespace Core.Services
             string? clientMessageIdParam = null,
             string? conversationId = null,
             IReadOnlyList<long>? mentionedUserIds = null,
+            IReadOnlyList<AttachmentRefDto>? attachments = null,
             CancellationToken ct = default)
         {
             var hasAttachments = attachmentIds is { Count: > 0 };
@@ -616,6 +645,10 @@ namespace Core.Services
                 ForwardedFromPreview = hasForward ? forwardPreview : null,
                 MentionedUserIds = mentionedUserIds is { Count: > 0 }
                     ? NormalizeMemberIds(mentionedUserIds)
+                    : null,
+                // VOICE-MSG-2：上行携带附件 ref（含语音元数据），网关据此写入附件注册表供历史重建。
+                Attachments = hasAttachments && attachments is { Count: > 0 }
+                    ? attachments
                     : null
             };
 
@@ -1306,10 +1339,22 @@ namespace Core.Services
                 BinaryPrimitives.WriteInt32LittleEndian(headerSpan.Slice(MessagePacket.LengthOffset), 0);
                 frameWriter.Advance(MessagePacket.HeaderSize);
 
-                // JSON 直接写入同一缓冲（帧头之后），无 SerializeToUtf8Bytes 的中间 byte[]
+                // 出站分流：ClientHello 始终 JSON（握手段固定，不受协商结果影响）；
+                // 二进制会话先映射为共享 DTO 再由 TcpBinaryWireEncoder 直写同一缓冲；
+                // JSON 会话保持既有直写路径（无中间 byte[] 分配）。
                 var bodyStart = frameWriter.WrittenCount;
                 if (payload is not null)
-                    _bodySerializer.Serialize(frameWriter, payload);
+                {
+                    if (command != PacketCommand.ClientHello
+                        && NegotiatedPayloadFormat == SessionPayloadFormat.ChatAppBinaryV1)
+                    {
+                        WriteBinaryBody(command, payload, frameWriter);
+                    }
+                    else
+                    {
+                        _bodySerializer.Serialize(frameWriter, payload);
+                    }
+                }
 
                 var bodyLen = frameWriter.WrittenCount - bodyStart;
                 if (bodyLen > MessagePacket.MaxBodySize)
@@ -1337,6 +1382,49 @@ namespace Core.Services
 
 
         /// <summary>
+        /// 二进制出站编码：客户端 DTO → 共享规范 DTO → TcpBinaryWireEncoder。
+        /// DestinationTooSmall 时扩大缓冲重试（TryEncode 失败路径不写目标缓冲，重试无副作用）；
+        /// 未覆盖/编码失败 fail-closed 抛出，与 JSON 编码失败行为一致。
+        /// </summary>
+        private void WriteBinaryBody<T>(PacketCommand command, T payload, PooledBufferWriter frameWriter)
+        {
+            object shared;
+            try
+            {
+                shared = BinaryPayloadMapper.ToShared(payload!);
+            }
+            catch (InvalidOperationException ex)
+            {
+                throw new InvalidOperationException($"命令 {command} 无法映射为二进制载荷：{ex.Message}", ex);
+            }
+
+            var hint = 256;
+            while (true)
+            {
+                var result = TcpBinaryWireEncoder.TryEncode(shared, frameWriter.GetSpan(hint), BinaryLimits.Default);
+                switch (result.Status)
+                {
+                    case TcpBinaryWireEncodeStatus.Encoded:
+                        frameWriter.Advance(result.Written);
+                        return;
+                    case TcpBinaryWireEncodeStatus.SchemaNotCovered:
+                        throw new InvalidOperationException(
+                            $"命令 {command} 未被二进制 schema 覆盖，拒绝发送（fail-closed）。");
+                    case TcpBinaryWireEncodeStatus.EncodeFailure
+                        when result.EncodeStatus == BinaryStatus.DestinationTooSmall:
+                        if (hint >= MessagePacket.MaxBodySize)
+                            throw new InvalidOperationException(
+                                $"二进制载荷超出 {MessagePacket.MaxBodySize} 字节帧预算: {command}");
+                        hint = Math.Min(hint * 4, MessagePacket.MaxBodySize);
+                        continue;
+                    default:
+                        throw new InvalidOperationException(
+                            $"二进制编码失败（{result.EncodeStatus}）: {command}");
+                }
+            }
+        }
+
+        /// <summary>
         /// RoutePacket 方法负责根据接收到的消息包的命令类型来路由和处理不同类型的消息包。
         /// 它通过检查消息包的 Command 属性来确定消息包的类型，并根据不同的命令类型执行相应的处理逻辑。
         /// </summary>
@@ -1346,26 +1434,27 @@ namespace Core.Services
             Interlocked.Increment(ref _packetsReceived);
             switch (packet.Command)
             {
+                // 握手段例外：ServerHello 始终 JSON（服务端握手段固定 JSON 格式，不受协商结果影响）。
                 case PacketCommand.ServerHello:
                     HandleServerHello(_bodySerializer.Deserialize<TcpServerHello>(packet.Body));
                     return;
                 case PacketCommand.GoAway:
-                    HandleGoAway(_bodySerializer.Deserialize<TcpGoAway>(packet.Body));
+                    HandleGoAway(ReadSharedBody<TcpGoAway>(packet));
                     return;
                 case PacketCommand.ResumeResponse:
-                    HandleResumeResponse(_bodySerializer.Deserialize<TcpResumeResponse>(packet.Body));
+                    HandleResumeResponse(ReadSharedBody<TcpResumeResponse>(packet));
                     return;
                 case PacketCommand.AuthenticationResponse:
-                    var response = _bodySerializer.Deserialize<AuthResponseDto>(packet.Body);
+                    var response = ReadBody<AuthResponseDto, AuthenticationResponse>(packet, BinaryPayloadMapper.ToClient);
                     HandleAuthResponse(response);
                     return;
                 case PacketCommand.ChatMessage:
-                    var message = _bodySerializer.Deserialize<ChatMessageDto>(packet.Body);
+                    var message = ReadBody<ChatMessageDto, ChatMessage>(packet, BinaryPayloadMapper.ToClient);
                     if (message is not null)
                         ChatMessageReceived?.Invoke(this, message);
                     return;
                 case PacketCommand.ConversationListPage:
-                    var listPage = _bodySerializer.Deserialize<ConversationListResponseDto>(packet.Body);
+                    var listPage = ReadBody<ConversationListResponseDto, ConversationListPage>(packet, BinaryPayloadMapper.ToClient);
                     if (listPage is not null
                         && !string.IsNullOrWhiteSpace(listPage.RequestId)
                         && _listPending.TryRemove(listPage.RequestId, out var listTcs))
@@ -1374,7 +1463,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.RelationshipListResponse:
-                    var relationshipPage = _bodySerializer.Deserialize<RelationshipListResponseDto>(packet.Body);
+                    var relationshipPage = ReadSharedBody<RelationshipListResponseDto>(packet);
                     if (relationshipPage is not null
                         && !string.IsNullOrWhiteSpace(relationshipPage.RequestId)
                         && _relationshipListPending.TryRemove(relationshipPage.RequestId, out var relationshipTcs))
@@ -1383,7 +1472,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.ConversationSetPrefsResponse:
-                    var prefs = _bodySerializer.Deserialize<ConversationSetPrefsResponseDto>(packet.Body);
+                    var prefs = ReadBody<ConversationSetPrefsResponseDto, ConversationSetPrefsResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (prefs is not null
                         && !string.IsNullOrWhiteSpace(prefs.RequestId)
                         && _prefsPending.TryRemove(prefs.RequestId, out var prefsTcs))
@@ -1392,7 +1481,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.MessageRecallAck:
-                    var recallAck = _bodySerializer.Deserialize<MessageRecallAcknowledgementDto>(packet.Body);
+                    var recallAck = ReadBody<MessageRecallAcknowledgementDto, MessageRecallAcknowledgement>(packet, BinaryPayloadMapper.ToClient);
                     if (recallAck is not null
                         && !string.IsNullOrWhiteSpace(recallAck.RequestId)
                         && _recallPending.TryRemove(recallAck.RequestId, out var recallTcs))
@@ -1401,12 +1490,12 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.MessageRecalled:
-                    var recalled = _bodySerializer.Deserialize<MessageRecalledUpdateDto>(packet.Body);
+                    var recalled = ReadBody<MessageRecalledUpdateDto, MessageRecalledUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (recalled is not null)
                         MessageRecalled?.Invoke(this, recalled);
                     return;
                 case PacketCommand.MessageEditAck:
-                    var editAck = _bodySerializer.Deserialize<MessageEditAcknowledgementDto>(packet.Body);
+                    var editAck = ReadBody<MessageEditAcknowledgementDto, MessageEditAcknowledgement>(packet, BinaryPayloadMapper.ToClient);
                     if (editAck is not null
                         && !string.IsNullOrWhiteSpace(editAck.RequestId)
                         && _editPending.TryRemove(editAck.RequestId, out var editTcs))
@@ -1415,17 +1504,17 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.MessageEdited:
-                    var edited = _bodySerializer.Deserialize<MessageEditedUpdateDto>(packet.Body);
+                    var edited = ReadBody<MessageEditedUpdateDto, MessageEditedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (edited is not null)
                         MessageEdited?.Invoke(this, edited);
                     return;
                 case PacketCommand.TypingUpdate:
-                    var typing = _bodySerializer.Deserialize<TypingUpdateDto>(packet.Body);
+                    var typing = ReadBody<TypingUpdateDto, TcpTypingUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (typing is not null)
                         TypingUpdated?.Invoke(this, typing);
                     return;
                 case PacketCommand.PresenceSnapshot:
-                    var presenceSnap = _bodySerializer.Deserialize<PresenceSnapshotResponseDto>(packet.Body);
+                    var presenceSnap = ReadBody<PresenceSnapshotResponseDto, TcpPresenceSnapshotResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (presenceSnap is not null
                         && !string.IsNullOrWhiteSpace(presenceSnap.RequestId)
                         && _presencePending.TryRemove(presenceSnap.RequestId, out var presenceTcs))
@@ -1434,12 +1523,12 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.PresenceChanged:
-                    var presenceChanged = _bodySerializer.Deserialize<PresenceChangedDto>(packet.Body);
+                    var presenceChanged = ReadBody<PresenceChangedDto, TcpPresenceChanged>(packet, BinaryPayloadMapper.ToClient);
                     if (presenceChanged is not null)
                         PresenceChanged?.Invoke(this, presenceChanged);
                     return;
                 case PacketCommand.SyncBootstrapResponse:
-                    var sync = _bodySerializer.Deserialize<SyncBootstrapResponseDto>(packet.Body);
+                    var sync = ReadSharedBody<SyncBootstrapResponseDto>(packet);
                     if (sync is null)
                         throw new InvalidDataException("SyncBootstrapResponse 反序列化结果为空。");
                     if (string.IsNullOrWhiteSpace(sync.RequestId))
@@ -1450,7 +1539,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.ConversationChanged:
-                    var changed = _bodySerializer.Deserialize<ConversationChangedDto>(packet.Body);
+                    var changed = ReadBody<ConversationChangedDto, ConversationChangedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (changed is not null)
                         ConversationChanged?.Invoke(this, changed);
                     return;
@@ -1463,17 +1552,17 @@ namespace Core.Services
                         _heartbeatRtt.Add(TimeSpan.FromTicks(DateTime.UtcNow.Ticks - sentTicks));
                     return;
                 case PacketCommand.MessageAcknowledgement:
-                    var ack = _bodySerializer.Deserialize<MessageAcknowledgementDto>(packet.Body);
+                    var ack = ReadBody<MessageAcknowledgementDto, MessageAcknowledgement>(packet, BinaryPayloadMapper.ToClient);
                     if (ack is not null)
                         MessageAcknowledged?.Invoke(this, ack);
                     return;
                 case PacketCommand.MessageReceipt:
-                    var receipt = _bodySerializer.Deserialize<MessageReceiptDto>(packet.Body);
+                    var receipt = ReadBody<MessageReceiptDto, MessageReceipt>(packet, BinaryPayloadMapper.ToClient);
                     if (receipt is not null)
                         MessageReceiptReceived?.Invoke(this, receipt);
                     return;
                 case PacketCommand.MessageReceiptAcknowledgement:
-                    var receiptAck = _bodySerializer.Deserialize<MessageReceiptAckDto>(packet.Body);
+                    var receiptAck = ReadBody<MessageReceiptAckDto, MessageReceiptAcknowledgement>(packet, BinaryPayloadMapper.ToClient);
                     if (receiptAck is not null
                         && !string.IsNullOrWhiteSpace(receiptAck.RequestId)
                         && _receiptPending.TryRemove(receiptAck.RequestId, out var receiptTcs))
@@ -1482,12 +1571,12 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.MessageReceiptUpdated:
-                    var receiptUpdated = _bodySerializer.Deserialize<MessageReceiptUpdatedDto>(packet.Body);
+                    var receiptUpdated = ReadBody<MessageReceiptUpdatedDto, MessageReceiptUpdated>(packet, BinaryPayloadMapper.ToClient);
                     if (receiptUpdated is not null)
                         MessageReceiptUpdated?.Invoke(this, receiptUpdated);
                     return;
                 case PacketCommand.MessageHistoryPage:
-                    var historyPage = _bodySerializer.Deserialize<MessageHistoryPageDto>(packet.Body);
+                    var historyPage = ReadSharedBody<MessageHistoryPageDto>(packet);
                     if (historyPage is null)
                         throw new InvalidDataException("MessageHistoryPage 反序列化结果为空。");
                     if (string.IsNullOrWhiteSpace(historyPage.RequestId))
@@ -1499,7 +1588,7 @@ namespace Core.Services
                     MessageHistoryPageReceived?.Invoke(this, historyPage);
                     return;
                 case PacketCommand.ConversationMarkReadResponse:
-                    var markReadResp = _bodySerializer.Deserialize<ConversationMarkReadResponseDto>(packet.Body);
+                    var markReadResp = ReadBody<ConversationMarkReadResponseDto, ConversationMarkReadResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (markReadResp is not null
                         && !string.IsNullOrWhiteSpace(markReadResp.RequestId)
                         && _markReadPending.TryRemove(markReadResp.RequestId, out var markReadTcs))
@@ -1510,12 +1599,12 @@ namespace Core.Services
                         ConversationMarkReadResponse?.Invoke(this, markReadResp);
                     return;
                 case PacketCommand.UnreadCountChanged:
-                    var unreadChanged = _bodySerializer.Deserialize<UnreadCountChangedDto>(packet.Body);
+                    var unreadChanged = ReadBody<UnreadCountChangedDto, UnreadCountChanged>(packet, BinaryPayloadMapper.ToClient);
                     if (unreadChanged is not null)
                         UnreadCountChanged?.Invoke(this, unreadChanged);
                     return;
                 case PacketCommand.CallCommandResponse:
-                    var callResponse = _bodySerializer.Deserialize<CallCommandResponseDto>(packet.Body);
+                    var callResponse = ReadSharedBody<CallCommandResponseDto>(packet);
                     if (callResponse is not null
                         && !string.IsNullOrWhiteSpace(callResponse.RequestId)
                         && _callCommandPending.TryRemove(callResponse.RequestId, out var callTcs))
@@ -1524,12 +1613,12 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.CallSignal:
-                    var callSignal = _bodySerializer.Deserialize<CallSignalDto>(packet.Body);
+                    var callSignal = ReadSharedBody<CallSignalDto>(packet);
                     if (callSignal is not null)
                         CallSignalReceived?.Invoke(this, callSignal);
                     return;
                 case PacketCommand.RegisterPushTokenResponse:
-                    var pushRegister = _bodySerializer.Deserialize<RegisterPushTokenResponseDto>(packet.Body);
+                    var pushRegister = ReadBody<RegisterPushTokenResponseDto, TcpRegisterPushTokenResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (pushRegister is not null
                         && !string.IsNullOrWhiteSpace(pushRegister.RequestId)
                         && _pushRegisterPending.TryRemove(pushRegister.RequestId, out var pushRegisterTcs))
@@ -1538,7 +1627,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.UnregisterPushTokenResponse:
-                    var pushUnregister = _bodySerializer.Deserialize<UnregisterPushTokenResponseDto>(packet.Body);
+                    var pushUnregister = ReadBody<UnregisterPushTokenResponseDto, TcpUnregisterPushTokenResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (pushUnregister is not null
                         && !string.IsNullOrWhiteSpace(pushUnregister.RequestId)
                         && _pushUnregisterPending.TryRemove(pushUnregister.RequestId, out var pushUnregisterTcs))
@@ -1547,7 +1636,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.CreateGroupResponse:
-                    var createGroup = _bodySerializer.Deserialize<CreateGroupResponseDto>(packet.Body);
+                    var createGroup = ReadBody<CreateGroupResponseDto, TcpCreateGroupResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (createGroup is not null
                         && !string.IsNullOrWhiteSpace(createGroup.RequestId)
                         && _createGroupPending.TryRemove(createGroup.RequestId, out var createGroupTcs))
@@ -1556,7 +1645,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.AddGroupMembersResponse:
-                    var addMembers = _bodySerializer.Deserialize<AddGroupMembersResponseDto>(packet.Body);
+                    var addMembers = ReadBody<AddGroupMembersResponseDto, TcpAddGroupMembersResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (addMembers is not null
                         && !string.IsNullOrWhiteSpace(addMembers.RequestId)
                         && _addGroupMembersPending.TryRemove(addMembers.RequestId, out var addMembersTcs))
@@ -1565,7 +1654,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.RemoveGroupMemberResponse:
-                    var removeMember = _bodySerializer.Deserialize<RemoveGroupMemberResponseDto>(packet.Body);
+                    var removeMember = ReadBody<RemoveGroupMemberResponseDto, TcpRemoveGroupMemberResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (removeMember is not null
                         && !string.IsNullOrWhiteSpace(removeMember.RequestId)
                         && _removeGroupMemberPending.TryRemove(removeMember.RequestId, out var removeMemberTcs))
@@ -1574,7 +1663,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.LeaveGroupResponse:
-                    var leaveGroup = _bodySerializer.Deserialize<LeaveGroupResponseDto>(packet.Body);
+                    var leaveGroup = ReadBody<LeaveGroupResponseDto, TcpLeaveGroupResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (leaveGroup is not null
                         && !string.IsNullOrWhiteSpace(leaveGroup.RequestId)
                         && _leaveGroupPending.TryRemove(leaveGroup.RequestId, out var leaveGroupTcs))
@@ -1583,7 +1672,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.DissolveGroupResponse:
-                    var dissolveGroup = _bodySerializer.Deserialize<DissolveGroupResponseDto>(packet.Body);
+                    var dissolveGroup = ReadBody<DissolveGroupResponseDto, TcpDissolveGroupResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (dissolveGroup is not null
                         && !string.IsNullOrWhiteSpace(dissolveGroup.RequestId)
                         && _dissolveGroupPending.TryRemove(dissolveGroup.RequestId, out var dissolveGroupTcs))
@@ -1592,7 +1681,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.ChangeMemberRoleResponse:
-                    var changeRole = _bodySerializer.Deserialize<ChangeMemberRoleResponseDto>(packet.Body);
+                    var changeRole = ReadBody<ChangeMemberRoleResponseDto, TcpChangeMemberRoleResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (changeRole is not null
                         && !string.IsNullOrWhiteSpace(changeRole.RequestId)
                         && _changeRolePending.TryRemove(changeRole.RequestId, out var changeRoleTcs))
@@ -1601,7 +1690,7 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.ListGroupMembersResponse:
-                    var listMembers = _bodySerializer.Deserialize<ListGroupMembersResponseDto>(packet.Body);
+                    var listMembers = ReadBody<ListGroupMembersResponseDto, TcpListGroupMembersResponse>(packet, BinaryPayloadMapper.ToClient);
                     if (listMembers is not null
                         && !string.IsNullOrWhiteSpace(listMembers.RequestId)
                         && _listGroupMembersPending.TryRemove(listMembers.RequestId, out var listMembersTcs))
@@ -1610,39 +1699,96 @@ namespace Core.Services
                     }
                     return;
                 case PacketCommand.MemberJoined:
-                    var memberJoined = _bodySerializer.Deserialize<MemberJoinedUpdateDto>(packet.Body);
+                    var memberJoined = ReadBody<MemberJoinedUpdateDto, TcpMemberJoinedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (memberJoined is not null)
                         GroupMemberJoined?.Invoke(this, memberJoined);
                     return;
                 case PacketCommand.MemberLeft:
-                    var memberLeft = _bodySerializer.Deserialize<MemberLeftUpdateDto>(packet.Body);
+                    var memberLeft = ReadBody<MemberLeftUpdateDto, TcpMemberLeftUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (memberLeft is not null)
                         GroupMemberLeft?.Invoke(this, memberLeft);
                     return;
                 case PacketCommand.MemberRemoved:
-                    var memberRemoved = _bodySerializer.Deserialize<MemberRemovedUpdateDto>(packet.Body);
+                    var memberRemoved = ReadBody<MemberRemovedUpdateDto, TcpMemberRemovedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (memberRemoved is not null)
                         GroupMemberRemoved?.Invoke(this, memberRemoved);
                     return;
                 case PacketCommand.RoleChanged:
-                    var roleChanged = _bodySerializer.Deserialize<RoleChangedUpdateDto>(packet.Body);
+                    var roleChanged = ReadBody<RoleChangedUpdateDto, TcpRoleChangedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (roleChanged is not null)
                         GroupRoleChanged?.Invoke(this, roleChanged);
                     return;
                 case PacketCommand.MembersAddedUpdate:
-                    var membersAdded = _bodySerializer.Deserialize<MembersAddedUpdateDto>(packet.Body);
+                    var membersAdded = ReadBody<MembersAddedUpdateDto, TcpMembersAddedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (membersAdded is not null)
                         GroupMembersAdded?.Invoke(this, membersAdded);
                     return;
                 case PacketCommand.ConversationDissolvedUpdate:
-                    var dissolved = _bodySerializer.Deserialize<ConversationDissolvedUpdateDto>(packet.Body);
+                    var dissolved = ReadBody<ConversationDissolvedUpdateDto, TcpConversationDissolvedUpdate>(packet, BinaryPayloadMapper.ToClient);
                     if (dissolved is not null)
                         GroupConversationDissolved?.Invoke(this, dissolved);
                     return;
                 case PacketCommand.Error:
-                    HandleErrorCommand(packet.Body);
+                    HandleErrorCommand(packet);
                     return;
             }
+        }
+
+        /// <summary>
+        /// 入站载荷统一读取：JSON 会话保持既有反序列化路径；二进制会话按共享 schema 解码后
+        /// 经映射层转回客户端 DTO。二进制解码未覆盖/畸形载荷按协议违例断连并抛出中止本次路由。
+        /// </summary>
+        private TClient? ReadBody<TClient, TShared>(MessagePacket packet, Func<TShared, TClient?> map)
+            where TClient : class
+            where TShared : class
+        {
+            if (NegotiatedPayloadFormat != SessionPayloadFormat.ChatAppBinaryV1)
+                return _bodySerializer.Deserialize<TClient>(packet.Body);
+
+            return map((TShared)DecodeSharedBody(packet));
+        }
+
+        /// <summary>客户端 DTO 即共享类型的命令（SharedBusinessTcpAliases 别名）：二进制解码无映射。</summary>
+        private T? ReadSharedBody<T>(MessagePacket packet) where T : class
+        {
+            if (NegotiatedPayloadFormat != SessionPayloadFormat.ChatAppBinaryV1)
+                return _bodySerializer.Deserialize<T>(packet.Body);
+
+            return (T)DecodeSharedBody(packet);
+        }
+
+        /// <summary>二进制会话下按共享 schema 解码入站帧；未覆盖/失败按协议违例断连。</summary>
+        private object DecodeSharedBody(MessagePacket packet)
+        {
+            var decode = TcpBinaryWireCodec.TryDecode(packet.Command, packet.Body, BinaryLimits.Default);
+            if (decode.Status == TcpBinaryWireStatus.Decoded)
+                return decode.Value!;
+
+            FailWithProtocolViolation(
+                packet.Command,
+                $"二进制载荷解码失败（Status={decode.Status}, {decode.DecodeStatus}）：{packet.Command}，按协议违例关闭连接。");
+            throw new InvalidDataException($"二进制载荷解码失败: {packet.Command}");
+        }
+
+        /// <summary>
+        /// 协议违例 fail-closed：发布致命 ProtocolError（ProtocolViolation）、结束在途握手/鉴权、
+        /// 断开连接。与 HandleResumeResponse 的处理保持一致。
+        /// </summary>
+        private void FailWithProtocolViolation(PacketCommand command, string message)
+        {
+            var error = new ProtocolErrorDto
+            {
+                Command = command,
+                ErrorCode = TcpProtocolErrorCode.ProtocolViolation.ToString(),
+                ErrorMessage = message,
+                IsFatal = true
+            };
+            ProtocolError?.Invoke(this, error);
+
+            var exception = new ProtocolRequestException(error);
+            Volatile.Read(ref _handshakeState)?.Tcs.TrySetException(exception);
+            Volatile.Read(ref _authState)?.Tcs.TrySetException(exception);
+            _ = DisconnectAsync(message, CancellationToken.None);
         }
 
         private void HandleServerHello(TcpServerHello? hello)
@@ -1657,17 +1803,24 @@ namespace Core.Services
                 return;
             }
 
-            if (hello is null ||
-                hello.ProtocolVersion != TcpFrameConstants.CurrentProtocolVersion ||
-                !string.Equals(hello.PayloadFormat, "json", StringComparison.Ordinal) ||
-                hello.MaxPayloadBytes <= 0 ||
-                (hello.FeatureBits & ~(uint)AdvertisedFeatures) != 0)
+            // 载荷格式精确 Ordinal 校验：仅接受 json 与 chatapp-bin-v1；其他任何值都是协议违例。
+            // json → 整个连接保持 JSON（老服务端/未启用二进制的回退路径）。
+            var helloInvalid = hello is null
+                || hello.ProtocolVersion != TcpFrameConstants.CurrentProtocolVersion
+                || hello.MaxPayloadBytes <= 0
+                || (hello.FeatureBits & ~(uint)GetAdvertisedFeatures()) != 0;
+            if (helloInvalid || !IsValidPayloadFormat(hello!.PayloadFormat))
             {
                 var error = new ProtocolErrorDto
                 {
                     Command = PacketCommand.ServerHello,
-                    ErrorCode = TcpProtocolErrorCode.UnsupportedVersion.ToString(),
-                    ErrorMessage = "服务器返回了不受支持的 TCP 握手参数",
+                    ErrorCode = (helloInvalid
+                            ? TcpProtocolErrorCode.UnsupportedVersion
+                            : TcpProtocolErrorCode.ProtocolViolation)
+                        .ToString(),
+                    ErrorMessage = helloInvalid
+                        ? "服务器返回了不受支持的 TCP 握手参数"
+                        : $"服务器返回了未知的载荷格式 '{hello!.PayloadFormat}'，按协议违例关闭连接",
                     IsFatal = true
                 };
                 ProtocolError?.Invoke(this, error);
@@ -1678,11 +1831,23 @@ namespace Core.Services
 
             Volatile.Write(ref _negotiatedProtocolVersion, hello.ProtocolVersion);
             Volatile.Write(ref _negotiatedFeatureBits, hello.FeatureBits);
+            Volatile.Write(ref _negotiatedPayloadFormat,
+                (int)ResolvePayloadFormat(hello.PayloadFormat));
             Volatile.Write(ref _serverHeartbeatIntervalMs, hello.HeartbeatIntervalMs);
             Volatile.Write(ref _serverMaxPayloadBytes, hello.MaxPayloadBytes);
             Volatile.Write(ref _handshakeGeneration, generation);
             state.Tcs.TrySetResult(hello);
         }
+
+        /// <summary>握手段可接受的载荷格式白名单（精确 Ordinal 比较）。</summary>
+        private static bool IsValidPayloadFormat(string? payloadFormat) =>
+            string.Equals(payloadFormat, TcpProtocolPayloadFormat.Json, StringComparison.Ordinal) ||
+            TcpBinaryWireCodec.IsNegotiatedPayloadFormat(payloadFormat);
+
+        private static SessionPayloadFormat ResolvePayloadFormat(string payloadFormat) =>
+            TcpBinaryWireCodec.IsNegotiatedPayloadFormat(payloadFormat)
+                ? SessionPayloadFormat.ChatAppBinaryV1
+                : SessionPayloadFormat.Json;
 
         private void HandleGoAway(TcpGoAway? goAway)
         {
@@ -1725,19 +1890,36 @@ namespace Core.Services
         }
 
         /// <summary>
-        /// 处理服务器 Error 命令：优先按共享 ProtocolErrorFrame 反序列化，
-        /// 兼容旧格式（ErrorResponseDto / 裸 UTF-8 文本）。
-        /// 有 RequestId 时精确完成对应请求；canonical 错误按 OriginCommand 结束同类在途请求；
-        /// IsFatal 才触发 AuthenticationFailed，普通业务错误仅发布 ProtocolError 事件。
+        /// 处理服务器 Error 命令。二进制会话按共享 ProtocolErrorFrame schema 解码；
+        /// JSON 会话优先按共享 ProtocolErrorFrame 反序列化，兼容旧格式
+        /// （ErrorResponseDto / 裸 UTF-8 文本）。错误归一为 ProtocolErrorDto 后统一处理。
         /// </summary>
-        private void HandleErrorCommand(ReadOnlySequence<byte> body)
+        private void HandleErrorCommand(MessagePacket packet)
         {
-            ProtocolErrorDto? error = null;
+            ProtocolErrorDto? error;
+
+            if (NegotiatedPayloadFormat == SessionPayloadFormat.ChatAppBinaryV1)
+            {
+                // 二进制会话：完整握手后的 Error 帧不再是 JSON，canonical frame 是唯一合法形态。
+                var decode = TcpBinaryWireCodec.TryDecode(PacketCommand.Error, packet.Body, BinaryLimits.Default);
+                if (decode.Status != TcpBinaryWireStatus.Decoded)
+                {
+                    FailWithProtocolViolation(
+                        PacketCommand.Error,
+                        $"二进制 Error 帧解码失败（Status={decode.Status}, {decode.DecodeStatus}），按协议违例关闭连接。");
+                    return;
+                }
+                error = BinaryPayloadMapper.ToClient((TcpProtocolErrorFrame)decode.Value!);
+                HandleResolvedError(error);
+                return;
+            }
+
+            error = null;
 
             // Gateway 当前格式。旧错误 DTO 即使字段完全不匹配也可能被 STJ 构造为空对象，
             // 因此必须先识别 canonical frame，再进入兼容路径。
             TcpProtocolErrorFrame? frame = null;
-            try { frame = _bodySerializer.Deserialize<TcpProtocolErrorFrame>(body); } catch { /* 非结构化错误体 */ }
+            try { frame = _bodySerializer.Deserialize<TcpProtocolErrorFrame>(packet.Body); } catch { /* 非结构化错误体 */ }
             if (frame is not null && frame.Code != TcpProtocolErrorCode.None)
             {
                 error = new ProtocolErrorDto
@@ -1755,7 +1937,7 @@ namespace Core.Services
 
             if (error is null)
             {
-                try { error = _bodySerializer.Deserialize<ProtocolErrorDto>(body); } catch { /* 非结构化错误体 */ }
+                try { error = _bodySerializer.Deserialize<ProtocolErrorDto>(packet.Body); } catch { /* 非结构化错误体 */ }
                 if (error is not null &&
                     string.IsNullOrWhiteSpace(error.RequestId) &&
                     error.Command is null &&
@@ -1772,19 +1954,27 @@ namespace Core.Services
             {
                 // 兼容旧格式：ErrorResponseDto 或裸文本。
                 ErrorResponseDto? legacy = null;
-                try { legacy = _bodySerializer.Deserialize<ErrorResponseDto>(body); } catch { /* 忽略 */ }
+                try { legacy = _bodySerializer.Deserialize<ErrorResponseDto>(packet.Body); } catch { /* 忽略 */ }
                 error = new ProtocolErrorDto
                 {
                     RequestId = null,
                     Command = PacketCommand.Error,
                     ErrorCode = legacy is null ? "UNKNOWN" : legacy.StatusCode.ToString(),
                     ErrorMessage = legacy is null || string.IsNullOrWhiteSpace(legacy.ErrorMessage)
-                        ? (body.IsSingleSegment ? Encoding.UTF8.GetString(body.FirstSpan) : Encoding.UTF8.GetString(body.ToArray()))
+                        ? (packet.Body.IsSingleSegment
+                            ? Encoding.UTF8.GetString(packet.Body.FirstSpan)
+                            : Encoding.UTF8.GetString(packet.Body.ToArray()))
                         : legacy.ErrorMessage,
                     IsFatal = false
                 };
             }
 
+            HandleResolvedError(error);
+        }
+
+        /// <summary>Error 处理后半段：关联在途请求、致命错误收敛到鉴权失败、广播 ProtocolError。</summary>
+        private void HandleResolvedError(ProtocolErrorDto error)
+        {
             // 关联在途请求：完成对应 TCS，调用方自行处理，不弹全局错误。
             if (FailByRequestId(error) || FailByOriginCommand(error))
                 return;

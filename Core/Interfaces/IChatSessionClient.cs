@@ -61,6 +61,7 @@ public interface IChatSessionClient : IDisposable
         string? clientMessageId = null,
         string? conversationId = null,
         IReadOnlyList<long>? mentionedUserIds = null,
+        IReadOnlyList<AttachmentRefDto>? attachments = null,
         CancellationToken ct = default);
 
     /// <summary>发送心跳包；若距上次 ACK 超过阈值则主动判定半开并断连。</summary>

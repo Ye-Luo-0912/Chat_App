@@ -9,6 +9,8 @@
     <ItemGroup>
         <PackageReference Include="ChatApp.Contracts.Http" />
         <PackageReference Include="ChatApp.Protocol.Tcp" />
+        <!-- chatapp-bin-v1 双 codec；Schemas 传递依赖 Binary / Binary.Core / Protocol.Tcp 0.5.3 -->
+        <PackageReference Include="ChatApp.Protocol.Tcp.Binary.Schemas" />
     </ItemGroup>
 
 </Project>
