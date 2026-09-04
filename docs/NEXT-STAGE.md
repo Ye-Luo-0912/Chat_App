@@ -105,6 +105,15 @@ UI 新增语音气泡模板（播放/暂停按钮 + 进度条 + 时长），`Voi
 
 完成标准：两端在直连、TURN、拒绝、超时、断线重连和网络切换下都得到唯一终态；关闭通话能力不影响消息与同步。
 
+> 进展（群通话 Mesh 阶段一，2026-09-04）：**已交付**。`CallSession` 群组模型
+> （Participants/加入/离开事件/TryPromoteToGroup 被叫晋升）+ `CallSessionManager`
+> 逐成员 invite（每成员独立 offer 与 PeerMediaFactory 实例，hub 星型 ≤4 人）、
+> 发起者 End=全会话终态、成员离开仅拆除自身媒体；wire `CallSignal.Event`
+> （participant-joined/left，unknown 容忍跳过）+ `TcpCallGrant.CallKind/Participants`
+> （Shared 0.5.7，Direct 载荷与 0.5.6 逐字节兼容）。消费 Shared 0.5.7。
+> 测试：UnitTests 342 / Protocol 103 / IntegrationTests 235 全绿（+29）；
+> 真机 relgate 三客户端 e2e PASS 48/0。设计：Gateway docs/group-call-sfu-design.md。
+
 #### 进展（客户端信令控制面 wire 层已闭环，状态机与会话编排已闭环）
 
 - `ChatSessionClient` 新增 `SendCallCommandAsync`（call id + command id 幂等、单调 revision；grant 只原样携带）与 `CallSignalReceived` S2C push 事件；`PacketCommand.CallCommandRequest/Response/CallSignal` 走真实编解码与按 RequestId 精确配对。
