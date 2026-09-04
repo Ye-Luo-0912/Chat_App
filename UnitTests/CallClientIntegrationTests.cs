@@ -248,6 +248,31 @@ public sealed class CallClientIntegrationTests
         Assert.False(vm.IsCallActive);
         Assert.False(vm.IsIncomingCall);
         Assert.Equal(string.Empty, vm.CallStatusText);
+        Assert.Equal(string.Empty, vm.CallParticipantsText);
+    }
+
+    [Fact]
+    public void GroupCallBanner_ShowsParticipantCount_DirectCallStaysEmpty()
+    {
+        var callManager = new FakeCallSessionManager();
+        var vm = CreateVm(new FakeCallApiService(), callManager);
+
+        // 群组（Mesh）通话：横幅呈现成员数（"N 人通话"）。
+        var groupSession = new CallSession(
+            "group-1", CallRole.Caller, CallerId,
+            new[] { CallerId, CalleeId, 7003L }, CallStateDto.Active);
+        SimulateCallChanged(vm, groupSession);
+
+        Assert.True(vm.IsCallActive);
+        Assert.Equal("3 人通话", vm.CallParticipantsText);
+
+        // 1:1 通话：成员数呈现为空（既有横幅文案不变）。
+        var directVm = CreateVm(new FakeCallApiService(), new FakeCallSessionManager());
+        var directSession = new CallSession("call-5", CallRole.Caller, CalleeId, CallStateDto.Active);
+        SimulateCallChanged(directVm, directSession);
+        Assert.True(directVm.IsCallActive);
+        Assert.Equal("通话中…", directVm.CallStatusText);
+        Assert.Equal(string.Empty, directVm.CallParticipantsText);
     }
 
     // ════════════════ 构造与驱动 ════════════════

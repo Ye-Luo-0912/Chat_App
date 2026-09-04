@@ -307,6 +307,14 @@ public class ChatViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref _callStatusText, value);
     }
 
+    /// <summary>群组（Mesh）通话成员数呈现（"N 人通话"）；1:1 通话为空。</summary>
+    private string _callParticipantsText = string.Empty;
+    public string CallParticipantsText
+    {
+        get => _callParticipantsText;
+        private set => SetProperty(ref _callParticipantsText, value);
+    }
+
 #pragma warning disable CS8618
     public ChatViewModel()
     {
@@ -781,6 +789,10 @@ public class ChatViewModel : ViewModelBase, IDisposable
         IncomingCallerName = incoming ? PeerNameOf(call!.PeerUserId) : string.Empty;
         CallStatusText = hasActive
             ? (call!.State == CallStateDto.Active ? "通话中…" : "呼叫中…")
+            : string.Empty;
+        // 群组（Mesh）通话横幅：呈现成员数（"N 人通话"）；成员变更经 CallStateChanged 刷新。
+        CallParticipantsText = hasActive && call!.IsGroup
+            ? $"{Math.Max(call.ParticipantCount, 1)} 人通话"
             : string.Empty;
 
         StartCallCommand.RaiseCanExecuteChanged();

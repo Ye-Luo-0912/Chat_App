@@ -1,16 +1,25 @@
 using Core.Interfaces;
 using Core.Models;
 using System.Collections.Concurrent;
+using System.Globalization;
+using TcpCallKind = ChatApp.Shared.Protocol.Tcp.TcpCallKind;
+using TcpCallSignals = ChatApp.Shared.Protocol.Tcp.TcpCallConstants;
 
 namespace Core.Services;
 
 /// <summary>
-/// 客户端通话会话管理器（CALL-E2E-2）。
+/// 客户端通话会话管理器（CALL-E2E-2；群组多方 GROUP-CALL-1）。
 /// <para>
 /// 编排通话会话：主叫发起 / 被叫应答/拒绝 / 取消 / 挂断 / 重连，来电分派到被叫会话，
 /// invite/ringing 超时收尾，多设备竞争时以服务端确认的终态收敛（authoritative）。
 /// 本地命令乐观迁移 + 服务端响应权威覆盖；对端信令按 signal id 幂等去重。
 /// SDP 经 <see cref="ICallMediaSession"/> 媒体面抽象在信令平面中传递。
+/// </para>
+/// <para>
+/// 群组（Mesh ≤4 人）为本类加性扩展：会话 + 成员字典模型，每成员一条独立对端媒体协商
+/// （<see cref="PeerMediaFactory"/> 每 PeerConnection 一个实例）；主叫为 hub 逐成员 offer/answer，
+/// 成员 accept 即加入、participant-left 拆除该成员媒体、发起者 end 终结全会话。
+/// 1:1 Direct 路径零改动。
 /// </para>
 /// </summary>
 public sealed class CallSessionManager : ICallSessionManager
@@ -23,6 +32,12 @@ public sealed class CallSessionManager : ICallSessionManager
     private readonly ConcurrentDictionary<string, bool> _startedMedia = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _appliedRemote = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _timeouts = new(StringComparer.Ordinal);
+    // 群组（Mesh）：对端成员媒体与配套状态，键 "callId|memberUserId"（每成员一个实例）。
+    private readonly ConcurrentDictionary<string, ICallMediaSession> _peerMedia = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _peerStarted = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _peerAppliedRemote = new(StringComparer.Ordinal);
+    // 群组 grant 缓存（发起者持有）：供后续成员命令（accept/end 等）原样携带。
+    private readonly ConcurrentDictionary<string, CallGrantDto> _grants = new(StringComparer.Ordinal);
     private bool _disposed;
 
     public CallSessionManager(IChatSessionClient client, ICurrentUserContext currentUser)
@@ -49,6 +64,10 @@ public sealed class CallSessionManager : ICallSessionManager
 
     /// <summary>媒体面工厂：每个通话创建对应媒体会话；缺省为 null（仅控制面，不建媒体）。</summary>
     public Func<string, ICallMediaSession?>? MediaFactory { get; set; }
+
+    /// <summary>群组对端媒体工厂：每成员一条 PeerConnection（参数 callId + memberUserId）；
+    /// 未设置时回退按通话的 <see cref="MediaFactory"/> 逐成员调用。</summary>
+    public Func<string, long, ICallMediaSession?>? PeerMediaFactory { get; set; }
 
     public event EventHandler<CallSession>? IncomingCall;
     public event EventHandler<CallSession>? CallStateChanged;
@@ -91,17 +110,125 @@ public sealed class CallSessionManager : ICallSessionManager
         }
     }
 
+    /// <inheritdoc />
+    public async Task<CallSession> StartGroupCallAsync(
+        string callId,
+        CallGrantDto grant,
+        string? sdpOffer = null,
+        CancellationToken ct = default)
+    {
+        EnsureUsable();
+        ArgumentException.ThrowIfNullOrWhiteSpace(callId);
+        ArgumentNullException.ThrowIfNull(grant);
+        if (!string.Equals(grant.CallId, callId, StringComparison.Ordinal))
+            throw new ArgumentException("grant 与通话 Id 不匹配。", nameof(grant));
+        if (grant.CallKind != TcpCallKind.Group)
+            throw new ArgumentException("发起群组通话需要 CallKind=Group 的 grant。", nameof(grant));
+
+        var me = _currentUser.RequireUserId();
+        if (grant.CallerUserId != me)
+            throw new InvalidOperationException("仅群组 grant 发起者可发起群组通话。");
+        var others = (grant.Participants ?? Array.Empty<long>())
+            .Where(id => id > 0 && id != me)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToArray();
+        if (others.Length == 0)
+            throw new ArgumentException("群组 grant 缺少其他参与者。", nameof(grant));
+
+        // 群组会话：成员集合 = grant 签发名单（含主叫，升序，见 group-call-sfu-design §4.1）；
+        // 被叫侧仅知 [本端, 发起者]，其余成员随加入信令逐个出现（wire 不向被叫透出名单）。
+        var roster = grant.Participants is { Count: > 0 } ? grant.Participants : new long[] { me };
+        var session = new CallSession(callId, CallRole.Caller, grant.CallerUserId, roster);
+        if (!_sessions.TryAdd(callId, session))
+            throw new InvalidOperationException("通话已存在。");
+        _grants[callId] = grant;
+
+        // 本地乐观迁移（Idle → Ringing）一次；随后逐成员 invite 走无迁移的成员命令路径
+        // （无状态中继按名单扇出，房间状态由客户端按成员/revision 自洽）。
+        if (!session.TryApplyLocalCommand(CallCommandTypeDto.Invite))
+        {
+            _grants.TryRemove(callId, out _);
+            _sessions.TryRemove(callId, out _);
+            throw new InvalidOperationException("不允许的本地迁移：Invite（当前状态 Ringing/其他）。");
+        }
+
+        // Mesh 编排：每成员独立 offer（每 PeerConnection 一个实例）→ 逐成员 invite 上行。
+        var failures = new List<Exception>();
+        foreach (var member in others)
+        {
+            try
+            {
+                var media = CreatePeerMedia(session, member);
+                var offer = sdpOffer ?? media?.CreateOffer();
+                await SendGroupMemberCommandAsync(
+                    session, CallCommandTypeDto.Invite, member, offer, grant, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // 单成员邀请失败不拖垮整场：拆其媒体，继续邀请其余成员。
+                failures.Add(ex);
+                DestroyPeerMedia(callId, member);
+            }
+        }
+
+        if (failures.Count == others.Length)
+        {
+            // 全部邀请失败：fail-closed，本端唯一终态收尾后向上抛。
+            session.ForceEnd(CallEndReasonDto.HungUp);
+            CompleteSession(session);
+            throw new AggregateException("群组通话邀请全部上行失败。", failures);
+        }
+
+        StartTimeout(session, InviteTimeout, CallCommandTypeDto.Cancel, CallEndReasonDto.TimedOut);
+        return session;
+    }
+
+    /// <summary>
+    /// 群组成员命令上行（无状态中继路径）：不做本地状态迁移（房间状态由成员/revision 自洽），
+    /// grant 原样携带；服务端响应推进权威 revision（回显状态与本地一致，不产生迁移）。
+    /// </summary>
+    private async Task<CallCommandResponseDto> SendGroupMemberCommandAsync(
+        CallSession session,
+        CallCommandTypeDto type,
+        long memberUserId,
+        string? sdp,
+        CallGrantDto grant,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(sdp))
+            session.SetLocalSdp(sdp);
+        var request = new CallCommandRequestDto
+        {
+            CommandId = session.NextCommandId(),
+            CallId = session.CallId,
+            Type = type,
+            ActorUserId = _currentUser.RequireUserId(),
+            Revision = session.NextRevision(),
+            Grant = grant,
+            Sdp = sdp,
+            ClientOccurredAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+        var response = await _client.SendCallCommandAsync(request, ct).ConfigureAwait(false);
+        session.ApplyServerState(response);
+        return response;
+    }
+
     public async Task AcceptAsync(string callId, string? sdpAnswer = null, CancellationToken ct = default)
     {
         EnsureUsable();
         var session = RequireSession(callId);
-        var media = GetMedia(callId);
+        // 群组：被叫仅与发起者协商（Mesh hub 星型），媒体实例按成员键取用
+        // （晋升前的 invite 路径落在通话级实例，此处回退兼容）；1:1 沿用通话级实例。
+        var media = session.IsGroup
+            ? (GetPeerMedia(callId, session.PeerUserId) ?? GetMedia(callId))
+            : GetMedia(callId);
         // 生成 answer 前必须先应用对端 offer（WebRTC 协商顺序）。仅应用一次，避免与 StartMedia 重复。
         if (media is not null && !string.IsNullOrWhiteSpace(session.RemoteSdp) && _appliedRemote.TryAdd(callId, true))
             media.SetRemoteDescription(session.RemoteSdp);
         var answer = sdpAnswer ?? media?.CreateAnswer();
         CancelTimeout(callId);
-        await SendCommandAsync(session, CallCommandTypeDto.Accept, sdp: answer, ct: ct);
+        await SendCommandAsync(session, CallCommandTypeDto.Accept, sdp: answer, ct: ct).ConfigureAwait(false);
     }
 
     public Task RejectAsync(string callId, CancellationToken ct = default)
@@ -132,8 +259,11 @@ public sealed class CallSessionManager : ICallSessionManager
     {
         EnsureUsable();
         var session = RequireSession(callId);
-        var offer = sdp ?? GetMedia(callId)?.RestartIce();
-        await SendCommandAsync(session, CallCommandTypeDto.Reconnect, sdp: offer, ct: ct);
+        // 群组：取首个成员实例做 ICE restart offer（每成员实例共用同一条重连命令广播）。
+        var restartOffer = sdp
+            ?? GetMedia(callId)?.RestartIce()
+            ?? _peerMedia.FirstOrDefault(kv => IsKeyForCall(kv.Key, callId)).Value?.RestartIce();
+        await SendCommandAsync(session, CallCommandTypeDto.Reconnect, sdp: restartOffer, ct: ct).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -148,6 +278,12 @@ public sealed class CallSessionManager : ICallSessionManager
         foreach (var media in _media.Values)
             media.Dispose();
         _media.Clear();
+        foreach (var media in _peerMedia.Values)
+            media.Dispose();
+        _peerMedia.Clear();
+        _peerStarted.Clear();
+        _peerAppliedRemote.Clear();
+        _grants.Clear();
         _sessions.Clear();
         _startedMedia.Clear();
         _appliedRemote.Clear();
@@ -194,7 +330,8 @@ public sealed class CallSessionManager : ICallSessionManager
             Type = type,
             ActorUserId = _currentUser.RequireUserId(),
             Revision = session.NextRevision(),
-            Grant = grant,
+            // 群组会话：无状态中继要求每条命令携带 grant；发起者缓存随命令自动附加。
+            Grant = grant ?? (session.IsGroup ? FindGrant(session.CallId) : null),
             Sdp = sdp,
             ClientOccurredAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
@@ -253,9 +390,118 @@ public sealed class CallSessionManager : ICallSessionManager
 
         if (_sessions.TryGetValue(signal.CallId, out var existing))
         {
+            // 群组证据：1:1 形态的被叫会话收到非主叫来源的成员信令（无状态中继 Mesh 扇出），
+            // 晋升为群组会话（初始成员 [本端, 发起者]），随后信令按群组语义应用。
+            if (!existing.IsGroup
+                && existing.Role == CallRole.Callee
+                && _currentUser.TryGetUserId(out var selfId)
+                && IsGroupMembershipEvidence(existing, signal, selfId))
+            {
+                existing.TryPromoteToGroup(existing.PeerUserId, new[] { selfId, existing.PeerUserId });
+            }
+
             var changed = existing.ApplyRemoteSignal(signal);
+            if (existing.IsGroup)
+                HandleGroupPeerSignal(existing, signal);
             if (changed)
                 OnSessionChanged(existing);
+        }
+    }
+
+    /// <summary>该信令是否构成"群组存在"的证据：来自第三成员的 join 事件或非 invite 类成员信令。</summary>
+    private static bool IsGroupMembershipEvidence(CallSession session, CallSignalDto signal, long selfId)
+    {
+        var from = signal.FromUserId;
+        if (from <= 0 || from == selfId || from == session.PeerUserId)
+            return false;
+        if (string.Equals(
+                signal.Event,
+                TcpCallSignals.SignalEventParticipantJoined,
+                StringComparison.Ordinal))
+            return true;
+        return signal.Kind != CallCommandTypeDto.Invite;
+    }
+
+    /// <summary>
+    /// 群组会话的每成员媒体编排（Mesh 阶段一，主叫为 hub）：
+    /// <list type="bullet">
+    /// <item>成员 accept：其 answer 应用到该成员的媒体实例并启动（逐成员 offer/answer 交换收口）；</item>
+    /// <item>participant-joined（发起者侧）：为该成员建立新对端协商——逐成员 invite（新 grant 批次语义）；</item>
+    /// <item>participant-left / 成员 reject：拆除该成员媒体与状态（成员集合变更已由会话模型完成）；</item>
+    /// <item>发起者离开：会话已终态，全部成员媒体由 <see cref="CompleteSession"/> 统一收尾。</item>
+    /// </list>
+    /// </summary>
+    private void HandleGroupPeerSignal(CallSession session, CallSignalDto signal)
+    {
+        var callId = session.CallId;
+        var from = signal.FromUserId;
+        if (from <= 0 || from == _currentUser.UserId)
+            return;
+
+        if (string.Equals(signal.Event, TcpCallSignals.SignalEventParticipantJoined, StringComparison.Ordinal))
+        {
+            var joined = signal.ParticipantUserId ?? from;
+            if (joined > 0 && joined != _currentUser.UserId)
+                EnsureMemberNegotiationAsync(session, joined);
+            return;
+        }
+
+        switch (signal.Kind)
+        {
+            case CallCommandTypeDto.Accept:
+            {
+                // 逐成员 answer 收口（主叫 hub 专属）：answer 应用到该成员实例（幂等一次）并启动。
+                // 被叫侧仅记录成员加入（会话模型已增减成员）；被叫与发起者的协商由本端 AcceptAsync 收口。
+                if (session.Role != CallRole.Caller)
+                    break;
+                var media = EnsurePeerMedia(session, from);
+                var key = PeerKey(callId, from);
+                if (media is not null
+                    && !string.IsNullOrWhiteSpace(signal.Sdp)
+                    && _peerAppliedRemote.TryAdd(key, true))
+                {
+                    media.SetRemoteDescription(signal.Sdp);
+                }
+                StartPeerMedia(key, media);
+                break;
+            }
+            case CallCommandTypeDto.Reject:
+                // 成员拒绝 = 成员离开：拆其媒体（会话模型已移除成员并触发事件）。
+                DestroyPeerMedia(callId, from);
+                break;
+            case CallCommandTypeDto.End:
+            {
+                var left = signal.ParticipantUserId ?? from;
+                if (left == session.InitiatorUserId)
+                    return; // 发起者离开：会话已终态，CompleteSession 统一拆除全部成员媒体。
+                DestroyPeerMedia(callId, left);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 发起者侧的成员中途加入编排：为该成员建立对端媒体实例并发起逐成员 invite
+    /// （offer 由该成员实例生成；成员变更 = 新 grant 批次 + revision 递增，grant 以当前缓存携带）。
+    /// 上行失败仅拆除该成员媒体，不影响在场成员（尽力而为，与房间无服务端状态的语义一致）。
+    /// </summary>
+    private async void EnsureMemberNegotiationAsync(CallSession session, long memberUserId)
+    {
+        try
+        {
+            if (!_grants.TryGetValue(session.CallId, out var grant))
+                return;
+            var media = EnsurePeerMedia(session, memberUserId);
+            var offer = media?.CreateOffer();
+            await SendGroupMemberCommandAsync(
+                session, CallCommandTypeDto.Invite, memberUserId, offer, grant, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            DestroyPeerMedia(session.CallId, memberUserId);
         }
     }
 
@@ -326,19 +572,6 @@ public sealed class CallSessionManager : ICallSessionManager
             CompleteSession(session);
     }
 
-    private void StartMedia(CallSession session)
-    {
-        if (_startedMedia.ContainsKey(session.CallId))
-            return;
-        var media = GetMedia(session.CallId);
-        if (media is null)
-            return;
-        if (!string.IsNullOrWhiteSpace(session.RemoteSdp) && !_appliedRemote.ContainsKey(session.CallId))
-            media.SetRemoteDescription(session.RemoteSdp);
-        media.Start();
-        _startedMedia[session.CallId] = true;
-    }
-
     private void CreateMedia(CallSession session)
     {
         if (MediaFactory is null)
@@ -351,6 +584,125 @@ public sealed class CallSessionManager : ICallSessionManager
     private ICallMediaSession? GetMedia(string callId)
         => _media.TryGetValue(callId, out var media) ? media : null;
 
+    private void StartMedia(CallSession session)
+    {
+        var callId = session.CallId;
+        if (session.IsGroup)
+        {
+            // 群组：逐成员启动（仅已应用对端 offer/answer 的实例；StartPeerMedia 幂等）。
+            foreach (var key in _peerAppliedRemote.Keys)
+            {
+                if (!IsKeyForCall(key, callId))
+                    continue;
+                StartPeerMedia(key, GetPeerMediaByKey(key));
+            }
+            // 晋升前的被叫实例仍落在通话级键位：一并启动（幂等）。
+            if (_appliedRemote.ContainsKey(callId)
+                && _media.TryGetValue(callId, out var legacyMedia)
+                && _startedMedia.TryAdd(callId, true))
+            {
+                legacyMedia.Start();
+            }
+            return;
+        }
+        if (_startedMedia.ContainsKey(callId))
+            return;
+        var media = GetMedia(callId);
+        if (media is null)
+            return;
+        if (!string.IsNullOrWhiteSpace(session.RemoteSdp) && !_appliedRemote.ContainsKey(callId))
+            media.SetRemoteDescription(session.RemoteSdp);
+        media.Start();
+        _startedMedia[callId] = true;
+    }
+
+    // ── 群组每成员媒体（Mesh：每 PeerConnection 一个实例，键 "callId|memberUserId"） ──
+
+    private static string PeerKey(string callId, long memberUserId)
+        => string.Create(CultureInfo.InvariantCulture, $"{callId}|{memberUserId}");
+
+    private static bool IsKeyForCall(string key, string callId)
+        => key.StartsWith(callId, StringComparison.Ordinal)
+            && key.Length > callId.Length
+            && key[callId.Length] == '|';
+
+    private ICallMediaSession? CreatePeerMedia(CallSession session, long memberUserId)
+    {
+        var key = PeerKey(session.CallId, memberUserId);
+        if (_peerMedia.TryGetValue(key, out var existingMedia))
+            return existingMedia;
+        // 未设置对端工厂时回退按通话工厂逐成员调用（Mesh：每 PeerConnection 仍各一个实例）。
+        var callMediaFactory = MediaFactory;
+        var fallback = session.IsGroup && callMediaFactory is not null
+            ? new Func<string, long, ICallMediaSession?>((cid, _) => callMediaFactory(cid))
+            : null;
+        var media = (PeerMediaFactory ?? fallback)?.Invoke(session.CallId, memberUserId);
+        if (media is not null)
+            _peerMedia[key] = media;
+        return media;
+    }
+
+    private ICallMediaSession? EnsurePeerMedia(CallSession session, long memberUserId)
+        => CreatePeerMedia(session, memberUserId);
+
+    private ICallMediaSession? GetPeerMedia(string callId, long memberUserId)
+        => _peerMedia.TryGetValue(PeerKey(callId, memberUserId), out var media) ? media : null;
+
+    private ICallMediaSession? GetPeerMediaByKey(string key)
+        => _peerMedia.TryGetValue(key, out var media) ? media : null;
+
+    private void StartPeerMedia(string key, ICallMediaSession? media)
+    {
+        if (media is null || !_peerStarted.TryAdd(key, true))
+            return;
+        media.Start();
+    }
+
+    /// <summary>拆除单个成员的媒体与配套状态（成员离开语义：仅拆自身，不终结全会话）。</summary>
+    private void DestroyPeerMedia(string callId, long memberUserId)
+    {
+        var key = PeerKey(callId, memberUserId);
+        if (_peerMedia.TryRemove(key, out var media))
+        {
+            try
+            {
+                media.Stop();
+            }
+            finally
+            {
+                media.Dispose();
+            }
+        }
+        _peerStarted.TryRemove(key, out _);
+        _peerAppliedRemote.TryRemove(key, out _);
+    }
+
+    /// <summary>拆除某通话的全部成员媒体（会话终态收尾）。</summary>
+    private void DestroyAllPeerMedia(string callId)
+    {
+        foreach (var key in _peerMedia.Keys)
+        {
+            if (!IsKeyForCall(key, callId))
+                continue;
+            if (_peerMedia.TryRemove(key, out var media))
+            {
+                try
+                {
+                    media.Stop();
+                }
+                finally
+                {
+                    media.Dispose();
+                }
+            }
+            _peerStarted.TryRemove(key, out _);
+            _peerAppliedRemote.TryRemove(key, out _);
+        }
+    }
+
+    private CallGrantDto? FindGrant(string callId)
+        => _grants.TryGetValue(callId, out var grant) ? grant : null;
+
     private void CompleteSession(CallSession session)
     {
         CancelTimeout(session.CallId);
@@ -358,6 +710,8 @@ public sealed class CallSessionManager : ICallSessionManager
         _sessions.TryRemove(session.CallId, out _);
         _startedMedia.TryRemove(session.CallId, out _);
         _appliedRemote.TryRemove(session.CallId, out _);
+        _grants.TryRemove(session.CallId, out _);
+        DestroyAllPeerMedia(session.CallId);
         if (_media.TryRemove(session.CallId, out var media))
         {
             media.Stop();

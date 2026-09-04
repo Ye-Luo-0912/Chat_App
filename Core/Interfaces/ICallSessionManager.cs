@@ -31,6 +31,27 @@ public interface ICallSessionManager : IDisposable
         CallGrantDto? grant = null,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// 群组发起方媒体工厂（Mesh 阶段一：每成员一条对端协商 = 每 PeerConnection 一个实例）。
+    /// 参数为 (callId, memberUserId)。缺省回退到按通话的 <see cref="MediaFactory"/>（逐成员调用一次）。
+    /// </summary>
+    Func<string, long, ICallMediaSession?>? PeerMediaFactory { get => null; set { } }
+
+    /// <summary>
+    /// 主叫发起群组（Mesh ≤4 人）语音通话（GROUP-CALL-1）。
+    /// 对 grant.Participants 中除本端外的每个成员经既有信令链发起 invite（逐成员 offer）；
+    /// 成员 accept 即加入，会话成员集合与事件随之演进。
+    /// </summary>
+    /// <param name="callId">通话 Id（须与 grant.CallId 一致）。</param>
+    /// <param name="grant">Server 签发的群组 grant（CallKind=Group，名单含主叫）。</param>
+    /// <param name="sdpOffer">显式 offer；缺省时由每成员媒体面逐成员生成。</param>
+    Task<CallSession> StartGroupCallAsync(
+        string callId,
+        CallGrantDto grant,
+        string? sdpOffer = null,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话管理器不支持群组通话。");
+
     /// <summary>被叫接听（携带 SDP answer，可缺省由媒体面生成）。</summary>
     Task AcceptAsync(string callId, string? sdpAnswer = null, CancellationToken ct = default);
 
