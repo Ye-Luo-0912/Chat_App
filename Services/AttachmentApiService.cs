@@ -22,16 +22,23 @@ public sealed class AttachmentApiService : IAttachmentClientService
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private static readonly HttpClient S3UploadClient = new()
+    private static readonly HttpClient SharedS3UploadClient = new()
     {
         Timeout = TimeSpan.FromMinutes(10)
     };
 
-    private readonly HttpClient _httpClient;
+    /// <summary>
+    /// 分块续传的单块大小；也作为启用分块的阈值——小文件单请求即可，不值得多一次往返。
+    /// </summary>
+    internal static readonly long ChunkSizeBytes = 1 << 20; // 1 MiB
 
-    public AttachmentApiService(HttpClient httpClient)
+    private readonly HttpClient _httpClient;
+    private readonly HttpClient _s3UploadClient;
+
+    public AttachmentApiService(HttpClient httpClient, HttpClient? s3UploadClient = null)
     {
         _httpClient = httpClient;
+        _s3UploadClient = s3UploadClient ?? SharedS3UploadClient;
     }
 
     public async Task<AttachmentPresignResponse> PresignAsync(
@@ -107,7 +114,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
                 Content = streamContent
             };
             ApplyUploadHeaders(uploadRequest, ticket.UploadHeaders);
-            response = await S3UploadClient.SendAsync(uploadRequest, ct).ConfigureAwait(false);
+            response = await _s3UploadClient.SendAsync(uploadRequest, ct).ConfigureAwait(false);
         }
         else
         {
@@ -131,6 +138,221 @@ public sealed class AttachmentApiService : IAttachmentClientService
             await EnsureSuccessAsync(response, "上传", ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// 上传编排：鉴权 API 且内容超过单块阈值时走分块断点续传（PUT ?offset=），
+    /// S3 直传（绝对 URL）或小文件回退整包。分块路径读响应 received 对齐服务端权威偏移，
+    /// 传输中断后先探针 progress 再续传；服务端不支持分块时整体回退整包 PUT。
+    /// </summary>
+    private async Task UploadWithResumeAsync(
+        AttachmentPresignResponse ticket,
+        Stream content,
+        string contentType,
+        long contentLength,
+        IProgress<AttachmentUploadProgress>? progress,
+        int maxAttempts,
+        CancellationToken ct)
+    {
+        // S3 预签名 URL：不经鉴权 API，无 offset 语义，整包直传。
+        var isS3Direct = Uri.TryCreate(ticket.UploadUrl, UriKind.Absolute, out var absolute)
+            && (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
+            && !IsSameAuthority(absolute, _httpClient.BaseAddress);
+
+        // 分块按 offset 切流，要求可 seek；小文件单请求即完成，不引入额外往返。
+        var resumable = !isS3Direct && content.CanSeek && contentLength > ChunkSizeBytes;
+        if (!resumable)
+        {
+            await UploadAsync(ticket, content, contentType, contentLength, progress, ct).ConfigureAwait(false);
+            return;
+        }
+
+        await UploadChunkedAsync(ticket, content, contentType, contentLength, progress, maxAttempts, ct)
+            .ConfigureAwait(false);
+    }
+
+    private async Task UploadChunkedAsync(
+        AttachmentPresignResponse ticket,
+        Stream content,
+        string contentType,
+        long contentLength,
+        IProgress<AttachmentUploadProgress>? progress,
+        int maxAttempts,
+        CancellationToken ct)
+    {
+        var uploadPath = ResolveRelativeUploadPath(ticket.UploadUrl);
+        var mediaType = new MediaTypeHeaderValue(
+            string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType);
+        long offset = 0;
+        var attempts = 0;
+
+        while (offset < contentLength)
+        {
+            ct.ThrowIfCancellationRequested();
+            attempts++;
+            var chunkLength = Math.Min(ChunkSizeBytes, contentLength - offset);
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, WithOffsetQuery(uploadPath, offset));
+            request.Content = CreateChunkContent(content, offset, chunkLength, mediaType, progress, ticket.AttachmentId, contentLength);
+            // 分块流式内容同样为 401 重试提供重建工厂（重新 seek 到块起点）。
+            request.Options.Set(RequestOptionKeys.ReplayFactory, _ =>
+            {
+                request.Content = CreateChunkContent(
+                    content, offset, chunkLength, mediaType, progress, ticket.AttachmentId, contentLength);
+                return Task.FromResult<HttpContent?>(request.Content);
+            });
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsRetryable(ex) && attempts < maxAttempts)
+            {
+                // 传输中断：探针取服务端权威 offset 后续传。
+                var (fallBack, resumed) = await ResumeOffsetAsync(ticket.Ticket, ct).ConfigureAwait(false);
+                if (fallBack)
+                {
+                    await FallBackToWholeAsync(ticket, content, contentType, contentLength, progress, ct)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                offset = resumed;
+                Log.Information("附件分块上传中断，从 {Offset} 续传 Attempt={Attempt}/{Max}", offset, attempts, maxAttempts);
+                continue;
+            }
+
+            using (response)
+            {
+                var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    // 响应 received 是服务端权威已接收字节数，以此对齐下一块。
+                    offset = TryParseReceived(body) ?? (offset + chunkLength);
+                    progress?.Report(new AttachmentUploadProgress
+                    {
+                        AttachmentId = ticket.AttachmentId,
+                        BytesTransferred = offset,
+                        TotalBytes = contentLength
+                    });
+                    continue;
+                }
+
+                if (TryParseReceived(body) is { } authoritative && attempts < maxAttempts)
+                {
+                    // offset 错位（400 + received）：按权威值对齐后续传。
+                    offset = authoritative;
+                    continue;
+                }
+
+                if (IsRetryableStatus(response.StatusCode) && attempts < maxAttempts)
+                {
+                    var (fallBack, resumed) = await ResumeOffsetAsync(ticket.Ticket, ct).ConfigureAwait(false);
+                    if (fallBack)
+                    {
+                        await FallBackToWholeAsync(ticket, content, contentType, contentLength, progress, ct)
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
+                    offset = resumed;
+                    continue;
+                }
+
+                // 服务端不支持分块（无 received 的 4xx，如 S3 后端/旧版本）→ 回退整包。
+                Log.Information("附件分块上传不被接受 ({Status})，回退整包上传", (int)response.StatusCode);
+                await FallBackToWholeAsync(ticket, content, contentType, contentLength, progress, ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+    }
+
+    /// <summary>探针服务端权威偏移；端点不可用时请求整包回退。</summary>
+    private async Task<(bool FallBack, long Offset)> ResumeOffsetAsync(string ticket, CancellationToken ct)
+    {
+        var received = await ProbeReceivedAsync(ticket, ct).ConfigureAwait(false);
+        return received is null ? (true, 0) : (false, received.Value);
+    }
+
+    private async Task FallBackToWholeAsync(
+        AttachmentPresignResponse ticket,
+        Stream content,
+        string contentType,
+        long contentLength,
+        IProgress<AttachmentUploadProgress>? progress,
+        CancellationToken ct)
+    {
+        if (content.CanSeek)
+            content.Position = 0;
+        await UploadAsync(ticket, content, contentType, contentLength, progress, ct).ConfigureAwait(false);
+    }
+
+    private static HttpContent CreateChunkContent(
+        Stream content, long offset, long chunkLength, MediaTypeHeaderValue mediaType,
+        IProgress<AttachmentUploadProgress>? progress, string attachmentId, long totalBytes)
+    {
+        content.Position = offset;
+        var slice = new ProgressReadStream(
+            new OffsetSliceStream(content, chunkLength),
+            chunkLength,
+            bytes => progress?.Report(new AttachmentUploadProgress
+            {
+                AttachmentId = attachmentId,
+                BytesTransferred = offset + bytes,
+                TotalBytes = totalBytes
+            }));
+        var streamContent = new StreamContent(slice);
+        streamContent.Headers.ContentType = mediaType;
+        streamContent.Headers.ContentLength = chunkLength;
+        return streamContent;
+    }
+
+    /// <summary>
+    /// 进度探针：返回服务端权威已接收字节数；端点不可用（旧服务端）返回 null，调用方回退整包。
+    /// </summary>
+    private async Task<long?> ProbeReceivedAsync(string ticket, CancellationToken ct)
+    {
+        using var response = await _httpClient.GetAsync(
+                $"/api/attachments/upload/progress?ticket={Uri.EscapeDataString(ticket)}", ct)
+            .ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        return response.IsSuccessStatusCode ? TryParseReceived(body) : null;
+    }
+
+    private static string ResolveRelativeUploadPath(string uploadUrl)
+        => Uri.TryCreate(uploadUrl, UriKind.Absolute, out var absApi)
+            ? absApi.PathAndQuery
+            : uploadUrl;
+
+    private static string WithOffsetQuery(string uploadPath, long offset)
+        => uploadPath.Contains('?')
+            ? $"{uploadPath}&offset={offset}"
+            : $"{uploadPath}?offset={offset}";
+
+    private static long? TryParseReceived(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                   && doc.RootElement.TryGetProperty("received", out var received)
+                   && received.TryGetInt64(out var value)
+                ? value
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>是否为可重试的 HTTP 状态：408/429/5xx。</summary>
+    private static bool IsRetryableStatus(System.Net.HttpStatusCode statusCode)
+        => statusCode == System.Net.HttpStatusCode.RequestTimeout
+           || statusCode == System.Net.HttpStatusCode.TooManyRequests
+           || (int)statusCode >= 500;
 
     public async Task<ConfirmAttachmentResponse> ConfirmAsync(
         ConfirmAttachmentRequest request,
@@ -195,7 +417,7 @@ public sealed class AttachmentApiService : IAttachmentClientService
                 }
                 else
                 {
-                    await UploadAsync(ticket, content, contentType, contentLength, progress, ct)
+                    await UploadWithResumeAsync(ticket, content, contentType, contentLength, progress, maxAttempts, ct)
                         .ConfigureAwait(false);
                 }
 
@@ -421,6 +643,57 @@ public sealed class AttachmentApiService : IAttachmentClientService
 
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         throw new HttpRequestException($"{operation}失败 ({(int)response.StatusCode}): {body}");
+    }
+
+    /// <summary>只读切片流：从底层流当前位置最多读 <paramref name="length"/> 字节（一个分块）。</summary>
+    private sealed class OffsetSliceStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _length;
+        private long _remaining;
+
+        public OffsetSliceStream(Stream inner, long length)
+        {
+            _inner = inner;
+            _length = length;
+            _remaining = length;
+        }
+
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _length;
+        public override long Position
+        {
+            get => _length - _remaining;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var n = _inner.Read(buffer, offset, (int)Math.Min(count, _remaining));
+            _remaining -= n;
+            return n;
+        }
+
+        public override async Task<int> ReadAsync(
+            byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => await ReadAsync(buffer.AsMemory(offset, count), cancellationToken).ConfigureAwait(false);
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var n = await _inner.ReadAsync(buffer[..(int)Math.Min(buffer.Length, _remaining)], cancellationToken)
+                .ConfigureAwait(false);
+            _remaining -= n;
+            return n;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class ProgressReadStream : Stream
