@@ -280,6 +280,34 @@ public sealed class CallSessionStateMachineTests
     }
 
     [Fact]
+    public void RemoteSignal_GroupCallee_OtherMemberAcceptAnswer_NotWrittenToRemoteSdp()
+    {
+        // GROUP-CALL-SDP-1（accept 形态）回归：群组 Mesh 扇出中，其他成员 accept 携带的 answer
+        // 只与发起者（hub）相关——被叫的 RemoteSdp 不得被覆盖（否则接听时把别人的 answer
+        // 应用到自己的媒体面），但成员集合仍记录该成员加入。
+        var s = new CallSession("group-accept-1", CallRole.Callee, CallerId, CallStateDto.Ringing, 1);
+        Assert.True(s.TryPromoteToGroup(CallerId, new long[] { CallerId, CalleeId }));
+        s.ApplyRemoteSignal(Signal("inv", CallCommandTypeDto.Invite, callId: "group-accept-1", from: CallerId, sdp: "offer-for-self", revision: 1));
+
+        var acceptFromThird = Signal("acc-9003", CallCommandTypeDto.Accept, callId: "group-accept-1", from: 9003, sdp: "answer-from-9003", revision: 2);
+        Assert.True(s.ApplyRemoteSignal(acceptFromThird)); // 成员加入是可见变化
+
+        Assert.Equal("offer-for-self", s.RemoteSdp);
+        Assert.Contains((long)9003, s.Participants);
+    }
+
+    [Fact]
+    public void RemoteSignal_GroupHub_OtherMemberAcceptAnswer_Applied()
+    {
+        // 发起者（hub）侧：成员 accept 的 answer 与本端相关——仍写入 RemoteSdp（Direct 语义不变）。
+        var s = new CallSession("group-hub-1", CallRole.Caller, CallerId,
+            new long[] { CallerId, CalleeId, 9003 }, CallStateDto.Ringing, 1);
+        s.ApplyRemoteSignal(Signal("acc-b", CallCommandTypeDto.Accept, callId: "group-hub-1", from: CalleeId, sdp: "answer-from-b", revision: 2));
+
+        Assert.Equal("answer-from-b", s.RemoteSdp);
+    }
+
+    [Fact]
     public void ForceEnd_OnlyOnce_TerminalStaysPut()
     {
         var s = NewCalleeRinging();

@@ -287,8 +287,17 @@ public sealed class CallSession
             // 使后续命令 revision 严格大于服务端全局 revision（见 NextRevision）。
             _serverRevision = Math.Max(_serverRevision, signal.Revision);
 
-            if (!string.IsNullOrWhiteSpace(signal.Sdp))
+            // SDP 关联守卫（GROUP-CALL-SDP-1）：群组 Mesh 扇出中，Accept 携带的 answer 只与
+            // 发起者（hub）相关——被叫不得把其他成员的 answer 写入本会话 RemoteSdp，否则
+            // 接听时会把别人的 answer 应用到自己的媒体面（自身与 hub 的协商 SDP 被覆盖错乱）。
+            // Invite offer（目标过滤在管理器层）与 Reconnect 对所有接收端有效；Direct 1:1 不受影响。
+            if (!string.IsNullOrWhiteSpace(signal.Sdp)
+                && (signal.Kind != CallCommandTypeDto.Accept
+                    || !IsGroup
+                    || Role == CallRole.Caller))
+            {
                 RemoteSdp = signal.Sdp;
+            }
 
             changed = IsGroup
                 ? ApplyGroupSignalUnsafe(signal, ref pendingEvents)
