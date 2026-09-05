@@ -35,10 +35,10 @@
          0.5.6：TcpAttachmentRef.VoiceWaveformPeaks（byte[]?，0–255 归一化峰值包络，可空——缺省降级渲染）。
          0.5.7：群通话 Mesh 阶段一信令面（TcpCallGrant.CallKind/Participants + TcpCallSignal.Event/
          ParticipantUserId；Direct/1:1 载荷与 0.5.6 逐字节兼容）。 -->
-    <PackageVersion Include="ChatApp.Protocol.Tcp" Version="0.5.7" />
-    <PackageVersion Include="ChatApp.Binary.Core" Version="0.5.7" />
-    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary" Version="0.5.7" />
-    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary.Schemas" Version="0.5.7" />
+    <PackageVersion Include="ChatApp.Protocol.Tcp" Version="0.5.8" />
+    <PackageVersion Include="ChatApp.Binary.Core" Version="0.5.8" />
+    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary" Version="0.5.8" />
+    <PackageVersion Include="ChatApp.Protocol.Tcp.Binary.Schemas" Version="0.5.8" />
     <!-- 0.5.5：ENDPOINT-TLS-1 端点安全契约（EndpointDescriptor/EndpointPolicy + LoginResponse.Server 加性字段）。 -->
     <PackageVersion Include="ChatApp.Contracts.Http" Version="0.5.5" />
     <PackageVersion Include="NAudio" Version="2.2.1" />

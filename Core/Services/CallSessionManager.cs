@@ -187,6 +187,10 @@ public sealed class CallSessionManager : ICallSessionManager
     /// <summary>
     /// 群组成员命令上行（无状态中继路径）：不做本地状态迁移（房间状态由成员/revision 自洽），
     /// grant 原样携带；服务端响应推进权威 revision（回显状态与本地一致，不产生迁移）。
+    /// <para>
+    /// Invite 命令携带目标成员 Id（0.5.8 加性，GROUP-CALL-SDP-1）：无状态中继按名单广播、
+    /// 被叫按目标过滤——只有目标成员应用该 invite 的 offer/建会话，其余成员对当前会话无操作。
+    /// </para>
     /// </summary>
     private async Task<CallCommandResponseDto> SendGroupMemberCommandAsync(
         CallSession session,
@@ -200,18 +204,78 @@ public sealed class CallSessionManager : ICallSessionManager
             session.SetLocalSdp(sdp);
         var request = new CallCommandRequestDto
         {
-            CommandId = session.NextCommandId(),
+            CommandId = session.NextCommandId(_currentUser.RequireUserId()),
             CallId = session.CallId,
             Type = type,
             ActorUserId = _currentUser.RequireUserId(),
             Revision = session.NextRevision(),
             Grant = grant,
             Sdp = sdp,
+            // 逐成员 invite：目标成员 Id 随命令透传（中继转扇出信号，被叫按目标过滤）。
+            ParticipantUserId = type == CallCommandTypeDto.Invite ? memberUserId : null,
             ClientOccurredAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         };
         var response = await _client.SendCallCommandAsync(request, ct).ConfigureAwait(false);
         session.ApplyServerState(response);
         return response;
+    }
+
+    /// <summary>
+    /// 群组成员中途加入（GROUP-CALL-MIDJOIN-1）：发起者以<b>携带原 callId 重签</b>的群组 grant
+    /// （名单含新成员）向该成员发起逐成员 invite——同一通话持续、既有会话不中断。
+    /// <para>
+    /// 前置：本端为发起者、grant 为 CallKind=Group 且名单含被邀成员（即调用方已携带原 callId
+    /// 向 Server 重签）。效果：缓存换新 grant（后续成员命令携带新名单）、本地成员集合先行收敛、
+    /// 新成员走既有逐成员 invite/媒体协商链。invite 上行失败时拆除该成员媒体并回滚本地集合。
+    /// </para>
+    /// </summary>
+    public async Task InviteMemberAsync(
+        string callId,
+        long memberUserId,
+        CallGrantDto grant,
+        string? sdpOffer = null,
+        CancellationToken ct = default)
+    {
+        EnsureUsable();
+        ArgumentException.ThrowIfNullOrWhiteSpace(callId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(memberUserId);
+        ArgumentNullException.ThrowIfNull(grant);
+        if (!string.Equals(grant.CallId, callId, StringComparison.Ordinal))
+            throw new ArgumentException("grant 与通话 Id 不匹配。", nameof(grant));
+        if (grant.CallKind != TcpCallKind.Group)
+            throw new ArgumentException("群组中期加人需要 CallKind=Group 的 grant。", nameof(grant));
+
+        var session = RequireSession(callId);
+        if (!session.IsGroup || session.IsTerminal)
+            throw new InvalidOperationException("仅进行中的群组通话支持中期加人。");
+        var me = _currentUser.RequireUserId();
+        if (me != session.InitiatorUserId || grant.CallerUserId != me)
+            throw new InvalidOperationException("仅群组发起者可中期加人。");
+        if (memberUserId == me || session.Participants.Contains(memberUserId))
+            throw new InvalidOperationException("该成员已在通话中。");
+        if (grant.Participants?.Contains(memberUserId) != true)
+            throw new ArgumentException(
+                "grant 名单缺少被邀成员（须携带原 callId 重签并更新参与者名单）。", nameof(grant));
+
+        // 重签批次：缓存换新 grant（后续成员命令按新名单扇出），本地成员集合先行收敛。
+        _grants[callId] = grant;
+        if (!session.TryAddParticipant(memberUserId))
+            throw new InvalidOperationException("成员加入被拒绝（名单已满）。");
+
+        try
+        {
+            var media = EnsurePeerMedia(session, memberUserId);
+            var offer = sdpOffer ?? media?.CreateOffer();
+            await SendGroupMemberCommandAsync(
+                session, CallCommandTypeDto.Invite, memberUserId, offer, grant, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // fail-closed：邀请上行失败拆其媒体并回滚本地集合（成员集合随信令最终自洽）。
+            DestroyPeerMedia(callId, memberUserId);
+            session.TryRemoveParticipant(memberUserId);
+            throw;
+        }
     }
 
     public async Task AcceptAsync(string callId, string? sdpAnswer = null, CancellationToken ct = default)
@@ -325,7 +389,7 @@ public sealed class CallSessionManager : ICallSessionManager
 
         var request = new CallCommandRequestDto
         {
-            CommandId = session.NextCommandId(),
+            CommandId = session.NextCommandId(_currentUser.RequireUserId()),
             CallId = session.CallId,
             Type = type,
             ActorUserId = _currentUser.RequireUserId(),
@@ -359,6 +423,19 @@ public sealed class CallSessionManager : ICallSessionManager
         if (signal is null || string.IsNullOrWhiteSpace(signal.CallId))
             return;
 
+        // 群组逐成员 invite 的目标过滤（GROUP-CALL-SDP-1）：无状态中继把发给某成员的 invite
+        // 广播到全部成员，非目标成员不得建会话/应用 offer（否则 RemoteSdp 被最后送达者覆盖，
+        // 媒体面应用的是别人的 offer）。participant-joined 等带事件的信令不受此过滤影响；
+        // 目标缺省（null，0.5.7 广播形态）= 既有语义。
+        if (signal.Kind == CallCommandTypeDto.Invite
+            && string.IsNullOrWhiteSpace(signal.Event)
+            && signal.ParticipantUserId is { } inviteTarget
+            && _currentUser.TryGetUserId(out var selfUserId)
+            && inviteTarget != selfUserId)
+        {
+            return; // 发给其他成员的 invite：对当前会话无操作（仅忽略）。
+        }
+
         if (signal.Kind == CallCommandTypeDto.Invite
             && _currentUser.TryGetUserId(out var myId)
             && signal.FromUserId != myId)
@@ -373,6 +450,9 @@ public sealed class CallSessionManager : ICallSessionManager
                 if (!_sessions.TryAdd(signal.CallId, session))
                     return; // 并发竞争已由其他路径建立，忽略本次重复邀请。
                 CreateMedia(session);
+                // 群组 invite 随信令下发 grant（0.5.8，GROUP-CALL-GAP-1）：据此建立群组会话
+                // （成员集合 = 签发名单）并缓存 grant——被叫 accept/end 原样携带回中继。
+                PromoteFromGroupInvite(signal, session);
                 session.ApplyRemoteSignal(signal); // 记录对端 SDP（状态已由构造置 Ringing）。
                 IncomingCall?.Invoke(this, session);
                 StartRingingTimeout(session);
@@ -380,6 +460,7 @@ public sealed class CallSessionManager : ICallSessionManager
             }
 
             // 已存在会话：仅当信号幂等键未处理过且引发可见变化时才上报。
+            PromoteFromGroupInvite(signal, session!);
             var changed = session!.ApplyRemoteSignal(signal);
             if (changed)
                 OnSessionChanged(session);
@@ -406,6 +487,30 @@ public sealed class CallSessionManager : ICallSessionManager
             if (changed)
                 OnSessionChanged(existing);
         }
+    }
+
+    /// <summary>
+    /// 群组 invite 随信令下发的 grant 处理（0.5.8 加性，GROUP-CALL-GAP-1）：被叫侧建立群组会话
+    /// （成员集合 = grant 签发名单）并缓存 grant，使 accept/end 能原样携带授权回无状态中继。
+    /// 仅在信令携带群组 grant、来源为 grant 发起者且 callId 匹配时生效；Direct/既有形态零改动。
+    /// </summary>
+    private void PromoteFromGroupInvite(CallSignalDto signal, CallSession session)
+    {
+        var grant = signal.Grant;
+        if (grant is null
+            || grant.CallKind != TcpCallKind.Group
+            || grant.CallerUserId != signal.FromUserId
+            || !string.Equals(grant.CallId, signal.CallId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // 已群组（重复 invite 重传）仅刷新 grant 缓存；未晋升则按签发名单建立群组会话。
+        if (!session.IsGroup)
+        {
+            session.TryPromoteToGroup(grant.CallerUserId, grant.Participants ?? new[] { signal.FromUserId });
+        }
+        _grants[session.CallId] = grant;
     }
 
     /// <summary>该信令是否构成"群组存在"的证据：来自第三成员的 join 事件或非 invite 类成员信令。</summary>
@@ -483,9 +588,10 @@ public sealed class CallSessionManager : ICallSessionManager
     }
 
     /// <summary>
-    /// 发起者侧的成员中途加入编排：为该成员建立对端媒体实例并发起逐成员 invite
-    /// （offer 由该成员实例生成；成员变更 = 新 grant 批次 + revision 递增，grant 以当前缓存携带）。
-    /// 上行失败仅拆除该成员媒体，不影响在场成员（尽力而为，与房间无服务端状态的语义一致）。
+    /// 发起者侧的成员中途加入编排（participant-joined 事件路径）：为该成员建立对端媒体实例
+    /// 并发起逐成员 invite（offer 由该成员实例生成；invite 自动携带目标成员 Id，被叫按目标
+    /// 过滤——GROUP-CALL-SDP-1）。grant 以当前缓存携带；同 CallId 重签批次见
+    /// <see cref="InviteMemberAsync"/>。上行失败仅拆除该成员媒体，不影响在场成员。
     /// </summary>
     private async void EnsureMemberNegotiationAsync(CallSession session, long memberUserId)
     {

@@ -49,7 +49,7 @@ public sealed class GroupCallSessionE2ETests
 
         // 内存群组中继：任一端发出的 CallCommandRequest → 权威响应回发送方 + 按名单扇出 CallSignal。
         foreach (var (userId, tcp) in tcpByUser)
-            WireGroupRelay(userId, tcp, tcpByUser, serializer);
+            WireGroupRelay(userId, tcp, tcpByUser, serializer, Roster);
 
         using var clientA = new ChatSessionClient(tcpByUser[CallerUserId], new MessagePacketCodec(), serializer);
         using var clientB = new ChatSessionClient(tcpByUser[CalleeBUserId], new MessagePacketCodec(), serializer);
@@ -96,6 +96,11 @@ public sealed class GroupCallSessionE2ETests
         Assert.Equal(CallerUserId, sessionB.PeerUserId);
         Assert.Equal(CallStateDto.Ringing, sessionB.State);
         Assert.False(string.IsNullOrWhiteSpace(sessionB.RemoteSdp));
+
+        // GROUP-CALL-SDP-1 回归：逐成员 invite 广播到全部成员，但每个被叫只应用发给
+        // 自己的 offer（invite 信号携带目标成员 Id，非目标 invite 被过滤，不覆盖 RemoteSdp）。
+        Assert.Equal("offer-for-9002", sessionB.RemoteSdp);
+        Assert.Equal("offer-for-9003", sessionC.RemoteSdp);
 
         // ── 成员 B 接听 → B Active；主叫首个 accept 转 Active 并收口 B 的 answer ──
         await calleeBManager.AcceptAsync(CallId, sdpAnswer: mediaB.Answer);
@@ -160,7 +165,7 @@ public sealed class GroupCallSessionE2ETests
             SetupAutoAuth(tcp, serializer, id);
         }
         foreach (var (userId, tcp) in tcpByUser)
-            WireGroupRelay(userId, tcp, tcpByUser, serializer);
+            WireGroupRelay(userId, tcp, tcpByUser, serializer, Roster);
 
         using var clientA = new ChatSessionClient(tcpByUser[CallerUserId], new MessagePacketCodec(), serializer);
         using var clientB = new ChatSessionClient(tcpByUser[CalleeBUserId], new MessagePacketCodec(), serializer);
@@ -195,13 +200,165 @@ public sealed class GroupCallSessionE2ETests
         Assert.Empty(calleeCManager.ActiveCalls);
     }
 
+    [Fact]
+    public async Task MidJoin_FourthMember_SameCallIdResign_ExistingSessionsUninterrupted()
+    {
+        // GROUP-CALL-MIDJOIN-1 客户端回归：三方建会后第 4 人经"同 CallId 重签 + InviteMemberAsync"
+        // 中途加入——invite 携带目标成员（B/C 过滤），新成员经 invite 下发的 grant 直接 accept；
+        // 既有三方会话全程不中断（同一会话对象持续 Active，无新批次/房间迁移）。
+        const long MemberDUserId = 9004;
+        long[] fourRoster = [CallerUserId, CalleeBUserId, CalleeCUserId, MemberDUserId];
+
+        var serializer = new JsonPacketBodySerializer();
+        var tcpByUser = new Dictionary<long, ScriptedTcpClient>();
+        foreach (var id in fourRoster)
+        {
+            var tcp = new ScriptedTcpClient();
+            tcpByUser[id] = tcp;
+            SetupAutoAuth(tcp, serializer, id);
+        }
+        foreach (var (userId, tcp) in tcpByUser)
+            WireGroupRelay(userId, tcp, tcpByUser, serializer, fourRoster);
+
+        using var clientA = new ChatSessionClient(tcpByUser[CallerUserId], new MessagePacketCodec(), serializer);
+        using var clientB = new ChatSessionClient(tcpByUser[CalleeBUserId], new MessagePacketCodec(), serializer);
+        using var clientC = new ChatSessionClient(tcpByUser[CalleeCUserId], new MessagePacketCodec(), serializer);
+        using var clientD = new ChatSessionClient(tcpByUser[MemberDUserId], new MessagePacketCodec(), serializer);
+        await ConnectAndAuthenticateAsync(clientA, tcpByUser[CallerUserId], CallerUserId);
+        await ConnectAndAuthenticateAsync(clientB, tcpByUser[CalleeBUserId], CalleeBUserId);
+        await ConnectAndAuthenticateAsync(clientC, tcpByUser[CalleeCUserId], CalleeCUserId);
+        await ConnectAndAuthenticateAsync(clientD, tcpByUser[MemberDUserId], MemberDUserId);
+
+        using var callerManager = new CallSessionManager(clientA, new StubUserContext(CallerUserId));
+        using var calleeBManager = new CallSessionManager(clientB, new StubUserContext(CalleeBUserId));
+        using var calleeCManager = new CallSessionManager(clientC, new StubUserContext(CalleeCUserId));
+        using var calleeDManager = new CallSessionManager(clientD, new StubUserContext(MemberDUserId));
+
+        var callerMediaByPeer = new Dictionary<long, FakeMediaSession>();
+        callerManager.PeerMediaFactory = (_, peerUserId) =>
+        {
+            var media = new FakeMediaSession
+            {
+                Offer = $"offer-for-{peerUserId}",
+                Answer = $"caller-answer-{peerUserId}"
+            };
+            callerMediaByPeer[peerUserId] = media;
+            return media;
+        };
+        var mediaD = new FakeMediaSession { Answer = "answer-from-d" };
+        calleeDManager.MediaFactory = _ => mediaD;
+
+        var incomingTcsB = new TaskCompletionSource<CallSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var incomingTcsC = new TaskCompletionSource<CallSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var incomingTcsD = new TaskCompletionSource<CallSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+        calleeBManager.IncomingCall += (_, s) => incomingTcsB.TrySetResult(s);
+        calleeCManager.IncomingCall += (_, s) => incomingTcsC.TrySetResult(s);
+        calleeDManager.IncomingCall += (_, s) => incomingTcsD.TrySetResult(s);
+
+        // 发起者上行 invite / 新成员上行 End 命令记录（经真实 wire 帧观测）。
+        var callerInvites = new List<CallCommandRequestDto>();
+        var memberDEnds = new List<CallCommandRequestDto>();
+        tcpByUser[CallerUserId].OnFrameSent += (cmd, body) =>
+        {
+            if (cmd != PacketCommand.CallCommandRequest)
+                return;
+            var req = serializer.Deserialize<CallCommandRequestDto>(new ReadOnlySequence<byte>(body));
+            if (req is { Type: CallCommandTypeDto.Invite })
+                callerInvites.Add(req);
+        };
+        tcpByUser[MemberDUserId].OnFrameSent += (cmd, body) =>
+        {
+            if (cmd != PacketCommand.CallCommandRequest)
+                return;
+            var req = serializer.Deserialize<CallCommandRequestDto>(new ReadOnlySequence<byte>(body));
+            if (req is { Type: CallCommandTypeDto.End })
+                memberDEnds.Add(req);
+        };
+
+        // ── 三方建会（同 Full3PartyGroupFlow）──
+        var grant3 = NewGroupGrant();
+        var callerSession = await callerManager.StartGroupCallAsync(CallId, grant3);
+        var sessionB = await incomingTcsB.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var sessionC = await incomingTcsC.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await calleeBManager.AcceptAsync(CallId, sdpAnswer: "answer-from-b");
+        await WaitUntilAsync(() => callerSession.State == CallStateDto.Active);
+        await calleeCManager.AcceptAsync(CallId, sdpAnswer: "answer-from-c");
+        await WaitUntilAsync(() => callerMediaByPeer[CalleeCUserId].StartCalls == 1);
+        await WaitUntilAsync(() => sessionB.ParticipantCount == 3 && sessionC.ParticipantCount == 3);
+
+        var invitesBeforeMidJoin = callerInvites.Count;
+
+        // ── 中途加人：同 CallId 重签（名单+第 4 人）→ InviteMemberAsync ──
+        var grant4 = new CallGrantDto
+        {
+            CallId = CallId, // 同 CallId 重签：同一通话持续，不迁移房间
+            CallerUserId = CallerUserId,
+            CalleeUserId = 0,
+            ExpiresAtMs = 1_900_000_100_000L,
+            Nonce = "nonce-midjoin-4",
+            Signature = "sig-midjoin-4",
+            CallKind = TcpCallKind.Group,
+            Participants = fourRoster,
+        };
+        await callerManager.InviteMemberAsync(CallId, MemberDUserId, grant4);
+
+        // invite 命令携带目标成员与重签 grant（GROUP-CALL-SDP-1 / MIDJOIN-1）。
+        // 注：观测帧经真实 wire 序列化，grant 为解码副本——按字段断言同一批次。
+        var midJoinInvite = callerInvites.Last();
+        Assert.Equal(invitesBeforeMidJoin + 1, callerInvites.Count);
+        Assert.Equal(MemberDUserId, midJoinInvite.ParticipantUserId);
+        Assert.Equal(grant4.CallId, midJoinInvite.Grant!.CallId);
+        Assert.Equal(grant4.Nonce, midJoinInvite.Grant.Nonce);
+        Assert.Equal(grant4.Signature, midJoinInvite.Grant.Signature);
+        Assert.Equal(fourRoster, midJoinInvite.Grant.Participants);
+        // 命令 Id 角色段 = 发起者用户 Id（GROUP-CALL-CMDID-1）。
+        Assert.Contains(":u" + CallerUserId + ":c", midJoinInvite.CommandId, StringComparison.Ordinal);
+
+        // B/C 收到发给他人的 invite：不建会话、不污染成员集合（仍 3 人直到 D accept）。
+        Assert.Equal(3, sessionB.ParticipantCount);
+        Assert.Equal(3, sessionC.ParticipantCount);
+
+        // 新成员 D：收到目标为自己的 invite（携带 grant）→ 群组会话 + accept。
+        var sessionD = await incomingTcsD.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(sessionD.IsGroup);
+        Assert.Equal(fourRoster, sessionD.Participants);
+        Assert.Equal("offer-for-9004", sessionD.RemoteSdp);
+        await calleeDManager.AcceptAsync(CallId, sdpAnswer: mediaD.Answer);
+
+        // ── 四端收敛：成员集合四人；既有三方会话同一对象、全程 Active 不中断 ──
+        await WaitUntilAsync(() =>
+            callerSession.ParticipantCount == 4 && sessionB.ParticipantCount == 4
+            && sessionC.ParticipantCount == 4 && sessionD.ParticipantCount == 4);
+        Assert.Equal(fourRoster, callerSession.Participants);
+        Assert.Equal(fourRoster, sessionB.Participants);
+        Assert.Equal(fourRoster, sessionC.Participants);
+        Assert.False(callerSession.IsTerminal);
+        Assert.False(sessionB.IsTerminal);
+        Assert.False(sessionC.IsTerminal);
+        Assert.Equal(CallStateDto.Active, sessionB.State);
+        Assert.Equal(CallStateDto.Active, sessionC.State);
+        Assert.Equal(1, callerMediaByPeer[MemberDUserId].StartCalls);
+        Assert.Contains("answer-from-d", callerMediaByPeer[MemberDUserId].SetRemoteSdps);
+
+        // 中期加人后的成员命令携带重签 grant（缓存已换新批次；观测帧为解码副本，按字段断言）。
+        await calleeDManager.EndAsync(CallId);
+        var dEnd = memberDEnds.Last();
+        Assert.Equal(grant4.Nonce, dEnd.Grant!.Nonce);
+        Assert.Equal(grant4.Signature, dEnd.Grant.Signature);
+        await WaitUntilAsync(() =>
+            callerSession.ParticipantCount == 3 && sessionB.ParticipantCount == 3
+            && sessionC.ParticipantCount == 3 && sessionD.IsTerminal);
+        Assert.False(callerSession.IsTerminal, "新成员离开仅拆自身，既有三方继续");
+    }
+
     // ── 内存群组中继：CallCommandRequest → 权威响应回发送方 + 按名单扇出 CallSignal ──
 
     private static void WireGroupRelay(
         long selfUserId,
         ScriptedTcpClient selfTcp,
         IReadOnlyDictionary<long, ScriptedTcpClient> tcpByUser,
-        JsonPacketBodySerializer serializer)
+        JsonPacketBodySerializer serializer,
+        IReadOnlyList<long> roster)
     {
         selfTcp.OnFrameSent += (cmd, body) =>
         {
@@ -237,7 +394,9 @@ public sealed class GroupCallSessionE2ETests
             });
 
             // 2) 按名单扇出到其余成员（排除发起者）；成员 End 映射为 participant-left 事件。
-            foreach (var recipient in Roster)
+            //    0.5.8 真实语义：invite 信号携带目标成员 Id 与随信令下发的 grant（GROUP-CALL-SDP-1
+            //    / GAP-1），与 Gateway GroupCallSignalRelay 一致。
+            foreach (var recipient in roster)
             {
                 if (recipient == selfUserId || !tcpByUser.TryGetValue(recipient, out var recipientTcp))
                     continue;
@@ -254,7 +413,13 @@ public sealed class GroupCallSessionE2ETests
                     Revision = req.Revision,
                     OccurredAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     Event = isMemberLeave ? TcpCallSignalEvents.SignalEventParticipantLeft : null,
-                    ParticipantUserId = isMemberLeave ? selfUserId : null,
+                    ParticipantUserId = req.Type switch
+                    {
+                        CallCommandTypeDto.End => selfUserId,
+                        CallCommandTypeDto.Invite => req.ParticipantUserId,
+                        _ => null,
+                    },
+                    Grant = req.Type == CallCommandTypeDto.Invite ? req.Grant : null,
                 });
             }
         };

@@ -10,34 +10,34 @@
       },
       "ChatApp.Protocol.Tcp": {
         "type": "Direct",
-        "requested": "[0.5.7, )",
-        "resolved": "0.5.7",
-        "contentHash": "oSYZHNF3m0Jr4UIfuTm0tZMjOPZ5WWkjeFXkil9hFO9/vuZZeWZW9UQnXX3ZVU/u/juVQbLp3cCdd2/5807DFw=="
+        "requested": "[0.5.8, )",
+        "resolved": "0.5.8",
+        "contentHash": "UvlQEWespnuJxaRjKZuuKwBUd/N96zWI4qfLcrapUIrT7EiN61Ki1oST10/apnl1+sw834RlWqeN50d2I5YD6w=="
       },
       "ChatApp.Protocol.Tcp.Binary.Schemas": {
         "type": "Direct",
-        "requested": "[0.5.7, )",
-        "resolved": "0.5.7",
-        "contentHash": "B60xuko72ZAN7Uyk+WDt+L4U+VHZUgjGFfX5fh1baTYZphiqzA9+LWswVpofE2c34dmbFBYQiGmZHSZSQyE5qg==",
+        "requested": "[0.5.8, )",
+        "resolved": "0.5.8",
+        "contentHash": "OmwSCag4/9rSEebFbMyt7pNT+E5EV+OPd/6SGk4DvJ1I/FBzHbYQr3LEq+OxHKIa615LG3woXbsTuT+6D9yMzQ==",
         "dependencies": {
-          "ChatApp.Binary.Core": "0.5.7",
-          "ChatApp.Protocol.Tcp": "0.5.7",
-          "ChatApp.Protocol.Tcp.Binary": "0.5.7"
+          "ChatApp.Binary.Core": "0.5.8",
+          "ChatApp.Protocol.Tcp": "0.5.8",
+          "ChatApp.Protocol.Tcp.Binary": "0.5.8"
         }
       },
       "ChatApp.Binary.Core": {
         "type": "CentralTransitive",
-        "requested": "[0.5.7, )",
-        "resolved": "0.5.7",
-        "contentHash": "bXlYmVNXSbqt2u5PGMIDKw0MJ7gcyLpj0gMlty7vYTPw9rx3XAW/0F+bv7UdffSd/qkkfBPnir2+qcib/iDzyA=="
+        "requested": "[0.5.8, )",
+        "resolved": "0.5.8",
+        "contentHash": "+qtPrguI3qVrTh73hOg5tarFMe/hP3W0ZWF7UZ363b8FwQ/VTsVamO/IIYC4N1O6bgsWaU1B4BxRb0+JkK/POg=="
       },
       "ChatApp.Protocol.Tcp.Binary": {
         "type": "CentralTransitive",
-        "requested": "[0.5.7, )",
-        "resolved": "0.5.7",
-        "contentHash": "dLBGzL/XHySI6zPfLN/FWxr5FPOdz/MRlnC0wH8gxR9jVU+xfviXXFKz2fregb4pCaRM8T2vWToUBmnwfu2H1Q==",
+        "requested": "[0.5.8, )",
+        "resolved": "0.5.8",
+        "contentHash": "cf/RBeLAJIW7/sebWw7Yo5zJtfwyPzyCmHNr0TWfdiv2bBk+2MDZb+pBDfysxTT65HPaghbTEaEfT2LYZrjQvQ==",
         "dependencies": {
-          "ChatApp.Binary.Core": "0.5.7"
+          "ChatApp.Binary.Core": "0.5.8"
         }
       }
     }

@@ -52,6 +52,23 @@ public interface ICallSessionManager : IDisposable
         CancellationToken ct = default)
         => throw new NotSupportedException("当前会话管理器不支持群组通话。");
 
+    /// <summary>
+    /// 群组成员中途加入（GROUP-CALL-MIDJOIN-1）：以<b>携带原 callId 重签</b>的群组 grant
+    /// （名单含新成员）向该成员发起逐成员 invite——同一通话持续、既有会话不中断。
+    /// 调用方须先经 <c>ICallApiService.RequestGroupGrantAsync</c> 携带原 callId 重签。
+    /// </summary>
+    /// <param name="callId">进行中的通话 Id（须与 grant.CallId 一致）。</param>
+    /// <param name="memberUserId">被邀成员用户 Id。</param>
+    /// <param name="grant">携带原 callId 重签、名单含被邀成员的群组 grant。</param>
+    /// <param name="sdpOffer">显式 offer；缺省时由该成员媒体面生成。</param>
+    Task InviteMemberAsync(
+        string callId,
+        long memberUserId,
+        CallGrantDto grant,
+        string? sdpOffer = null,
+        CancellationToken ct = default)
+        => throw new NotSupportedException("当前会话管理器不支持群组通话。");
+
     /// <summary>被叫接听（携带 SDP answer，可缺省由媒体面生成）。</summary>
     Task AcceptAsync(string callId, string? sdpAnswer = null, CancellationToken ct = default);
 

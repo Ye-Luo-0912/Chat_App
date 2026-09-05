@@ -150,18 +150,22 @@ public sealed class CallSession
     public string? RemoteSdp { get; private set; }
 
     /// <summary>
-    /// 下一条本地命令幂等键（同一 call 内唯一、单调递增）。
-    /// 以本端角色作前缀，保证主叫/被叫两端的命令 id 不互相碰撞——否则被叫首条 Accept 的
-    /// <c>{CallId}:c1</c> 会与主叫 Invite 的 <c>{CallId}:c1</c> 相同，被 Realtime 误判为幂等重放
-    /// 而返回当前状态（Ringing）。角色在 1:1 通话内唯一标识参与方。
+    /// 下一条本地命令幂等键（同一 call 内唯一、单调递增，GROUP-CALL-CMDID-1）。
+    /// 角色段使用<b>本端用户 Id</b>唯一标识发送方：群组（Mesh）中被叫不止一个，仅按
+    /// Caller/Callee 角色作前缀会使全部被叫的同序号命令 Id 撞车——无状态中继的
+    /// <c>SignalId="{commandId}:{recipient}"</c> 随之重复，成员端按 signal id 幂等去重
+    /// 会把其他成员的同号命令扇出误丢（accept/End 均受影响，≥3 人时成员集合无法收敛）。
+    /// 用户 Id 在任意通话形态内唯一标识参与方，1:1 语义同样成立。
     /// </summary>
-    public string NextCommandId()
+    public string NextCommandId(long selfUserId)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(selfUserId);
         lock (_gate)
         {
             _commandSeq++;
-            var roleTag = Role == CallRole.Caller ? "A" : "B";
-            return $"{CallId}:{roleTag}:c{_commandSeq}";
+            return string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{CallId}:u{selfUserId}:c{_commandSeq}");
         }
     }
 

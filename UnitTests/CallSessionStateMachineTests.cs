@@ -14,6 +14,7 @@ using MessageHistoryPageDto = ChatApp.Shared.Protocol.Tcp.MessageHistoryResponse
 using SyncBootstrapResponseDto = ChatApp.Shared.Protocol.Tcp.SyncBootstrapResponse;
 using ConversationSyncWatermarkDto = ChatApp.Shared.Protocol.Tcp.ConversationSyncWatermark;
 using RelationshipSyncWatermarkDto = ChatApp.Shared.Protocol.Tcp.RelationshipSyncWatermark;
+using TcpCallKind = ChatApp.Shared.Protocol.Tcp.TcpCallKind;
 
 // 测试桩声明全部接口事件但从不触发属预期（CS0067）：仅实现接口成员以满足编译。
 #pragma warning disable CS0067
@@ -241,11 +242,41 @@ public sealed class CallSessionStateMachineTests
     public void CommandId_And_Revision_Monotonic()
     {
         var s = NewCaller();
-        var ids = new[] { s.NextCommandId(), s.NextCommandId(), s.NextCommandId() };
+        var ids = new[] { s.NextCommandId(CallerId), s.NextCommandId(CallerId), s.NextCommandId(CallerId) };
         Assert.Equal(3, new HashSet<string>(ids, StringComparer.Ordinal).Count);
         Assert.Equal(1, s.NextRevision());
         Assert.Equal(2, s.NextRevision());
         Assert.Equal(3, s.NextRevision());
+    }
+
+    [Fact]
+    public void CommandId_RoleSegmentIsUserId_GroupCalleesNeverCollide()
+    {
+        // GROUP-CALL-CMDID-1 回归：多被叫群组中，各被叫会话的同序号命令 Id 不得撞车
+        // （角色段 = 本端用户 Id；旧 "A"/"B" 角色段使全部被叫同为 "B:{callId}:c1"）。
+        const string callId = "group-cmdid-1";
+        var caller = new CallSession(callId, CallRole.Caller, 9001);
+        var calleeB = new CallSession(callId, CallRole.Callee, 9001, CallStateDto.Ringing);
+        var calleeC = new CallSession(callId, CallRole.Callee, 9001, CallStateDto.Ringing);
+        var calleeD = new CallSession(callId, CallRole.Callee, 9001, CallStateDto.Ringing);
+
+        var callerIds = new[] { caller.NextCommandId(9001), caller.NextCommandId(9001) };
+        var calleeBIds = new[] { calleeB.NextCommandId(9002), calleeB.NextCommandId(9002) };
+        var calleeCIds = new[] { calleeC.NextCommandId(9003), calleeC.NextCommandId(9003) };
+        var calleeDIds = new[] { calleeD.NextCommandId(9004), calleeD.NextCommandId(9004) };
+
+        var all = callerIds.Concat(calleeBIds).Concat(calleeCIds).Concat(calleeDIds).ToArray();
+        Assert.Equal(all.Length, new HashSet<string>(all, StringComparer.Ordinal).Count);
+        Assert.Contains(":u9002:c1", calleeBIds[0], StringComparison.Ordinal);
+        Assert.Contains(":u9003:c1", calleeCIds[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CommandId_NonPositiveUserId_Throws()
+    {
+        var s = NewCaller();
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.NextCommandId(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => s.NextCommandId(-1));
     }
 
     [Fact]
@@ -366,6 +397,83 @@ public sealed class CallSessionStateMachineTests
 
         Assert.Equal(1, incomingCount);
         Assert.Single(manager.ActiveCalls);
+    }
+
+    [Fact]
+    public async Task IncomingInvite_TargetedAtOtherMember_IsIgnoredEntirely()
+    {
+        // GROUP-CALL-SDP-1 回归：逐成员 invite 经中继广播到全部成员——发给其他成员的
+        // invite（ParticipantUserId=9999）不得建会话、不得污染 RemoteSdp。
+        var ctx = new FakeUserContext { UserId = CalleeId };
+        using var client = new FakeCallClient();
+        using var manager = CreateManager(client, ctx, new ManualDelay());
+        CallSession? incoming = null;
+        manager.IncomingCall += (_, s) => incoming = s;
+
+        client.RaiseCallSignal(Signal(
+            "inv-other", CallCommandTypeDto.Invite,
+            callId: "call-1", from: CallerId, to: CalleeId,
+            sdp: "offer-for-other-member", revision: 1,
+            participantUserId: 9999));
+
+        Assert.Null(incoming);
+        Assert.Empty(manager.ActiveCalls);
+        Assert.Null(manager.GetCall("call-1"));
+
+        // 同一会话已存在（本端为目标）时：发给他人的 invite 也不得覆盖既有会话状态。
+        client.RaiseCallSignal(Signal("inv-mine", CallCommandTypeDto.Invite, from: CallerId, to: CalleeId, sdp: "offer-1", revision: 1));
+        client.RaiseCallSignal(Signal(
+            "inv-other-2", CallCommandTypeDto.Invite,
+            callId: "call-1", from: CallerId, to: CalleeId,
+            sdp: "offer-for-other-member", revision: 1,
+            participantUserId: 9999));
+
+        Assert.NotNull(incoming);
+        Assert.Equal("offer-1", incoming!.RemoteSdp);
+    }
+
+    [Fact]
+    public async Task IncomingGroupInvite_WithGrant_PromotesSession_CachesGrant_AcceptCarriesGrant()
+    {
+        // GROUP-CALL-GAP-1 / MIDJOIN-1 回归：群组 invite 随信令下发 grant——被叫据此
+        // 建立群组会话（成员集合=签发名单）并缓存 grant，accept 原样携带回中继
+        // （harness 的 grant 播种桥接在真实语义下不再需要）。
+        var ctx = new FakeUserContext { UserId = CalleeId };
+        using var client = new FakeCallClient();
+        using var manager = CreateManager(client, ctx, new ManualDelay());
+        CallSession? incoming = null;
+        manager.IncomingCall += (_, s) => incoming = s;
+
+        var groupGrant = new CallGrantDto
+        {
+            CallId = "group-invite-1",
+            CallerUserId = CallerId,
+            CalleeUserId = 0,
+            ExpiresAtMs = 1_900_000_000_000L,
+            Nonce = "nonce-g",
+            Signature = "sig-g",
+            CallKind = TcpCallKind.Group,
+            Participants = [CallerId, CalleeId, 9003],
+        };
+        client.RaiseCallSignal(Signal(
+            "inv-group-1", CallCommandTypeDto.Invite,
+            callId: groupGrant.CallId, from: CallerId, to: CalleeId,
+            sdp: "offer-for-callee", revision: 1,
+            participantUserId: CalleeId,
+            grant: groupGrant));
+
+        Assert.NotNull(incoming);
+        Assert.True(incoming!.IsGroup);
+        Assert.Equal(new long[] { CallerId, CalleeId, 9003 }, incoming.Participants);
+        Assert.Equal("offer-for-callee", incoming.RemoteSdp);
+
+        await manager.AcceptAsync(groupGrant.CallId, sdpAnswer: "answer-1");
+
+        var accept = Assert.Single(client.Sent);
+        Assert.Equal(CallCommandTypeDto.Accept, accept.Type);
+        Assert.Same(groupGrant, accept.Grant);
+        // 命令 Id 角色段 = 本端用户 Id（GROUP-CALL-CMDID-1）。
+        Assert.Contains(":u" + CalleeId + ":c1", accept.CommandId, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -565,7 +673,10 @@ public sealed class CallSessionStateMachineTests
         long from = 0,
         long to = 0,
         string? sdp = null,
-        long revision = 0)
+        long revision = 0,
+        string? @event = null,
+        long? participantUserId = null,
+        CallGrantDto? grant = null)
         => new()
         {
             SignalId = id,
@@ -574,7 +685,10 @@ public sealed class CallSessionStateMachineTests
             ToUserId = to,
             Kind = kind,
             Sdp = sdp ?? string.Empty,
-            Revision = revision
+            Revision = revision,
+            Event = @event,
+            ParticipantUserId = participantUserId,
+            Grant = grant
         };
 
     private static CallCommandResponseDto Resp(CallSession s, CallStateDto state, CallEndReasonDto reason = CallEndReasonDto.None, long revision = 1)
