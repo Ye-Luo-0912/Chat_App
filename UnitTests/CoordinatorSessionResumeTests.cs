@@ -50,7 +50,9 @@ public class CoordinatorSessionResumeTests
         await coordinator.ConnectAsync();
 
         // Resume 成功：只发 ClientHello，不再发 AuthenticationRequest。
-        Assert.Equal([PacketCommand.ClientHello], gateway.SentCommands);
+        Assert.Equal(
+            [PacketCommand.ClientHello, PacketCommand.RegisterPushTokenRequest],
+            gateway.SentCommands);
         Assert.True(session.IsAuthenticated);
         Assert.Equal(ChatConnectionStatus.Connected, coordinator.Status);
         Assert.Equal("session-1", userState.SessionId);
