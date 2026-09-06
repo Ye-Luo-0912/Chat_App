@@ -281,6 +281,7 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
     {
         _attempt = 0;
         Status = ChatConnectionStatus.Connected;
+        RegisterPushTokenInBackground(userId);
         // 原子设置完整鉴权会话：同一账户重连不递增账户代际，仅记录连接代际。
         _currentUserState.SetAuthenticatedSession(
             userId, _currentUserState.UserName, _pendingSessionId, _pendingDeviceIdHash,
@@ -289,6 +290,39 @@ public sealed class ChatConnectionCoordinator : IChatConnectionCoordinator, IDis
         StartHeartbeat();
         Dispatcher.UIThread.Post(() =>
             _notificationService.ShowSuccess("服务器连接成功，聊天功能已就绪"));
+    }
+
+    /// <summary>
+    /// 鉴权成功后自动注册推送令牌（fire-and-forget）。
+    /// 使用设备派生的确定性 token（WebPush 平台），服务端据此路由离线推送。
+    /// 失败不影响连接——推送为增值能力，下次鉴权自动重试。
+    /// </summary>
+    private void RegisterPushTokenInBackground(long userId)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // 设备派生确定性 token：SHA256(machineName + userId) 前 64 字符。
+                var machine = Environment.MachineName;
+                var raw = $"{machine}:{userId}";
+                var bytes = System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(raw));
+                var token = Convert.ToHexString(bytes).ToLowerInvariant();
+
+                var request = new RegisterPushTokenRequestDto
+                {
+                    Platform = PushPlatformDto.WebPush,
+                    Token = token
+                };
+                await _chatSessionClient.RegisterPushTokenAsync(request).ConfigureAwait(false);
+                Log.Information("Push token 已注册 UserId={UserId}", userId);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Push token 注册失败（不影响连接）UserId={UserId}", userId);
+            }
+        });
     }
 
     private void OnAuthenticationFailed(object? sender, string errorMessage)
